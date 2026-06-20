@@ -1,4 +1,4 @@
-name: AWorld docs deploy
+name: Exo docs deploy
 
 on:
   push:

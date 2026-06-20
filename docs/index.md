@@ -2,7 +2,7 @@
 
 **A modern, modular multi-agent framework for building LLM-powered applications in Python.**
 
-Exo is the next-generation rewrite of [AWorld](https://github.com/inclusionAI/AWorld), designed around composability, type safety, and a clean async-first API.
+Exo is a modern multi-agent framework designed around composability, type safety, and a clean async-first API.
 
 ## Install
 

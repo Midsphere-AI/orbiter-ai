@@ -78,7 +78,7 @@ If you want to contribute to Exo or work with the full monorepo:
 
 ```bash
 # Clone the repository
-git clone https://github.com/inclusionAI/AWorld && cd AWorld
+git clone https://github.com/midsphere-ai/exo && cd exo
 
 # Install UV if you don't have it
 curl -LsSf https://astral.sh/uv/install.sh | sh

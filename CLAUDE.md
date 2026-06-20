@@ -72,7 +72,7 @@ exo-harness, exo-skills, exo-mcp-cli
 exo (meta-package, re-exports everything)
 ```
 
-Alongside each `exo-*` package, a corresponding `orbiter-*` re-export package exists (e.g., `packages/orbiter-core/`) for the public `orbiter` distribution. These are thin wrappers — always edit the `exo-*` source, never the `orbiter-*` mirrors.
+There are no `orbiter-*` mirror packages present in `packages/` at this time. (They were planned as thin re-export wrappers for a public `orbiter` distribution but have not been created yet — do not assume they exist.)
 
 ### Key Packages
 

@@ -1,8 +1,8 @@
 site_name: Exo
 site_description: A modern, modular multi-agent framework for building LLM-powered applications
-site_url: https://inclusionai.github.io/AWorld/
-repo_url: https://github.com/inclusionAI/AWorld
-repo_name: inclusionAI/AWorld
+site_url: https://midsphere-ai.github.io/exo/
+repo_url: https://github.com/midsphere-ai/exo
+repo_name: midsphere-ai/exo
 edit_uri: edit/main/docs/
 
 theme:
