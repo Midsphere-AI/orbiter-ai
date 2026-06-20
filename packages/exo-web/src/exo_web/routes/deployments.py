@@ -546,7 +546,7 @@ async def _run_agent_deployment(deployment: dict[str, Any], body: DeployedRunReq
         async def _sse_generator() -> Any:
             try:
                 async for chunk in service.stream_agent(deployment["entity_id"], messages):
-                    data = json.dumps({"type": "token", "content": chunk.content or ""})
+                    data = json.dumps({"type": "token", "content": chunk.delta})
                     yield f"data: {data}\n\n"
                 yield f"data: {json.dumps({'type': 'done'})}\n\n"
             except AgentRuntimeError as exc:
