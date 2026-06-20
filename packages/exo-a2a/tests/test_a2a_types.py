@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from exo.a2a.types import (  # pyright: ignore[reportMissingImports]
+    A2ATaskStatus,
     AgentCapabilities,
     AgentCard,
     AgentSkill,
@@ -10,7 +11,6 @@ from exo.a2a.types import (  # pyright: ignore[reportMissingImports]
     ServingConfig,
     TaskArtifactUpdateEvent,
     TaskState,
-    TaskStatus,
     TaskStatusUpdateEvent,
     TransportMode,
 )
@@ -273,22 +273,22 @@ class TestClientConfig:
 
 
 # ---------------------------------------------------------------------------
-# TaskStatus
+# A2ATaskStatus
 # ---------------------------------------------------------------------------
 
 
-class TestTaskStatus:
+class TestA2ATaskStatus:
     def test_creation(self) -> None:
-        status = TaskStatus(state=TaskState.WORKING)
+        status = A2ATaskStatus(state=TaskState.WORKING)
         assert status.state == TaskState.WORKING
         assert status.reason == ""
 
     def test_with_reason(self) -> None:
-        status = TaskStatus(state=TaskState.FAILED, reason="timeout")
+        status = A2ATaskStatus(state=TaskState.FAILED, reason="timeout")
         assert status.reason == "timeout"
 
     def test_frozen(self) -> None:
-        status = TaskStatus(state=TaskState.COMPLETED)
+        status = A2ATaskStatus(state=TaskState.COMPLETED)
         try:
             status.state = TaskState.FAILED  # type: ignore[misc]
             raise AssertionError("should be frozen")
@@ -305,7 +305,7 @@ class TestTaskStatusUpdateEvent:
     def test_creation(self) -> None:
         evt = TaskStatusUpdateEvent(
             task_id="t1",
-            status=TaskStatus(state=TaskState.WORKING),
+            status=A2ATaskStatus(state=TaskState.WORKING),
         )
         assert evt.task_id == "t1"
         assert evt.status.state == TaskState.WORKING
@@ -313,7 +313,7 @@ class TestTaskStatusUpdateEvent:
     def test_failed_event(self) -> None:
         evt = TaskStatusUpdateEvent(
             task_id="t2",
-            status=TaskStatus(state=TaskState.FAILED, reason="error"),
+            status=A2ATaskStatus(state=TaskState.FAILED, reason="error"),
         )
         assert evt.status.state == TaskState.FAILED
         assert evt.status.reason == "error"
@@ -321,7 +321,7 @@ class TestTaskStatusUpdateEvent:
     def test_serialization(self) -> None:
         evt = TaskStatusUpdateEvent(
             task_id="t3",
-            status=TaskStatus(state=TaskState.COMPLETED),
+            status=A2ATaskStatus(state=TaskState.COMPLETED),
         )
         data = evt.model_dump()
         assert data["task_id"] == "t3"

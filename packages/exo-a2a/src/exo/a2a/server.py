@@ -20,9 +20,6 @@ from exo.types import ExoError  # pyright: ignore[reportMissingImports]
 
 logger = logging.getLogger(__name__)
 
-# Convenience alias used throughout this module.
-TaskStatus = A2ATaskStatus
-
 
 class A2AServerError(ExoError):
     """Raised for A2A server-level errors."""
@@ -200,7 +197,7 @@ class A2AServer:
             logger.info("A2A run start: task_id=%s agent=%s", task_id, server._executor.agent_name)
 
             # Save initial task state
-            status = TaskStatus(state=TaskState.SUBMITTED)
+            status = A2ATaskStatus(state=TaskState.SUBMITTED)
             await server._task_store.save(
                 task_id,
                 {
@@ -213,7 +210,7 @@ class A2AServer:
             # Update to working
             working = TaskStatusUpdateEvent(
                 task_id=task_id,
-                status=TaskStatus(state=TaskState.WORKING),
+                status=A2ATaskStatus(state=TaskState.WORKING),
             )
             await server._task_store.save(
                 task_id,
@@ -228,7 +225,7 @@ class A2AServer:
                 result = await server._executor.execute(text, provider=server._provider)
 
                 # Save completed state
-                completed_status = TaskStatus(state=TaskState.COMPLETED)
+                completed_status = A2ATaskStatus(state=TaskState.COMPLETED)
                 artifact = TaskArtifactUpdateEvent(task_id=task_id, text=result, last_chunk=True)
                 await server._task_store.save(
                     task_id,
@@ -258,7 +255,7 @@ class A2AServer:
                     exc,
                     exc_info=True,
                 )
-                failed_status = TaskStatus(state=TaskState.FAILED, reason=str(exc))
+                failed_status = A2ATaskStatus(state=TaskState.FAILED, reason=str(exc))
                 await server._task_store.save(
                     task_id,
                     {
@@ -303,7 +300,7 @@ class A2AServer:
                         json.dumps(
                             TaskStatusUpdateEvent(
                                 task_id=task_id,
-                                status=TaskStatus(state=TaskState.WORKING),
+                                status=A2ATaskStatus(state=TaskState.WORKING),
                             ).model_dump()
                         )
                         + "\n"
@@ -328,7 +325,7 @@ class A2AServer:
                             json.dumps(
                                 TaskStatusUpdateEvent(
                                     task_id=task_id,
-                                    status=TaskStatus(state=TaskState.COMPLETED),
+                                    status=A2ATaskStatus(state=TaskState.COMPLETED),
                                 ).model_dump()
                             )
                             + "\n"
@@ -345,7 +342,7 @@ class A2AServer:
                             json.dumps(
                                 TaskStatusUpdateEvent(
                                     task_id=task_id,
-                                    status=TaskStatus(state=TaskState.FAILED, reason=str(exc)),
+                                    status=A2ATaskStatus(state=TaskState.FAILED, reason=str(exc)),
                                 ).model_dump()
                             )
                             + "\n"

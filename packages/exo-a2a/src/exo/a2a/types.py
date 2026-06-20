@@ -173,21 +173,12 @@ class ClientConfig(BaseModel):
 
 
 class A2ATaskStatus(BaseModel):
-    """Current status of a remote A2A task.
-
-    Named ``A2ATaskStatus`` to avoid collision with ``TaskStatus`` in other
-    packages (e.g. ``exo-web``).  Exported from this package as both
-    ``A2ATaskStatus`` (canonical) and ``TaskStatus`` (back-compat alias).
-    """
+    """Current status of a remote A2A task."""
 
     model_config = {"frozen": True}
 
     state: TaskState = Field(description="Task lifecycle state")
     reason: str = Field(default="", description="Reason / error message")
-
-
-# Back-compat alias so existing code using ``TaskStatus`` continues to work.
-TaskStatus = A2ATaskStatus
 
 
 class TaskStatusUpdateEvent(BaseModel):

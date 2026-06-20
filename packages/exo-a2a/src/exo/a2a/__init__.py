@@ -22,7 +22,6 @@ from exo.a2a.types import (  # pyright: ignore[reportMissingImports]
     ServingConfig,
     TaskArtifactUpdateEvent,
     TaskState,
-    TaskStatus,
     TaskStatusUpdateEvent,
     TransportMode,
 )
@@ -46,7 +45,6 @@ __all__: list[str] = [
     "ServingConfig",
     "TaskArtifactUpdateEvent",
     "TaskState",
-    "TaskStatus",
     "TaskStatusUpdateEvent",
     "TaskStore",
     "TransportMode",
