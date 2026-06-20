@@ -1,39 +1,65 @@
 # exo-a2a
 
-Agent-to-Agent (A2A) protocol for the [Exo](../../README.md) multi-agent framework. Enable agents to communicate and delegate tasks across process and network boundaries.
+> Agent-to-Agent protocol for inter-agent communication.
+
+`exo-a2a` lets Exo agents talk to each other over HTTP using a standard discovery and task protocol. Serve any Exo agent as a self-describing A2A endpoint, then call it from another process — or another machine — using `RemoteAgent`, which presents the same `run()` interface as a local agent. It sits at the inter-process boundary of the Exo stack, enabling multi-process and cross-service agent graphs.
 
 ## Installation
 
 ```bash
 pip install exo-a2a
+# or
+uv add exo-a2a
 ```
 
-Requires Python 3.11+, `exo-core`, and `httpx>=0.27`.
+## Quick start
 
-## What's Included
-
-- **A2A Server** -- expose agents as HTTP endpoints with standardized request/response schemas.
-- **A2A Client** -- connect to remote agents and invoke them as if they were local.
-- **RemoteAgent** -- wrapper that makes a remote agent behave like a local `Agent` for seamless integration into swarms.
-- **Agent discovery** -- registry-based agent lookup for dynamic routing.
-
-## Quick Example
+### Serve an agent
 
 ```python
-# Server side
-from exo.a2a import A2AServer
+import uvicorn
+from exo import Agent
+from exo.a2a import A2AServer, AgentExecutor, ServingConfig
 
-server = A2AServer(agents=[my_agent])
-server.run(port=8080)
+agent = Agent(name="summarizer", model="openai:gpt-4o-mini",
+              instructions="Summarize the user's input in one sentence.")
 
-# Client side
-from exo.a2a import RemoteAgent
+server = A2AServer(
+    AgentExecutor(agent),
+    ServingConfig(host="0.0.0.0", port=8080),
+)
+app = server.build_app()
 
-remote = RemoteAgent(url="http://localhost:8080", name="remote-agent")
-result = await run(remote, "Hello from the client!")
+uvicorn.run(app, host="0.0.0.0", port=8080)
 ```
 
-## Documentation
+### Call it remotely
 
-- [A2A Guide](../../docs/guides/a2a.md)
-- [API Reference](../../docs/reference/a2a/)
+```python
+from exo.a2a import RemoteAgent
+
+remote = RemoteAgent(
+    name="summarizer",
+    agent_card="http://localhost:8080/.well-known/agent-card",
+)
+
+result = await remote.run("Exo is a modular multi-agent framework for Python.")
+print(result.text)
+```
+
+## What's inside
+
+- **`A2AServer`** — FastAPI app that exposes `POST /` (task execution), `GET /.well-known/agent-card` (discovery), and an optional `POST /stream` endpoint
+- **`AgentExecutor`** — wraps any Exo `Agent` for A2A task execution
+- **`RemoteAgent`** — agent-compatible wrapper that calls a remote A2A server; drop-in replacement for local agents in swarms or harnesses
+- **`A2AClient`** — low-level async HTTP client with `send_task()` and `send_task_streaming()`
+- **`AgentCard`** / **`AgentCapabilities`** / **`AgentSkill`** — Pydantic models for agent discovery metadata
+- **`TaskState`** / **`TaskStatus`** / **`TaskStatusUpdateEvent`** / **`TaskArtifactUpdateEvent`** — task lifecycle types for status tracking and streaming
+
+## Part of [Exo](https://github.com/midsphere-ai/exo)
+
+Get the full framework with `pip install exo-ai`.
+
+---
+
+MIT © Midsphere AI

@@ -1,57 +1,61 @@
 # exo-memory
 
-Memory system for the [Exo](../../README.md) multi-agent framework. Typed short/long-term memory with multiple storage backends.
+> Pluggable memory backends for short-term conversation context and long-term knowledge extraction.
+
+`exo-memory` gives Exo agents a structured place to store, retrieve, and evolve what they know. It covers the full range from ephemeral in-process conversation buffers to durable Postgres stores with vector search, and it ships the extraction pipeline that turns raw LLM exchanges into searchable long-term memories.
 
 ## Installation
 
 ```bash
 pip install exo-memory
+# or
+uv add exo-memory
 
-# With optional backends
-pip install exo-memory[sqlite]     # SQLite backend
-pip install exo-memory[postgres]   # PostgreSQL backend
+# Optional storage backends
+pip install exo-memory[sqlite]     # SQLite persistence
+pip install exo-memory[postgres]   # PostgreSQL + pgvector
 pip install exo-memory[vector]     # ChromaDB vector search
 ```
 
-Requires Python 3.11+ and `exo-core`.
-
-## What's Included
-
-- **MemoryItem** -- typed base class with subtypes: `SystemMemory`, `HumanMemory`, `AIMemory`, `ToolMemory`, `SnapshotMemory`.
-- **ShortTermMemory** -- conversation-scoped memory with scope-based filtering and round limiting.
-- **LongTermMemory** -- persistent memory with LLM-based extraction via `MemoryOrchestrator`.
-- **Summary** -- configurable trigger + multi-template summary generation.
-- **MemoryPersistence** -- hook-based auto-persistence. Attach to an agent to automatically save LLM responses (`AIMemory`) and tool results (`ToolMemory`) during `run()` or `run.stream()`. Also handles context snapshot save/load when `enable_snapshots=True`.
-- **Context Snapshots** -- `SnapshotMemory` persists the processed message list at end of each run. `serialize_msg_list()` / `deserialize_msg_list()` handle serialization. `has_message_content()` utility for idempotent hook injection.
-- **Backends** -- in-memory (default), SQLite, PostgreSQL, and ChromaDB vector storage.
-
-## Quick Example
+## Quick start
 
 ```python
+import asyncio
 from exo.memory import (
-    HumanMemory, AIMemory, ShortTermMemory, MemoryMetadata,
+    ShortTermMemory,
+    HumanMemory,
+    AIMemory,
+    MemoryMetadata,
 )
 
-stm = ShortTermMemory(scope="session")
+async def main() -> None:
+    stm = ShortTermMemory(scope="session", max_rounds=20)
 
-stm.add(HumanMemory(
-    content="What is Python?",
-    metadata=MemoryMetadata(session_id="s-1"),
-))
+    meta = MemoryMetadata(session_id="s-1", user_id="u-1")
 
-stm.add(AIMemory(
-    content="Python is a programming language.",
-    tool_calls=[],
-))
+    await stm.add(HumanMemory(content="What is Python?", metadata=meta))
+    await stm.add(AIMemory(content="A high-level programming language.", metadata=meta))
 
-messages = stm.get_messages(
-    metadata=MemoryMetadata(session_id="s-1"),
-    max_rounds=10,
-)
+    results = await stm.search(query="Python", metadata=meta, limit=5)
+    for item in results:
+        print(item.memory_type, item.content)
+
+asyncio.run(main())
 ```
 
-## Documentation
+## What's inside
 
-- [Memory Guide](../../docs/guides/memory.md)
-- [Memory Backends Guide](../../docs/guides/memory-backends.md)
-- [API Reference](../../docs/reference/memory/)
+- **`ShortTermMemory`** — in-process conversation store with scope-based filtering (`"user"`, `"session"`, `"task"`), configurable round windowing, and tool-call integrity enforcement
+- **`LongTermMemory`** / **`MemoryOrchestrator`** — persistent memory layer with LLM-based extraction; `OrchestratorConfig` controls extraction intervals and strategies
+- **`MemoryStore`** — `Protocol` that all backends implement; swap backends without changing agent code (`SQLiteMemoryStore`, `PostgresMemoryStore`, `VectorMemoryStore`)
+- **`MemoryItem`** — typed item hierarchy: `HumanMemory`, `AIMemory`, `ToolMemory`, `SystemMemory`, `SnapshotMemory`; each carries `MemoryMetadata` for scoping
+- **`EncryptedMemoryStore`** — transparent AES-GCM encryption wrapper for any `MemoryStore`
+- **`MemoryEvolutionStrategy`** — base class for evolution algorithms; built-in strategies include `ACEStrategy`, `ReMeStrategy`, and `ReasoningBankStrategy`
+
+## Part of [Exo](https://github.com/midsphere-ai/exo)
+
+`exo-memory` plugs into the agent runtime via hooks and `MemoryPersistence`. Get the full framework with `pip install exo-ai`.
+
+---
+
+MIT © Midsphere AI

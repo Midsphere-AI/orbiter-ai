@@ -1,90 +1,61 @@
 # exo-context
 
-Context engine for the [Exo](../../README.md) multi-agent framework. Provides hierarchical state management, composable prompt building via neurons, event-driven processors, and workspace with artifact versioning.
+> Context engine for Exo agents: hierarchical state, composable prompt building, event-driven processors, and versioned workspace storage.
+
+exo-context manages everything that surrounds an LLM call. It provides a `Context` object with fork/merge semantics for nested tasks, a `Neuron`-based prompt assembly pipeline, event-driven `ContextProcessor` hooks that fire before and after LLM calls, and a `Workspace` for persisting artifacts to disk. It sits directly above exo-core in the dependency graph; exo-memory, exo-retrieval, and the agent harness all build on it.
 
 ## Installation
 
 ```bash
 pip install exo-context
+# or
+uv add exo-context
 ```
 
-Requires Python 3.11+ and `exo-core`.
-
-## Quick Start
+## Quick start
 
 ```python
-from exo import Agent
-
-# Set a conversation limit with automatic summarization
-agent = Agent(name="bot", context_limit=30, overflow="summarize")
-
-# Cheaper: just drop old messages
-agent = Agent(name="bot", context_limit=20, overflow="truncate")
-
-# Persist context between runs (avoids re-summarizing)
-agent = Agent(name="bot", context_limit=20, cache=True)
-
-# No context management
-agent = Agent(name="bot", overflow="none")
-```
-
-### Overflow Strategies
-
-| Strategy | What happens at limit | LLM cost |
-|---|---|---|
-| `"summarize"` | Oldest messages compressed into summary, recent kept verbatim | 1 extra call |
-| `"truncate"` | Oldest messages dropped, recent kept | None |
-| `"none"` | No management -- grows until model token limit | None |
-
-### Advanced: ContextConfig
-
-```python
-from exo.context import ContextConfig, Context
+import asyncio
+from exo import Agent, run
+from exo.context import Context, ContextConfig, OverflowStrategy
 
 config = ContextConfig(
-    limit=20,             # Max non-system messages
-    overflow="summarize", # "summarize", "truncate", or "none"
-    keep_recent=5,        # Messages kept verbatim after summarization
-    token_pressure=0.8,   # Auto-trigger overflow at this token fill ratio
-    cache=True,           # Persist processed messages between runs
+    limit=30,
+    overflow=OverflowStrategy.SUMMARIZE,
+    keep_recent=5,
+    cache=True,
 )
-ctx = Context(task_id="task-123", config=config)
-agent = Agent(name="bot", context=ctx)
+ctx = Context(task_id="session-001", config=config)
+
+agent = Agent(
+    name="assistant",
+    model="openai:gpt-4o-mini",
+    instructions="You are a helpful assistant.",
+    context=ctx,
+)
+
+async def main() -> None:
+    result = await run(agent, "Summarize the last three messages.")
+    print(result.output)
+
+asyncio.run(main())
 ```
 
-## What's Included
+Context can also be set via shorthand on `Agent` directly: `Agent(name="bot", context_limit=30, overflow="summarize")`.
 
-- **Context** -- core context object with hierarchical state, fork/merge, and lifecycle management.
-- **ContextConfig** -- configuration with `limit`, `overflow`, `cache`, and advanced tuning.
-- **OverflowStrategy** -- enum: `summarize`, `truncate`, `none`.
-- **ContextState** -- hierarchical key-value store with parent inheritance.
-- **PromptBuilder** -- composable prompt construction from prioritized neurons.
-- **Neurons** -- 9 built-in neurons: System, Task, History, Todo, Knowledge, Workspace, Skill, Fact, Entity.
-- **Processors** -- event-driven pipeline with built-in Summarize and ToolResultOffloader processors.
-- **Workspace** -- versioned artifact storage with filesystem persistence and observer pattern.
-- **TokenTracker** -- per-agent per-step token usage tracking.
-- **Checkpoint** -- save/restore state for long-running tasks.
-- **Context Tools** -- planning, knowledge, and file tools for agents.
+## What's inside
 
-## Public API
+- **`Context`** — per-task context with hierarchical fork/merge, token tracking, and checkpoint support
+- **`ContextConfig` / `OverflowStrategy`** — declarative configuration for context limits and overflow handling (`summarize`, `truncate`, `none`)
+- **`Neuron`** — ABC for composable prompt fragments; nine built-in neurons cover system info, task state, history, todos, knowledge, workspace summaries, skills, facts, and entities
+- **`ProcessorPipeline`** — ordered chain of `ContextProcessor` instances that fire on `pre_llm_call` and `post_tool_call` events; built-ins include `SummarizeProcessor`, `RoundWindowProcessor`, `DialogueCompressor`, and `ToolResultOffloader`
+- **`Workspace`** — filesystem-backed artifact store with `ArtifactType` classification, full version history, and observer callbacks
+- **`PromptBuilder`** — assembles the final prompt from prioritized neurons and context state
 
-```python
-from exo.context import (
-    Context,             # Core context object
-    ContextConfig,       # Configuration (limit, overflow, cache, ...)
-    OverflowStrategy,    # Enum: SUMMARIZE, TRUNCATE, NONE
-    ContextState,        # Hierarchical key-value state
-    PromptBuilder,       # Composable prompt builder
-    Neuron,              # Base class for prompt neurons
-    ContextProcessor,    # Base class for processors
-    ProcessorPipeline,   # Chain of processors
-    Workspace,           # Artifact storage with versioning
-    TokenTracker,        # Token usage tracking
-    Checkpoint,          # State save/restore
-)
-```
+## Part of [Exo](https://github.com/midsphere-ai/exo)
 
-## Documentation
+Context layer of the Exo stack — sits above exo-core and beneath exo-memory, exo-retrieval, and the harness. Get the full framework with `pip install exo-ai`.
 
-- [Context Engine Guide](../../docs/guides/context/)
-- [API Reference](../../docs/reference/context/)
+---
+
+MIT © Midsphere AI

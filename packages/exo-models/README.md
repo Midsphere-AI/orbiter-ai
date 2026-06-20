@@ -1,74 +1,64 @@
 # exo-models
 
-LLM provider abstractions for the [Exo](../../README.md) multi-agent framework.
+> LLM provider abstractions for OpenAI, Anthropic, and compatible APIs.
+
+`exo-models` is the provider layer of the Exo stack. It wraps OpenAI, Anthropic, Google Gemini, and Vertex AI behind a single async interface so the rest of the framework never imports a vendor SDK directly. Any package in the stack that needs to call an LLM goes through `get_provider()` and speaks only `ModelResponse` and `StreamChunk`.
 
 ## Installation
 
 ```bash
 pip install exo-models
+# or
+uv add exo-models
 ```
 
-Requires Python 3.11+. Installs `exo-core`, `openai>=1.0`, `anthropic>=0.39`, and `google-genai>=1.0`.
-
-## Supported Providers
-
-| Provider | Model String | SDK |
-|----------|-------------|-----|
-| OpenAI | `"openai:gpt-4o"`, `"openai:gpt-4o-mini"` | `openai` |
-| Anthropic | `"anthropic:claude-sonnet-4-20250514"` | `anthropic` |
-| Gemini | `"gemini:gemini-2.0-flash"` | `google-genai` |
-| Vertex AI | `"vertex:gemini-2.0-flash"` | `google-genai` |
-
-## Quick Example
+## Quick start
 
 ```python
-from exo import Agent, run
+import asyncio
+from exo.models import get_provider, ModelResponse
 
-# Models are resolved automatically from the model string
-agent = Agent(name="bot", model="openai:gpt-4o-mini")
-result = run.sync(agent, "Hello!")
-print(result.output)
+async def main() -> None:
+    provider = get_provider("openai:gpt-4o-mini")
 
-# Switch providers by changing the model string
-agent = Agent(name="bot", model="anthropic:claude-sonnet-4-20250514")
+    response: ModelResponse = await provider.complete(
+        [{"role": "user", "content": "What is 2 + 2?"}]
+    )
+    print(response.content)
+
+    # Stream the same request
+    async for chunk in await provider.stream(
+        [{"role": "user", "content": "Count to five."}]
+    ):
+        print(chunk.delta, end="", flush=True)
+
+asyncio.run(main())
 ```
 
-## Direct Provider Usage
-
-```python
-from exo.models.provider import get_provider
-
-provider = get_provider("openai:gpt-4o")
-
-# Or with an explicit API key
-provider = get_provider("openai:gpt-4o", api_key="sk-...")
-```
-
-## Environment Variables
+Set the matching environment variable before running:
 
 ```bash
 export OPENAI_API_KEY="sk-..."
 export ANTHROPIC_API_KEY="sk-ant-..."
-export GOOGLE_API_KEY="..."                # For Gemini
-export GOOGLE_CLOUD_PROJECT="my-project"   # For Vertex AI
+export GOOGLE_API_KEY="..."          # Gemini
+export GOOGLE_CLOUD_PROJECT="..."    # Vertex AI
 ```
 
-## Public API
+## What's inside
 
-```python
-from exo.models import (
-    ModelProvider,    # Abstract base class for providers
-    ModelResponse,    # Response from a complete() call
-    StreamChunk,      # Chunk from a stream() call
-    ModelError,       # Provider error
-    FinishReason,     # Why the model stopped
-    ToolCallDelta,    # Partial tool call in a stream
-    get_provider,     # Factory: model string -> provider instance
-    model_registry,   # Registry of provider classes
-)
-```
+- **`get_provider`** — factory that parses `"provider:model"` strings and returns a configured `ModelProvider` instance
+- **`ModelProvider`** — abstract base class; subclass it to add a new provider (`complete()` + `stream()`)
+- **`ModelResponse`** — immutable Pydantic model returned by `complete()`; carries `content`, `tool_calls`, `usage`, and `finish_reason`
+- **`StreamChunk`** — incremental chunk yielded by `stream()`; carries `delta` text and `tool_call_deltas`
+- **`ModelError`** — exception raised on provider failures, with `model` and `code` fields
+- **`model_registry`** — global `Registry` mapping provider names to their `ModelProvider` subclasses; extend it to register custom providers
 
-## Documentation
+Concrete providers already registered: `OpenAIProvider`, `AnthropicProvider`, `GeminiProvider`, `VertexProvider`.
 
-- [Model Providers Guide](../../docs/guides/models.md)
-- [API Reference](../../docs/reference/models/)
+## Part of [Exo](https://github.com/midsphere-ai/exo)
+
+`exo-models` is the provider layer; agents and tools live upstream. Get the full framework with `pip install exo-ai`.
+
+---
+
+MIT © Midsphere AI

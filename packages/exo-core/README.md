@@ -1,76 +1,57 @@
 # exo-core
 
-Core agent framework for the [Exo](../../README.md) multi-agent platform.
+> The core agent framework powering the Exo stack: Agent, Tool, Runner, Swarm, and the primitives everything else builds on.
+
+exo-core defines `Agent` — the autonomous unit that loops over LLM calls and tool dispatches — together with the `@tool` decorator, the async `run()` entry point, and multi-agent `Swarm` orchestration. It is the single dependency that every other Exo package inherits. exo-core itself depends only on Pydantic, keeping it lightweight enough to embed anywhere.
 
 ## Installation
 
 ```bash
 pip install exo-core
+# or
+uv add exo-core
 ```
 
-Requires Python 3.11+. Dependencies: `pydantic>=2.0`, `pyyaml>=6.0`.
-
-## What's Included
-
-- **Agent** -- the core autonomous unit. Wraps an LLM model, tools, handoffs, hooks, and optional structured output. Supports context snapshot persistence across runs (`clear_snapshot()` to restore from raw history).
-- **Tool** -- `@tool` decorator for turning functions into LLM-callable tools with auto-generated JSON schemas. `Tool` ABC for custom tools.
-- **Runner** -- `run()` (async), `run.sync()` (blocking), `run.stream()` (streaming). State tracking, loop detection, retry logic. All three modes fire the same lifecycle hooks (`PRE_LLM_CALL`, `POST_LLM_CALL`, etc.).
-- **Swarm** -- multi-agent orchestration with three modes: `workflow`, `handoff`, `team`. Flow DSL: `"a >> b >> c"`.
-- **Agent Groups** -- `ParallelGroup` and `SerialGroup` for concurrent/sequential sub-pipelines.
-- **Config** -- Pydantic v2 models: `AgentConfig`, `ModelConfig`, `TaskConfig`, `RunConfig`.
-- **Registry** -- generic `Registry[T]` with fail-fast duplicate detection.
-- **Events** -- async `EventBus` for decoupled pub/sub communication.
-- **Hooks** -- lifecycle hooks: `PRE_LLM_CALL`, `POST_LLM_CALL`, `PRE_TOOL_CALL`, `POST_TOOL_CALL`, `START`, `FINISHED`, `ERROR`.
-- **Human-in-the-Loop** -- `HumanInputTool` and `HumanInputHandler` ABC for pausing agents for human input.
-- **Loader** -- YAML-based agent and swarm loading with variable substitution.
-- **Skills** -- multi-source skill registry for loading skills from local paths and GitHub.
-
-## Quick Example
+## Quick start
 
 ```python
+import asyncio
 from exo import Agent, run, tool
 
-
 @tool
-async def search(query: str) -> str:
-    """Search the web.
-
-    Args:
-        query: The search query.
-    """
-    return f"Results for: {query}"
-
+async def add(a: int, b: int) -> int:
+    """Add two numbers."""
+    return a + b
 
 agent = Agent(
-    name="assistant",
+    name="calc",
     model="openai:gpt-4o-mini",
-    instructions="You are a helpful assistant.",
-    tools=[search],
+    instructions="You are a calculator assistant.",
+    tools=[add],
 )
 
-result = run.sync(agent, "Search for Python tutorials")
-print(result.output)
+async def main() -> None:
+    result = await run(agent, "What is 17 + 25?")
+    print(result.output)
+
+asyncio.run(main())
 ```
 
-## Public API
+Use `run.sync()` for a blocking call or `run.stream()` for an async generator of `StreamEvent` objects.
 
-```python
-from exo import (
-    Agent,              # Core agent class
-    Tool,               # Tool abstract base class
-    FunctionTool,       # Function-based tool wrapper
-    tool,               # @tool decorator
-    run,                # Runner (run, run.sync, run.stream)
-    Swarm,              # Multi-agent orchestrator
-    SwarmNode,          # Nested swarm wrapper
-    ParallelGroup,      # Concurrent agent group
-    SerialGroup,        # Sequential agent group
-)
-```
+## What's inside
 
-## Documentation
+- **`Agent`** — the core autonomous unit: model, instructions, tools, handoffs, hooks, planning, memory, and spawn behaviour in a single class
+- **`run`** — async entry point with `run.sync()` (blocking) and `run.stream()` (streaming) variants; handles retries and loop detection
+- **`tool` / `Tool` / `FunctionTool`** — decorator and ABCs for defining LLM-callable tools with auto-generated JSON schemas
+- **`Swarm`** — multi-agent orchestration with `ParallelGroup` and `SerialGroup` execution primitives and a flow DSL (`"a >> b >> c"`)
+- **`ToolContext`** — per-call context passed to every tool, carrying agent state and injected arguments
+- **`TokenCounter` / `count_tokens`** — provider-aware token counting without making LLM calls
 
-- [Getting Started](../../docs/getting-started/)
-- [Agent Guide](../../docs/guides/agents.md)
-- [Tool Guide](../../docs/guides/tools.md)
-- [API Reference](../../docs/reference/core/)
+## Part of [Exo](https://github.com/midsphere-ai/exo)
+
+Foundation of the Exo stack — everything else builds on this. Get the full framework with `pip install exo-ai`.
+
+---
+
+MIT © Midsphere AI
