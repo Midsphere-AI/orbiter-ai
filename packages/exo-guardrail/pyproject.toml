@@ -5,6 +5,7 @@ description = "Guardrail framework: pluggable security detection for Exo agents"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"
+authors = [{ name = "Midsphere AI" }]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
@@ -19,6 +20,12 @@ dependencies = [
     "pydantic>=2.0",
     "exo-core>=0.1.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/midsphere-ai/exo"
+Documentation = "https://midsphere-ai.github.io/exo/"
+Repository = "https://github.com/midsphere-ai/exo"
+Issues = "https://github.com/midsphere-ai/exo/issues"
 
 [tool.uv.sources]
 exo-core = { workspace = true }

@@ -5,6 +5,7 @@ description = "Retrieval framework: embeddings, vector stores, and RAG pipeline 
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"
+authors = [{ name = "Midsphere AI" }]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
@@ -25,6 +26,12 @@ dependencies = [
 pgvector = ["asyncpg>=0.29"]
 chroma = ["chromadb>=0.4"]
 pdf = ["pymupdf>=1.24"]
+
+[project.urls]
+Homepage = "https://github.com/midsphere-ai/exo"
+Documentation = "https://midsphere-ai.github.io/exo/"
+Repository = "https://github.com/midsphere-ai/exo"
+Issues = "https://github.com/midsphere-ai/exo/issues"
 
 [tool.uv.sources]
 exo-core = { workspace = true }

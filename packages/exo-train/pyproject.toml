@@ -2,7 +2,20 @@
 name = "exo-train"
 version = "0.1.0"
 description = "Training framework: data synthesis, evolution, VeRL integration"
+readme = "README.md"
+license = "MIT"
 requires-python = ">=3.11"
+authors = [{ name = "Midsphere AI" }]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 dependencies = [
     "exo-core",
     "exo-models",
@@ -10,6 +23,12 @@ dependencies = [
 
 [project.optional-dependencies]
 verl = ["verl>=0.2"]
+
+[project.urls]
+Homepage = "https://github.com/midsphere-ai/exo"
+Documentation = "https://midsphere-ai.github.io/exo/"
+Repository = "https://github.com/midsphere-ai/exo"
+Issues = "https://github.com/midsphere-ai/exo/issues"
 
 [tool.uv.sources]
 exo-core = { workspace = true }

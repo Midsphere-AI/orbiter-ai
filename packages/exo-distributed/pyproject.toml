@@ -5,6 +5,7 @@ description = "Distributed execution for Exo agents: Redis task queue, workers, 
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"
+authors = [{ name = "Midsphere AI" }]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
@@ -22,10 +23,10 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/inclusionAI/AWorld"
-Documentation = "https://inclusionai.github.io/AWorld/"
-Repository = "https://github.com/inclusionAI/AWorld"
-Issues = "https://github.com/inclusionAI/AWorld/issues"
+Homepage = "https://github.com/midsphere-ai/exo"
+Documentation = "https://midsphere-ai.github.io/exo/"
+Repository = "https://github.com/midsphere-ai/exo"
+Issues = "https://github.com/midsphere-ai/exo/issues"
 
 [project.optional-dependencies]
 memory = ["exo-memory"]

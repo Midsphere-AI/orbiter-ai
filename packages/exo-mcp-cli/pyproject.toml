@@ -2,7 +2,20 @@
 name = "exo-mcp-cli"
 version = "0.1.0"
 description = "Standalone CLI for interacting with MCP servers"
+readme = "README.md"
+license = "MIT"
 requires-python = ">=3.11"
+authors = [{ name = "Midsphere AI" }]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 dependencies = [
     "mcp>=1.0",
     "typer>=0.12",
@@ -12,6 +25,12 @@ dependencies = [
 
 [project.scripts]
 exo-mcp = "exo_mcp_cli.main:app"
+
+[project.urls]
+Homepage = "https://github.com/midsphere-ai/exo"
+Documentation = "https://midsphere-ai.github.io/exo/"
+Repository = "https://github.com/midsphere-ai/exo"
+Issues = "https://github.com/midsphere-ai/exo/issues"
 
 [build-system]
 requires = ["hatchling"]
