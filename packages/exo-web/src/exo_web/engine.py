@@ -127,7 +127,7 @@ async def _execute_agent_node(
     agent_id = node_data.get("agent_id")
     is_inline = node_data.get("inline", False)
 
-    user_text = upstream_text or "Hello"
+    user_text = upstream_text or ""
     messages = [UserMessage(content=user_text)]
 
     svc = AgentService()
@@ -1302,6 +1302,12 @@ async def _wait_for_debug_command(
             name = cmd.get("name", "")
             value = cmd.get("value")
             if name:
+                if name in variables:
+                    _log.warning(
+                        "Debug set_variable is overwriting existing node output '%s' — "
+                        "this may corrupt workflow state",
+                        name,
+                    )
                 variables[name] = value
             continue
 

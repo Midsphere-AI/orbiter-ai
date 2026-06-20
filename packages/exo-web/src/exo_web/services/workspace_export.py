@@ -60,6 +60,18 @@ _EXPORT_QUERIES: dict[str, str] = {
     ),
 }
 
+# Allowlist of table names permitted in _resolve_name to prevent SQL injection.
+_RESOLVE_NAME_ALLOWED_TABLES: frozenset[str] = frozenset(
+    {
+        "agents",
+        "workflows",
+        "tools",
+        "prompt_templates",
+        "knowledge_bases",
+        "providers",
+    }
+)
+
 _EXPORT_DIR = Path(settings.upload_dir) / "exports"
 
 
@@ -180,6 +192,8 @@ async def _resolve_name(
     user_id: str,
 ) -> str:
     """Return a unique name, appending ' (Import)' if the name already exists."""
+    if table not in _RESOLVE_NAME_ALLOWED_TABLES:
+        raise ValueError(f"Table '{table}' is not permitted in _resolve_name")
     cursor = await db.execute(
         f"SELECT COUNT(*) FROM {table} WHERE name = ? AND user_id = ?",
         (name, user_id),

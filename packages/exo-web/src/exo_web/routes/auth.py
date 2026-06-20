@@ -153,6 +153,7 @@ async def login(body: LoginRequest, request: Request, response: Response) -> dic
         value=session_id,
         httponly=True,
         samesite="lax",
+        secure=not settings.debug,
         max_age=settings.session_expiry_hours * 3600,
         path="/",
     )
@@ -358,7 +359,7 @@ class ResetPasswordRequest(BaseModel):
 
 @router.post("/forgot-password", response_model=MessageResponse)
 async def forgot_password(body: ForgotPasswordRequest) -> dict[str, str]:
-    """Generate a password reset token and log it (email integration is future work)."""
+    """Generate a password reset token and store its hash (email delivery is future work)."""
     async with get_db() as db:
         cursor = await db.execute(
             "SELECT id FROM users WHERE email = ?",

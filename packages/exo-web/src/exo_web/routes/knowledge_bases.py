@@ -20,6 +20,20 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/knowledge-bases", tags=["knowledge-bases"])
 
+
+def _escape_like(term: str, escape_char: str = "\\") -> str:
+    """Escape LIKE special characters in *term* so they match literally.
+
+    SQLite LIKE treats ``%``, ``_``, and the escape character itself as
+    special.  Escape them so user-supplied search terms are safe to embed
+    inside a ``%…%`` pattern.
+    """
+    term = term.replace(escape_char, escape_char + escape_char)
+    term = term.replace("%", escape_char + "%")
+    term = term.replace("_", escape_char + "_")
+    return term
+
+
 # ---------------------------------------------------------------------------
 # Pydantic models
 # ---------------------------------------------------------------------------
@@ -310,9 +324,11 @@ async def search_knowledge_base(
         if not query_terms:
             return []
 
-        # Use LIKE for each term with OR to find chunks containing any query term
-        like_clauses = " OR ".join("dc.content LIKE ?" for _ in query_terms)
-        like_params = [f"%{term}%" for term in query_terms]
+        # Use LIKE for each term with OR to find chunks containing any query term.
+        # Escape LIKE wildcards in user terms to prevent injection via % or _.
+        escaped_terms = [_escape_like(t) for t in query_terms]
+        like_clauses = " OR ".join("dc.content LIKE ? ESCAPE '\\'" for _ in escaped_terms)
+        like_params = [f"%{term}%" for term in escaped_terms]
 
         cursor = await db.execute(
             f"""

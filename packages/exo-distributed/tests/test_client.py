@@ -46,6 +46,130 @@ class TestTaskHandleInit:
 
 
 # ---------------------------------------------------------------------------
+# TaskHandle.close / async context manager
+# ---------------------------------------------------------------------------
+
+
+class TestTaskHandleClose:
+    @pytest.mark.asyncio
+    async def test_close_disconnects_all_components(self) -> None:
+        broker = MagicMock()
+        broker.disconnect = AsyncMock()
+        store = MagicMock()
+        store.disconnect = AsyncMock()
+        subscriber = MagicMock()
+        subscriber.disconnect = AsyncMock()
+
+        handle = TaskHandle(
+            "t1",
+            broker=broker,
+            store=store,
+            subscriber=subscriber,
+        )
+        await handle.close()
+
+        broker.disconnect.assert_awaited_once()
+        store.disconnect.assert_awaited_once()
+        subscriber.disconnect.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_close_is_idempotent_on_component_error(self) -> None:
+        """close() must continue disconnecting remaining components even if one raises."""
+        broker = MagicMock()
+        broker.disconnect = AsyncMock(side_effect=RuntimeError("redis gone"))
+        store = MagicMock()
+        store.disconnect = AsyncMock()
+        subscriber = MagicMock()
+        subscriber.disconnect = AsyncMock()
+
+        handle = TaskHandle(
+            "t1",
+            broker=broker,
+            store=store,
+            subscriber=subscriber,
+        )
+        # Should not propagate the RuntimeError
+        await handle.close()
+
+        broker.disconnect.assert_awaited_once()
+        store.disconnect.assert_awaited_once()
+        subscriber.disconnect.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_close_tolerates_all_components_failing(self) -> None:
+        """close() must not raise even when every component's disconnect raises."""
+        broker = MagicMock()
+        broker.disconnect = AsyncMock(side_effect=RuntimeError("broker err"))
+        store = MagicMock()
+        store.disconnect = AsyncMock(side_effect=RuntimeError("store err"))
+        subscriber = MagicMock()
+        subscriber.disconnect = AsyncMock(side_effect=RuntimeError("subscriber err"))
+
+        handle = TaskHandle(
+            "t1",
+            broker=broker,
+            store=store,
+            subscriber=subscriber,
+        )
+        await handle.close()  # must not raise
+
+    @pytest.mark.asyncio
+    async def test_async_context_manager_calls_close_on_exit(self) -> None:
+        broker = MagicMock()
+        broker.disconnect = AsyncMock()
+        store = MagicMock()
+        store.disconnect = AsyncMock()
+        subscriber = MagicMock()
+        subscriber.disconnect = AsyncMock()
+
+        async with TaskHandle(
+            "t1",
+            broker=broker,
+            store=store,
+            subscriber=subscriber,
+        ) as handle:
+            assert handle.task_id == "t1"
+
+        broker.disconnect.assert_awaited_once()
+        store.disconnect.assert_awaited_once()
+        subscriber.disconnect.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_async_context_manager_returns_handle(self) -> None:
+        handle = TaskHandle(
+            "t2",
+            broker=MagicMock(disconnect=AsyncMock()),
+            store=MagicMock(disconnect=AsyncMock()),
+            subscriber=MagicMock(disconnect=AsyncMock()),
+        )
+        async with handle as h:
+            assert h is handle
+
+    @pytest.mark.asyncio
+    async def test_close_called_on_exception_exit(self) -> None:
+        """__aexit__ should still call close() when the body raises."""
+        broker = MagicMock()
+        broker.disconnect = AsyncMock()
+        store = MagicMock()
+        store.disconnect = AsyncMock()
+        subscriber = MagicMock()
+        subscriber.disconnect = AsyncMock()
+
+        with pytest.raises(ValueError, match="oops"):
+            async with TaskHandle(
+                "t1",
+                broker=broker,
+                store=store,
+                subscriber=subscriber,
+            ):
+                raise ValueError("oops")
+
+        broker.disconnect.assert_awaited_once()
+        store.disconnect.assert_awaited_once()
+        subscriber.disconnect.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
 # TaskHandle.status
 # ---------------------------------------------------------------------------
 

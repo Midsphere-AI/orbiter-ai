@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import zipfile
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile
@@ -36,12 +38,32 @@ async def trigger_export(
 @router.get("/export/{export_id}/download")
 async def download_export(
     export_id: str,
-    _user: dict[str, Any] = Depends(get_current_user),  # noqa: B008
+    user: dict[str, Any] = Depends(get_current_user),  # noqa: B008
 ) -> FileResponse:
-    """Download a workspace export ZIP file."""
+    """Download a workspace export ZIP file.
+
+    Returns 404 if the export doesn't exist or doesn't belong to the
+    authenticated user (avoids leaking existence of other users' exports).
+    """
     path = get_export_path(export_id)
     if path is None or not path.is_file():
         raise HTTPException(status_code=404, detail="Export not found")
+
+    # Verify ownership by reading the manifest embedded in the ZIP.
+    try:
+        with zipfile.ZipFile(path, "r") as zf:
+            if "manifest.json" in zf.namelist():
+                manifest = json.loads(zf.read("manifest.json"))
+                export_user_id = manifest.get("user_id", "")
+            else:
+                export_user_id = ""
+    except (zipfile.BadZipFile, KeyError, ValueError) as exc:
+        raise HTTPException(status_code=404, detail="Export not found") from exc
+
+    if export_user_id != user["id"]:
+        # Return 404 rather than 403 to avoid leaking existence of the export.
+        raise HTTPException(status_code=404, detail="Export not found")
+
     return FileResponse(
         path=str(path),
         filename=path.name,

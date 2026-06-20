@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import os
 import time
 
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
@@ -69,6 +71,25 @@ _user_window = _SlidingWindow()
 # Counter for cleanup scheduling.
 _last_cleanup: float = 0.0
 
+# Lock protecting all read-modify-write operations on the sliding windows and
+# _last_cleanup.  Acquired only around the critical section — never held across
+# an await of the upstream handler.
+_window_lock: asyncio.Lock | None = None
+
+
+def _get_window_lock() -> asyncio.Lock:
+    """Return the per-event-loop window lock, creating it lazily if needed."""
+    global _window_lock
+    if _window_lock is None:
+        _window_lock = asyncio.Lock()
+    return _window_lock
+
+
+# Whether to trust X-Forwarded-For headers (set EXO_TRUST_PROXY=1 when the app
+# is deployed behind a trusted reverse-proxy such as nginx or a cloud LB).
+# Defaulting to False prevents IP spoofing when running without a proxy.
+_TRUST_PROXY: bool = os.getenv("EXO_TRUST_PROXY", "").lower() in ("1", "true", "yes")
+
 
 class RateLimitMiddleware(BaseHTTPMiddleware):
     """Apply per-IP and per-user rate limits.
@@ -91,21 +112,21 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         if path == "/api/health":
             return await call_next(request)
 
-        # Skip non-mutating methods for auth rate limit.
         now = time.monotonic()
-
-        # Periodic cleanup (~every 5 minutes).
-        if now - _last_cleanup > 300:
-            _last_cleanup = now
-            _auth_window.cleanup(now)
-            _user_window.cleanup(now)
+        lock = _get_window_lock()
 
         # --- Auth endpoint rate limit (per IP) ---
         if path in _AUTH_PATHS and method == "POST":
             client_ip = _get_client_ip(request)
             key = f"auth:{client_ip}"
             limit = settings.rate_limit_auth
-            allowed, remaining, reset = _auth_window.hit(key, now, limit)
+            async with lock:
+                # Periodic cleanup (~every 5 minutes).
+                if now - _last_cleanup > 300:
+                    _last_cleanup = now
+                    _auth_window.cleanup(now)
+                    _user_window.cleanup(now)
+                allowed, remaining, reset = _auth_window.hit(key, now, limit)
             if not allowed:
                 return _rate_limited_response(limit, reset)
             response = await call_next(request)
@@ -117,7 +138,12 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             user_key = _get_user_key(request)
             key = f"agent:{user_key}"
             limit = settings.rate_limit_agent
-            allowed, remaining, reset = _user_window.hit(key, now, limit)
+            async with lock:
+                if now - _last_cleanup > 300:
+                    _last_cleanup = now
+                    _auth_window.cleanup(now)
+                    _user_window.cleanup(now)
+                allowed, remaining, reset = _user_window.hit(key, now, limit)
             if not allowed:
                 return _rate_limited_response(limit, reset)
             response = await call_next(request)
@@ -128,7 +154,12 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         user_key = _get_user_key(request)
         key = f"general:{user_key}"
         limit = settings.rate_limit_general
-        allowed, remaining, reset = _user_window.hit(key, now, limit)
+        async with lock:
+            if now - _last_cleanup > 300:
+                _last_cleanup = now
+                _auth_window.cleanup(now)
+                _user_window.cleanup(now)
+            allowed, remaining, reset = _user_window.hit(key, now, limit)
         if not allowed:
             return _rate_limited_response(limit, reset)
         response = await call_next(request)
@@ -137,10 +168,17 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
 
 
 def _get_client_ip(request: Request) -> str:
-    """Extract client IP, respecting X-Forwarded-For when behind a proxy."""
-    forwarded = request.headers.get("x-forwarded-for")
-    if forwarded:
-        return forwarded.split(",")[0].strip()
+    """Extract the real client IP address.
+
+    When EXO_TRUST_PROXY=1 the first entry of X-Forwarded-For is used (assumes
+    a trusted reverse-proxy prepends the original client IP).  Without that
+    flag X-Forwarded-For is ignored entirely to prevent IP spoofing — the
+    direct TCP connection address is used instead.
+    """
+    if _TRUST_PROXY:
+        forwarded = request.headers.get("x-forwarded-for")
+        if forwarded:
+            return forwarded.split(",")[0].strip()
     client = request.client
     return client.host if client else "unknown"
 

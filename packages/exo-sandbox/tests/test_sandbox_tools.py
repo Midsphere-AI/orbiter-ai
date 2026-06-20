@@ -202,6 +202,60 @@ class TestTerminalCommandFiltering:
         assert "shutdown" in _DANGEROUS_COMMANDS
         assert "kill" in _DANGEROUS_COMMANDS
 
+    # ------------------------------------------------------------------
+    # B-5: command-injection via shell chaining / substitution
+    # ------------------------------------------------------------------
+
+    def test_semicolon_chaining_blocked(self) -> None:
+        """echo is safe but rm after ; must still be blocked (B-5)."""
+        tool = TerminalTool()
+        with pytest.raises(ToolError, match="blocked by sandbox policy"):
+            tool._check_command("echo hello ; rm -rf /")
+
+    def test_double_ampersand_chaining_blocked(self) -> None:
+        tool = TerminalTool()
+        with pytest.raises(ToolError, match="blocked by sandbox policy"):
+            tool._check_command("echo ok && rm -rf /tmp")
+
+    def test_double_pipe_or_chaining_blocked(self) -> None:
+        tool = TerminalTool()
+        with pytest.raises(ToolError, match="blocked by sandbox policy"):
+            tool._check_command("false || rm -rf /")
+
+    def test_pipe_blocked_command_in_pipeline(self) -> None:
+        tool = TerminalTool()
+        with pytest.raises(ToolError, match="blocked by sandbox policy"):
+            tool._check_command("cat /etc/passwd | rm -rf /tmp/x")
+
+    def test_background_operator_blocked(self) -> None:
+        tool = TerminalTool()
+        with pytest.raises(ToolError, match="blocked by sandbox policy"):
+            tool._check_command("rm -rf / &")
+
+    def test_newline_chaining_blocked(self) -> None:
+        tool = TerminalTool()
+        with pytest.raises(ToolError, match="blocked by sandbox policy"):
+            tool._check_command("echo hi\nrm -rf /")
+
+    def test_command_substitution_dollar_blocked(self) -> None:
+        tool = TerminalTool()
+        with pytest.raises(ToolError, match="not permitted"):
+            tool._check_command("echo $(rm -rf /)")
+
+    def test_command_substitution_backtick_blocked(self) -> None:
+        tool = TerminalTool()
+        with pytest.raises(ToolError, match="not permitted"):
+            tool._check_command("echo `rm -rf /`")
+
+    def test_safe_pipeline_allowed(self) -> None:
+        """A pipeline of safe commands should not raise."""
+        tool = TerminalTool()
+        tool._check_command("ls | grep foo")  # neither ls nor grep are in the default blocklist
+
+    def test_safe_and_chain_allowed(self) -> None:
+        tool = TerminalTool()
+        tool._check_command("echo hello && echo world")  # should not raise
+
 
 # ---------------------------------------------------------------------------
 # TerminalTool — execution

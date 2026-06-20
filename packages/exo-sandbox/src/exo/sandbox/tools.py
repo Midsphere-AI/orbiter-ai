@@ -229,16 +229,91 @@ class TerminalTool(Tool):
         """Return the current platform identifier."""
         return sys.platform
 
+    @staticmethod
+    def _split_command_segments(command: str) -> list[str]:
+        """Split *command* on shell control operators to get individual command segments.
+
+        First splits on literal newlines (each newline introduces a new shell statement),
+        then tokenizes each resulting line with ``shlex`` so that quoted strings are
+        handled correctly, and finally collects the text between shell control tokens
+        (``|``, ``||``, ``&&``, ``;``, ``&``).  Returns each non-empty segment as a
+        string so the caller can inspect the leading executable of every chained
+        sub-command.
+        """
+        # Shell control operators that introduce a new command context.
+        _control = frozenset({"|", "||", "&&", ";", "&"})
+
+        segments: list[str] = []
+
+        # A newline in the shell is a command delimiter equivalent to ';', so
+        # pre-split on newlines before tokenising each line individually.
+        for line in command.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                lex = shlex.shlex(line, posix=True)
+                lex.whitespace_split = True
+                tokens = list(lex)
+            except ValueError:
+                # shlex couldn't parse (e.g. unterminated quote) — treat the
+                # whole line as a single opaque segment.
+                segments.append(line)
+                continue
+
+            current: list[str] = []
+            for tok in tokens:
+                if tok in _control:
+                    if current:
+                        segments.append(" ".join(current))
+                        current = []
+                else:
+                    current.append(tok)
+
+            if current:
+                segments.append(" ".join(current))
+
+        return [s for s in segments if s.strip()]
+
     def _check_command(self, command: str) -> None:
-        """Raise ``ToolError`` if the command's base executable is blacklisted."""
-        parts = command.strip().split()
-        if not parts:
+        """Raise ``ToolError`` if any sub-command in *command* is blacklisted.
+
+        Security rationale: the command is executed via ``asyncio.create_subprocess_shell``
+        which passes the string to ``/bin/sh -c``.  Checking only ``parts[0]`` of the
+        whole string is insufficient — an attacker can chain blocked commands using shell
+        control operators (``; && || | &``) or embed them in command substitutions
+        (``$(…)`` / backticks).
+
+        Defense strategy:
+        - Reject immediately if the command contains command-substitution syntax
+          (``$(`` or backticks) because the substituted commands cannot be safely
+          validated without executing them.
+        - Otherwise, split on all shell control operators and check the leading
+          executable of **every** resulting segment against the blocklist.
+        """
+        stripped = command.strip()
+        if not stripped:
             raise ToolError("Empty command")
-        base = parts[0].rsplit("/", maxsplit=1)[-1]  # strip path prefix
-        base = base.rsplit("\\", maxsplit=1)[-1]
-        if base.lower() in {b.lower() for b in self._blacklist}:
-            logger.warning("TerminalTool: blocked command %r (sandbox policy)", base)
-            raise ToolError(f"Command {base!r} is blocked by sandbox policy")
+
+        # Block command substitution — $(...) and backtick forms inject arbitrary
+        # commands that we cannot inspect without running the shell.
+        if "$(" in stripped or "`" in stripped:
+            logger.warning(
+                "TerminalTool: blocked command with command substitution (sandbox policy)"
+            )
+            raise ToolError("Command substitution ('$()' / backticks) is not permitted")
+
+        blacklist_lower = {b.lower() for b in self._blacklist}
+
+        for segment in self._split_command_segments(stripped):
+            seg_parts = segment.strip().split()
+            if not seg_parts:
+                continue
+            base = seg_parts[0].rsplit("/", maxsplit=1)[-1]  # strip path prefix
+            base = base.rsplit("\\", maxsplit=1)[-1]
+            if base.lower() in blacklist_lower:
+                logger.warning("TerminalTool: blocked command %r (sandbox policy)", base)
+                raise ToolError(f"Command {base!r} is blocked by sandbox policy")
 
     async def execute(self, **kwargs: Any) -> str | dict[str, Any]:
         command: str = kwargs.get("command", "")

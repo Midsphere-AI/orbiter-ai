@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hmac
+
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
@@ -70,7 +72,8 @@ class CSRFMiddleware(BaseHTTPMiddleware):
                 content={"detail": "Invalid session"},
             )
 
-        if csrf_header != row["csrf_token"]:
+        # Use constant-time comparison to prevent timing side-channel attacks.
+        if not hmac.compare_digest(csrf_header, row["csrf_token"]):
             return JSONResponse(
                 status_code=403,
                 content={"detail": "Invalid CSRF token"},

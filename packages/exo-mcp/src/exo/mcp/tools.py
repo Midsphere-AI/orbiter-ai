@@ -72,16 +72,27 @@ def namespace_tool_name(
 ) -> str:
     """Create a namespaced tool name: ``{namespace}__{server}__{tool}``.
 
+    The separator ``__`` (double-underscore) is reserved as a delimiter.
+    ``server_name`` is sanitized so it cannot contain ``__`` — any run of
+    non-alphanumeric characters is collapsed to a single ``_``.  ``tool_name``
+    receives the same treatment so the final string is always safe to round-trip
+    through :func:`parse_namespaced_name`.
+
     Args:
         tool_name: Original tool name.
         server_name: MCP server name.
         namespace: Namespace prefix (default "mcp").
 
     Returns:
-        Namespaced tool name with non-alphanumeric chars replaced by underscores.
+        Namespaced tool name.  ``parse_namespaced_name`` can recover all three
+        components unambiguously because ``server_name`` never contains ``__``.
     """
-    safe_server = re.sub(r"[^a-zA-Z0-9]", "_", server_name)
-    safe_tool = re.sub(r"[^a-zA-Z0-9]", "_", tool_name)
+    # Collapse any run of non-alphanumeric characters (including consecutive
+    # underscores) to a single "_".  This guarantees that neither the namespace
+    # nor the server component ever contains "__", so the first two "__"
+    # separators in the result are unambiguous delimiters.
+    safe_server = re.sub(r"[^a-zA-Z0-9]+", "_", server_name).strip("_")
+    safe_tool = re.sub(r"[^a-zA-Z0-9]+", "_", tool_name).strip("_")
     return f"{namespace}__{safe_server}__{safe_tool}"
 
 
@@ -89,6 +100,12 @@ def parse_namespaced_name(
     namespaced: str,
 ) -> tuple[str, str, str]:
     """Parse a namespaced tool name back into (namespace, server, tool).
+
+    Contract: ``namespace`` and ``server`` components must not contain ``__``
+    (this is guaranteed when names are built via :func:`namespace_tool_name`).
+    The ``tool`` component *may* contain ``__``.  Parsing splits on the first
+    two ``__`` occurrences only, so any remaining ``__`` tokens belong to the
+    tool name.
 
     Args:
         namespaced: A name like "mcp__server__tool".
@@ -99,6 +116,9 @@ def parse_namespaced_name(
     Raises:
         MCPToolError: If the name doesn't match the expected format.
     """
+    # Split at most twice so that a tool name containing "__" is preserved
+    # intact in parts[2].  e.g. "mcp__srv__my__nested__tool" → ("mcp", "srv",
+    # "my__nested__tool").
     parts = namespaced.split("__", 2)
     if len(parts) != 3:
         raise MCPToolError(
@@ -298,8 +318,7 @@ class MCPToolWrapper(Tool):
                             await conn.connect()
                         except Exception as exc:
                             raise MCPToolError(
-                                f"MCP server reconnection failed for server "
-                                f"'{self._server_name}'"
+                                f"MCP server reconnection failed for server '{self._server_name}'"
                             ) from exc
                         self._connection = conn
                         self._call_fn = conn.call_tool
@@ -356,7 +375,22 @@ class MCPToolWrapper(Tool):
         return _format_call_result(result)
 
     async def cleanup(self) -> None:
-        """Close any owned connection created by lazy reconnection."""
+        """Close any connection created by lazy reconnection.
+
+        This method is *idempotent*: calling it multiple times is safe.  It
+        only closes connections that this wrapper owns (i.e. created by lazy
+        reconnect inside :meth:`execute`).  If the wrapper was constructed with
+        an external ``call_fn`` and no lazy reconnect has occurred,
+        ``self._connection`` is ``None`` and this method is a no-op.
+
+        After cleanup the wrapper can reconnect on the next :meth:`execute`
+        call provided ``_server_config`` is set, so cleanup does **not**
+        permanently disable the tool.
+
+        In distributed-worker deployments, callers *must* invoke ``cleanup()``
+        (or use the wrapper as an async context manager) to prevent connection
+        accumulation.
+        """
         if self._connection is not None:
             try:
                 await self._connection.cleanup()
@@ -370,6 +404,22 @@ class MCPToolWrapper(Tool):
             finally:
                 self._connection = None
                 self._call_fn = None
+
+    async def __aenter__(self) -> MCPToolWrapper:
+        """Enter the async context manager — returns self unchanged.
+
+        The connection is created lazily on first :meth:`execute` call, so
+        there is nothing to set up here.  The value of using the context
+        manager is the guaranteed :meth:`cleanup` call on exit::
+
+            async with wrapper:
+                result = await wrapper.execute(query="hello")
+        """
+        return self
+
+    async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        """Exit the async context manager, closing any owned connection."""
+        await self.cleanup()
 
 
 # ---------------------------------------------------------------------------
