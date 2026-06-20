@@ -9,8 +9,15 @@ from typing import Any
 
 import aiosqlite  # pyright: ignore[reportMissingImports]
 
+from exo.memory.backends._common import (  # pyright: ignore[reportMissingImports]
+    build_metadata_filter_sqlite,
+    extra_fields,
+)
+from exo.memory.backends._common import (
+    row_to_item as _row_to_item_shared,
+)
 from exo.memory.base import (  # pyright: ignore[reportMissingImports]
-    MemoryError,
+    ExoMemoryError,
     MemoryItem,
     MemoryMetadata,
     MemoryStatus,
@@ -110,7 +117,7 @@ class SQLiteMemoryStore:
     async def add(self, item: MemoryItem) -> None:
         """Persist a memory item (upsert — bumps version on conflict)."""
         db = self._ensure_init()
-        extra = _extra_fields(item)
+        extra = extra_fields(item)
         try:
             await db.execute(
                 """\
@@ -140,7 +147,7 @@ class SQLiteMemoryStore:
             )
             await db.commit()
         except Exception as exc:
-            raise MemoryError(f"add failed for item {item.id}: {exc}") from exc
+            raise ExoMemoryError(f"add failed for item {item.id}: {exc}") from exc
         logger.debug("upserted item type=%s id=%s", item.memory_type, item.id)
 
     async def get(self, item_id: str) -> MemoryItem | None:
@@ -153,10 +160,10 @@ class SQLiteMemoryStore:
             )
             row = await cursor.fetchone()
         except Exception as exc:
-            raise MemoryError(f"get failed for item {item_id}: {exc}") from exc
+            raise ExoMemoryError(f"get failed for item {item_id}: {exc}") from exc
         if row is None:
             return None
-        return _row_to_item(row)
+        return _row_to_item_sqlite(row)
 
     async def search(
         self,
@@ -182,18 +189,7 @@ class SQLiteMemoryStore:
             clauses.append("content LIKE ?")
             params.append(f"%{query}%")
         if metadata:
-            if metadata.user_id:
-                clauses.append("json_extract(metadata, '$.user_id') = ?")
-                params.append(metadata.user_id)
-            if metadata.session_id:
-                clauses.append("json_extract(metadata, '$.session_id') = ?")
-                params.append(metadata.session_id)
-            if metadata.task_id:
-                clauses.append("json_extract(metadata, '$.task_id') = ?")
-                params.append(metadata.task_id)
-            if metadata.agent_id:
-                clauses.append("json_extract(metadata, '$.agent_id') = ?")
-                params.append(metadata.agent_id)
+            build_metadata_filter_sqlite(metadata, clauses, params)
 
         where = " AND ".join(clauses)
         sql = f"SELECT * FROM memory_items WHERE {where} ORDER BY created_at DESC LIMIT ?"
@@ -203,9 +199,9 @@ class SQLiteMemoryStore:
             cursor = await db.execute(sql, params)
             rows = await cursor.fetchall()
         except Exception as exc:
-            raise MemoryError(f"search failed: {exc}") from exc
+            raise ExoMemoryError(f"search failed: {exc}") from exc
         logger.debug("search returned %d rows", len(rows))
-        return [_row_to_item(r) for r in rows]
+        return [_row_to_item_sqlite(r) for r in rows]
 
     async def clear(
         self,
@@ -222,18 +218,7 @@ class SQLiteMemoryStore:
 
         clauses: list[str] = ["deleted = 0"]
         params: list[Any] = []
-        if metadata.user_id:
-            clauses.append("json_extract(metadata, '$.user_id') = ?")
-            params.append(metadata.user_id)
-        if metadata.session_id:
-            clauses.append("json_extract(metadata, '$.session_id') = ?")
-            params.append(metadata.session_id)
-        if metadata.task_id:
-            clauses.append("json_extract(metadata, '$.task_id') = ?")
-            params.append(metadata.task_id)
-        if metadata.agent_id:
-            clauses.append("json_extract(metadata, '$.agent_id') = ?")
-            params.append(metadata.agent_id)
+        build_metadata_filter_sqlite(metadata, clauses, params)
 
         where = " AND ".join(clauses)
         cursor = await db.execute(
@@ -263,74 +248,21 @@ class SQLiteMemoryStore:
 # ---------------------------------------------------------------------------
 
 
-def _extra_fields(item: MemoryItem) -> dict[str, Any]:
-    """Extract subclass-specific fields into a JSON dict."""
-    data: dict[str, Any] = {}
-    if hasattr(item, "tool_calls"):
-        data["tool_calls"] = item.tool_calls  # type: ignore[attr-defined]
-    if hasattr(item, "tool_call_id"):
-        data["tool_call_id"] = item.tool_call_id  # type: ignore[attr-defined]
-    if hasattr(item, "tool_name"):
-        data["tool_name"] = item.tool_name  # type: ignore[attr-defined]
-    if hasattr(item, "is_error"):
-        data["is_error"] = item.is_error  # type: ignore[attr-defined]
-    # Snapshot-specific fields
-    if hasattr(item, "snapshot_version"):
-        data["snapshot_version"] = item.snapshot_version  # type: ignore[attr-defined]
-    if hasattr(item, "raw_item_count"):
-        data["raw_item_count"] = item.raw_item_count  # type: ignore[attr-defined]
-    if hasattr(item, "latest_raw_id"):
-        data["latest_raw_id"] = item.latest_raw_id  # type: ignore[attr-defined]
-    if hasattr(item, "latest_raw_created_at"):
-        data["latest_raw_created_at"] = item.latest_raw_created_at  # type: ignore[attr-defined]
-    if hasattr(item, "config_hash"):
-        data["config_hash"] = item.config_hash  # type: ignore[attr-defined]
-    return data
+def _row_to_item_sqlite(row: Any) -> MemoryItem:
+    """Reconstruct a MemoryItem from an aiosqlite Row.
 
-
-def _row_to_item(row: Any) -> MemoryItem:
-    """Reconstruct a MemoryItem from a database row."""
+    Parses the JSON metadata and extra_json columns (always stored as text
+    in SQLite), then delegates to the shared ``row_to_item`` helper.
+    """
     meta_dict = json.loads(row["metadata"])
     extra = json.loads(row["extra_json"])
-
-    kwargs: dict[str, Any] = {
-        "id": row["id"],
-        "content": row["content"],
-        "memory_type": row["memory_type"],
-        "status": MemoryStatus(row["status"]),
-        "metadata": MemoryMetadata(**meta_dict),
-        "created_at": row["created_at"],
-        "updated_at": row["updated_at"],
-    }
-
-    # Dispatch to subtype based on memory_type
-    from exo.memory.base import (  # pyright: ignore[reportMissingImports]
-        AIMemory,
-        HumanMemory,
-        SystemMemory,
-        ToolMemory,
+    return _row_to_item_shared(
+        row["id"],
+        row["content"],
+        row["memory_type"],
+        row["status"],
+        meta_dict,
+        extra,
+        row["created_at"],
+        row["updated_at"],
     )
-
-    memory_type = row["memory_type"]
-    if memory_type == "system":
-        return SystemMemory(**kwargs)
-    if memory_type == "human":
-        return HumanMemory(**kwargs)
-    if memory_type == "ai":
-        kwargs["tool_calls"] = extra.get("tool_calls", [])
-        return AIMemory(**kwargs)
-    if memory_type == "tool":
-        kwargs["tool_call_id"] = extra.get("tool_call_id", "")
-        kwargs["tool_name"] = extra.get("tool_name", "")
-        kwargs["is_error"] = extra.get("is_error", False)
-        return ToolMemory(**kwargs)
-    if memory_type == "snapshot":
-        from exo.memory.snapshot import SnapshotMemory  # pyright: ignore[reportMissingImports]
-
-        kwargs["snapshot_version"] = extra.get("snapshot_version", 1)
-        kwargs["raw_item_count"] = extra.get("raw_item_count", 0)
-        kwargs["latest_raw_id"] = extra.get("latest_raw_id", "")
-        kwargs["latest_raw_created_at"] = extra.get("latest_raw_created_at", "")
-        kwargs["config_hash"] = extra.get("config_hash", "")
-        return SnapshotMemory(**kwargs)
-    return MemoryItem(**kwargs)

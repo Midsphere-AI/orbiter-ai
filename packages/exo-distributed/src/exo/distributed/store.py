@@ -6,8 +6,9 @@ import json
 import logging
 from typing import Any
 
-import redis.asyncio as aioredis
-
+from exo.distributed._redis_mixin import (  # pyright: ignore[reportMissingImports]
+    RedisConnectionMixin,
+)
 from exo.distributed.models import (  # pyright: ignore[reportMissingImports]
     TaskResult,
     TaskStatus,
@@ -16,7 +17,7 @@ from exo.distributed.models import (  # pyright: ignore[reportMissingImports]
 logger = logging.getLogger(__name__)
 
 
-class TaskStore:
+class TaskStore(RedisConnectionMixin):
     """Tracks task status in Redis hashes with TTL-based auto-cleanup.
 
     Each task is stored as a Redis hash at ``{prefix}{task_id}``.  A secondary
@@ -30,28 +31,15 @@ class TaskStore:
         prefix: str = "exo:task:",
         ttl_seconds: int = 86400,
     ) -> None:
+        super().__init__()
         self._redis_url = redis_url
         self._prefix = prefix
         self._ttl_seconds = ttl_seconds
-        self._redis: aioredis.Redis | None = None
 
     async def connect(self) -> None:
         """Connect to Redis."""
         logger.debug("TaskStore connecting to Redis (prefix=%s)", self._prefix)
-        self._redis = aioredis.from_url(self._redis_url, decode_responses=True)
-
-    async def disconnect(self) -> None:
-        """Close the Redis connection."""
-        if self._redis is not None:
-            await self._redis.aclose()
-            self._redis = None
-            logger.debug("TaskStore disconnected")
-
-    def _client(self) -> aioredis.Redis:
-        if self._redis is None:
-            msg = "TaskStore is not connected. Call connect() first."
-            raise RuntimeError(msg)
-        return self._redis
+        await super().connect()
 
     def _key(self, task_id: str) -> str:
         return f"{self._prefix}{task_id}"

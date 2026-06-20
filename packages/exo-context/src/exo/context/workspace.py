@@ -16,10 +16,12 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
+from exo.types import ExoError  # pyright: ignore[reportMissingImports]
+
 logger = logging.getLogger(__name__)
 
 
-class WorkspaceError(Exception):
+class WorkspaceError(ExoError):
     """Raised for workspace operation errors."""
 
 

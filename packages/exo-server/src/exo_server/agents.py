@@ -16,7 +16,7 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 # ---------------------------------------------------------------------------
 # Response models
@@ -25,6 +25,8 @@ from pydantic import BaseModel, Field
 
 class AgentInfo(BaseModel):
     """Summary information about a registered agent."""
+
+    model_config = ConfigDict(frozen=True)
 
     name: str
     model: str = ""
@@ -39,6 +41,8 @@ class AgentInfo(BaseModel):
 class WorkspaceFile(BaseModel):
     """Metadata about a file/artifact in an agent's workspace."""
 
+    model_config = ConfigDict(frozen=True)
+
     name: str
     artifact_type: str = "text"
     version_count: int = 1
@@ -46,6 +50,8 @@ class WorkspaceFile(BaseModel):
 
 class WorkspaceFileContent(BaseModel):
     """Full content of a workspace file."""
+
+    model_config = ConfigDict(frozen=True)
 
     name: str
     content: str

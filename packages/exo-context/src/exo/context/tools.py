@@ -109,8 +109,7 @@ async def _complete_todo(ctx: Any, index: int) -> str:
             return tool_error(
                 f"Invalid index {index}",
                 hint=(
-                    "Use get_todo to see current items, then call "
-                    "complete_todo with a valid index."
+                    "Use get_todo to see current items, then call complete_todo with a valid index."
                 ),
                 valid_range=f"0-{len(todos) - 1}",
             )
@@ -242,8 +241,7 @@ async def _grep_knowledge(ctx: Any, name: str, pattern: str) -> str:
             return tool_error(
                 f"No matches for pattern '{pattern}' in '{name}'",
                 hint=(
-                    "Try a broader pattern or use get_knowledge to see "
-                    "the full artifact content."
+                    "Try a broader pattern or use get_knowledge to see the full artifact content."
                 ),
             )
         return "\n".join(matches)
@@ -273,8 +271,7 @@ async def _search_knowledge(ctx: Any, query: str, top_k: int = 5) -> str:
             return tool_error(
                 f"No results for query '{query}'",
                 hint=(
-                    "Try different search terms or use get_knowledge "
-                    "with a specific artifact name."
+                    "Try different search terms or use get_knowledge with a specific artifact name."
                 ),
             )
         lines: list[str] = []
@@ -344,9 +341,7 @@ async def _read_file(ctx: Any, path: str) -> str:
         target = (base / path).resolve()
         # Prevent path traversal outside working directory
         if not target.is_relative_to(base):
-            logger.warning(
-                "path traversal blocked: %r resolved outside working dir %s", path, base
-            )
+            logger.warning("path traversal blocked: %r resolved outside working dir %s", path, base)
             return tool_error(
                 f"Access denied: '{path}' is outside the working directory",
                 hint="Use a relative path within the working directory.",
@@ -354,10 +349,7 @@ async def _read_file(ctx: Any, path: str) -> str:
         if not target.is_file():
             return tool_error(
                 f"File not found: '{path}'",
-                hint=(
-                    "Check the file path. Use a relative path from "
-                    "the working directory root."
-                ),
+                hint=("Check the file path. Use a relative path from the working directory root."),
             )
         try:
             return target.read_text(encoding="utf-8")

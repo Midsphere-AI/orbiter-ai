@@ -9,8 +9,6 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-logger = logging.getLogger(__name__)
-
 import httpx
 
 from exo.a2a.types import (  # pyright: ignore[reportMissingImports]
@@ -18,6 +16,8 @@ from exo.a2a.types import (  # pyright: ignore[reportMissingImports]
     ClientConfig,
 )
 from exo.types import AgentOutput, ExoError, Usage  # pyright: ignore[reportMissingImports]
+
+logger = logging.getLogger(__name__)
 
 
 class A2AClientError(ExoError):
@@ -288,9 +288,45 @@ class RemoteAgent:
         text = _extract_text(resp)
         return AgentOutput(text=text, tool_calls=[], usage=Usage())
 
-    async def describe(self) -> dict[str, Any]:
-        """Return a description using the resolved agent card."""
+    def describe(self) -> dict[str, Any]:
+        """Return a description using the cached agent card.
+
+        This method is **synchronous** to match the ``describe()`` signature of
+        local ``Agent`` objects and allow duck-typed callers to work correctly.
+
+        If the agent card has already been resolved (i.e. ``RemoteAgent`` was
+        constructed with an ``AgentCard`` instance, or ``run()`` has been called
+        at least once), the cached card is used immediately.  If the card has
+        not yet been fetched, a minimal description is returned with only the
+        locally known ``name``; callers that need the full remote card should
+        call ``await describe_async()`` instead.
+        """
         logger.debug("RemoteAgent.describe: name=%s", self.name)
+        card = self._client._agent_card
+        if card is not None:
+            return {
+                "name": self.name,
+                "remote_name": card.name,
+                "description": card.description,
+                "url": card.url,
+                "capabilities": card.capabilities.model_dump(),
+            }
+        # Card not yet resolved — return minimal info from local state only.
+        return {
+            "name": self.name,
+            "remote_name": None,
+            "description": "",
+            "url": self._client._source or "",
+            "capabilities": {},
+        }
+
+    async def describe_async(self) -> dict[str, Any]:
+        """Return a full description, resolving the agent card if needed.
+
+        Use this when you need the complete remote agent metadata and the card
+        may not have been fetched yet.
+        """
+        logger.debug("RemoteAgent.describe_async: name=%s", self.name)
         card = await self._client.resolve_agent_card()
         return {
             "name": self.name,

@@ -1,8 +1,14 @@
 """Exo Harness: composable orchestration for agent runs."""
 
+from importlib.metadata import PackageNotFoundError, version
 from pkgutil import extend_path
 
 __path__ = extend_path(__path__, __name__)
+
+try:
+    __version__: str = version("exo-harness")
+except PackageNotFoundError:
+    __version__ = "0.1.0"
 
 from exo.harness.base import Harness, HarnessContext, HarnessError, HarnessNode
 from exo.harness.checkpoint import CheckpointAdapter
@@ -17,7 +23,7 @@ from exo.harness.types import (
     SubAgentTask,
 )
 
-__all__ = [
+__all__: list[str] = [
     "CheckpointAdapter",
     "CostTrackingMiddleware",
     "Harness",

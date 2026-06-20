@@ -431,6 +431,7 @@ class TestToolCallEvent:
             "type": "tool_call",
             "tool_name": "search",
             "tool_call_id": "tc_1",
+            "arguments": "",
             "agent_name": "bot",
         }
         restored = ToolCallEvent.model_validate(data)

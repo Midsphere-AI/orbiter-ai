@@ -18,7 +18,7 @@ import uuid
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 # ---------------------------------------------------------------------------
 # Models
@@ -27,6 +27,8 @@ from pydantic import BaseModel, Field
 
 class SessionMessage(BaseModel):
     """A single message within a session."""
+
+    model_config = ConfigDict(frozen=True)
 
     role: str
     content: str
@@ -47,12 +49,16 @@ class Session(BaseModel):
 class CreateSessionRequest(BaseModel):
     """Request body for creating a new session."""
 
+    model_config = ConfigDict(frozen=True)
+
     agent_name: str = ""
     title: str = ""
 
 
 class UpdateSessionRequest(BaseModel):
     """Request body for updating a session."""
+
+    model_config = ConfigDict(frozen=True)
 
     title: str | None = None
     agent_name: str | None = None
@@ -61,12 +67,16 @@ class UpdateSessionRequest(BaseModel):
 class AppendMessageRequest(BaseModel):
     """Request body for appending a message to a session."""
 
+    model_config = ConfigDict(frozen=True)
+
     role: str
     content: str
 
 
 class SessionSummary(BaseModel):
     """Lightweight session info for list responses."""
+
+    model_config = ConfigDict(frozen=True)
 
     id: str
     agent_name: str

@@ -8,8 +8,8 @@ from pydantic import ValidationError
 from exo.memory.base import (  # pyright: ignore[reportMissingImports]
     AgentMemory,
     AIMemory,
+    ExoMemoryError,
     HumanMemory,
-    MemoryError,
     MemoryItem,
     MemoryMetadata,
     MemoryStatus,
@@ -120,17 +120,17 @@ class TestStatusTransitions:
 
     def test_discard_to_anything_fails(self) -> None:
         item = MemoryItem(content="x", memory_type="t", status=MemoryStatus.DISCARD)
-        with pytest.raises(MemoryError, match="Cannot transition"):
+        with pytest.raises(ExoMemoryError, match="Cannot transition"):
             item.transition(MemoryStatus.ACCEPTED)
 
     def test_accepted_to_draft_fails(self) -> None:
         item = MemoryItem(content="x", memory_type="t", status=MemoryStatus.ACCEPTED)
-        with pytest.raises(MemoryError, match="Cannot transition"):
+        with pytest.raises(ExoMemoryError, match="Cannot transition"):
             item.transition(MemoryStatus.DRAFT)
 
     def test_draft_to_draft_fails(self) -> None:
         item = MemoryItem(content="x", memory_type="t", status=MemoryStatus.DRAFT)
-        with pytest.raises(MemoryError, match="Cannot transition"):
+        with pytest.raises(ExoMemoryError, match="Cannot transition"):
             item.transition(MemoryStatus.DRAFT)
 
     def test_transition_updates_timestamp(self) -> None:

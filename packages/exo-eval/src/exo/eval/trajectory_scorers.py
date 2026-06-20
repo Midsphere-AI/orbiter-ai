@@ -11,10 +11,10 @@ from collections import Counter
 from collections.abc import Sequence
 from typing import Any
 
-logger = logging.getLogger(__name__)
-
 from exo.eval.base import Scorer, ScorerResult  # pyright: ignore[reportMissingImports]
 from exo.eval.llm_scorer import LLMAsJudgeScorer  # pyright: ignore[reportMissingImports]
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Scorer registry
@@ -200,9 +200,14 @@ class AnswerAccuracyLLMScorer(LLMAsJudgeScorer):
 class LabelDistributionScorer(Scorer):
     """Evaluates label balance / distribution skew across a dataset.
 
-    Per-case score is 0.0 (placeholder). The real value is in the
-    ``details`` dict which includes label counts, fractions, and skew.
-    Call :meth:`summarize` with all case results for aggregated statistics.
+    Per-case score definition: ``1.0`` if the case carries a non-None label
+    (i.e. the case is labelled and contributes to the distribution), ``0.0``
+    if the label is absent or the input does not expose one.  This gives a
+    meaningful signal at the case level — cases that lack labels are scored as
+    failures so callers can detect unlabelled data.
+
+    The real aggregate value is in :meth:`summarize`, which computes label
+    counts, per-label fractions, and distribution skew across all scored cases.
     """
 
     __slots__ = ("_label_key", "_name")
@@ -213,9 +218,15 @@ class LabelDistributionScorer(Scorer):
 
     async def score(self, case_id: str, input: Any, output: Any) -> ScorerResult:
         label = input.get(self._label_key, None) if isinstance(input, dict) else None
+        # Per-case score: 1.0 when a label is present, 0.0 when absent.
+        # This allows downstream criteria to flag unlabelled cases as failures.
+        per_case_score = 1.0 if label is not None else 0.0
+        logger.debug(
+            "LabelDistributionScorer case=%s label=%r score=%.1f", case_id, label, per_case_score
+        )
         return ScorerResult(
             scorer_name=self._name,
-            score=0.0,
+            score=per_case_score,
             details={"label": label},
         )
 

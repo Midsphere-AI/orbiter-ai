@@ -4,6 +4,8 @@ from pkgutil import extend_path
 
 __path__ = extend_path(__path__, __name__)
 
+__version__: str = "0.1.0"
+
 from exo.memory.backends.vector import (  # pyright: ignore[reportMissingImports]
     Embeddings,
     OpenAIEmbeddings,
@@ -13,9 +15,9 @@ from exo.memory.backends.vector import (  # pyright: ignore[reportMissingImports
 from exo.memory.base import (  # pyright: ignore[reportMissingImports]
     AgentMemory,
     AIMemory,
+    ExoMemoryError,
     HumanMemory,
     MemoryCategory,
-    MemoryError,
     MemoryItem,
     MemoryMetadata,
     MemoryStatus,
@@ -55,8 +57,8 @@ from exo.memory.long_term import (  # pyright: ignore[reportMissingImports]
     Extractor,
     LongTermMemory,
     MemoryOrchestrator,
+    MemoryTaskStatus,
     OrchestratorConfig,
-    TaskStatus,
 )
 from exo.memory.migrations import (  # pyright: ignore[reportMissingImports]
     Migration,
@@ -86,7 +88,7 @@ from exo.memory.summary import (  # pyright: ignore[reportMissingImports]
     generate_summary,
 )
 
-__all__ = [
+__all__: list[str] = [
     "MEMORY_ADDED",
     "MEMORY_CLEARED",
     "MEMORY_SEARCHED",
@@ -95,6 +97,7 @@ __all__ = [
     "AgentMemory",
     "Embeddings",
     "EncryptedMemoryStore",
+    "ExoMemoryError",
     "ExtractionTask",
     "ExtractionType",
     "Extractor",
@@ -102,7 +105,6 @@ __all__ = [
     "LongTermMemory",
     "MemUpdateChecker",
     "MemoryCategory",
-    "MemoryError",
     "MemoryEventEmitter",
     "MemoryEvolutionStrategy",
     "MemoryItem",
@@ -111,6 +113,7 @@ __all__ = [
     "MemoryPersistence",
     "MemoryStatus",
     "MemoryStore",
+    "MemoryTaskStatus",
     "MergeResult",
     "Migration",
     "MigrationRegistry",
@@ -126,7 +129,6 @@ __all__ = [
     "SummaryResult",
     "SummaryTemplate",
     "SystemMemory",
-    "TaskStatus",
     "ToolMemory",
     "UpdateDecision",
     "VectorMemoryStore",

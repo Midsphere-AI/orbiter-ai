@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 from datetime import UTC, datetime
 from typing import Any
@@ -15,6 +16,8 @@ from exo_web.database import get_db
 from exo_web.pagination import paginate
 from exo_web.routes.auth import get_current_user
 from exo_web.sanitize import sanitize_html
+
+_log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/templates", tags=["agent_templates"])
 
@@ -333,13 +336,21 @@ async def import_template(
     tools_required = data.get("tools_required", "[]")
     models_required = data.get("models_required", "[]")
 
-    # Strip credentials from imported config
+    # Strip credentials from imported config.  A malformed config_json is a
+    # hard error — we must not silently store credential-bearing or unparseable
+    # data, so we surface a 400 to the caller.
     try:
         config = json.loads(config_json) if isinstance(config_json, str) else config_json
+        if not isinstance(config, dict):
+            raise TypeError(f"config_json must be a JSON object, got {type(config).__name__}")
         config = _strip_credentials(config)
         config_json = json.dumps(config)
-    except (json.JSONDecodeError, TypeError):
-        pass
+    except (json.JSONDecodeError, TypeError) as exc:
+        _log.warning("import_template: malformed config_json — %s", exc)
+        raise HTTPException(
+            status_code=400,
+            detail=f"Malformed config_json in imported template: {exc}",
+        ) from exc
 
     async with get_db() as db:
         template_id = str(uuid.uuid4())
@@ -405,14 +416,22 @@ async def update_template(
         if field in updates and isinstance(updates[field], str):
             updates[field] = sanitize_html(updates[field])
 
-    # Strip credentials from config if provided
+    # Strip credentials from config if provided.  A malformed config_json is a
+    # hard error — we must not silently store credential-bearing or unparseable
+    # data, so we surface a 400 to the caller.
     if "config_json" in updates:
         try:
             config = json.loads(updates["config_json"])
+            if not isinstance(config, dict):
+                raise TypeError(f"config_json must be a JSON object, got {type(config).__name__}")
             config = _strip_credentials(config)
             updates["config_json"] = json.dumps(config)
-        except (json.JSONDecodeError, TypeError):
-            pass
+        except (json.JSONDecodeError, TypeError) as exc:
+            _log.warning("update_template %s: malformed config_json — %s", template_id, exc)
+            raise HTTPException(
+                status_code=400,
+                detail=f"Malformed config_json: {exc}",
+            ) from exc
 
     async with get_db() as db:
         existing = await _verify_ownership(db, template_id, user["id"])

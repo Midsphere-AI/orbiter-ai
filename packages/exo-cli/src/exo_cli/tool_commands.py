@@ -230,9 +230,9 @@ def _format_result(result: Any) -> str:
 _FROM_OPTION = Annotated[
     str | None,
     typer.Option(
-        "--from", "-f",
-        help="Python module path or .py file containing tools. "
-        "Default: EXO_TOOL_SOURCE env var.",
+        "--from",
+        "-f",
+        help="Python module path or .py file containing tools. Default: EXO_TOOL_SOURCE env var.",
     ),
 ]
 
@@ -301,7 +301,8 @@ def tool_call(
     inject: Annotated[
         list[str] | None,
         typer.Option(
-            "--inject", "-i",
+            "--inject",
+            "-i",
             help="Injected argument as KEY=VALUE (repeatable). "
             "Like injected_tool_args — visible in schema but auto-filled.",
         ),

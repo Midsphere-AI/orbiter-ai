@@ -37,7 +37,7 @@ from RestrictedPython.Guards import safer_getattr
 
 from exo.hooks import HookPoint
 from exo.tool import Tool
-from exo.types import ToolCallEvent, ToolResultEvent
+from exo.types import ExoError, ToolCallEvent, ToolResultEvent
 
 if TYPE_CHECKING:
     from exo.agent import Agent
@@ -114,11 +114,11 @@ class _PTCBaseExceptionTrap(Exception):  # noqa: N818  -- internal trap funnel
         super().__init__(f"{kind}: {detail}" if detail else kind)
 
 
-class PTCSandboxError(RuntimeError):
+class PTCSandboxError(ExoError):
     """Raised when user code hits a PTC sandbox restriction.
 
-    This is a regular ``Exception`` subclass so user code can
-    ``try/except`` and continue, and the agent sees a clean error
+    Inherits ``ExoError`` (which inherits ``Exception``) so user code
+    can still ``try/except`` and continue; the agent sees a clean error
     message in the tool result pointing at ``default_api``.
     """
 

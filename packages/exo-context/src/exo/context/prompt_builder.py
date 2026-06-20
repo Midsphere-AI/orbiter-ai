@@ -11,6 +11,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from exo.types import ExoError  # pyright: ignore[reportMissingImports]
+
 logger = logging.getLogger(__name__)
 
 from exo.context.context import Context  # pyright: ignore[reportMissingImports]
@@ -20,7 +22,7 @@ from exo.context.variables import (  # pyright: ignore[reportMissingImports]
 )
 
 
-class PromptBuilderError(Exception):
+class PromptBuilderError(ExoError):
     """Raised for prompt building failures."""
 
 

@@ -17,6 +17,7 @@ from exo.distributed.worker import (  # pyright: ignore[reportMissingImports]
     _deserialize_messages,
     _generate_worker_id,
 )
+from exo.types import ExoError  # pyright: ignore[reportMissingImports]
 
 # ---------------------------------------------------------------------------
 # _generate_worker_id
@@ -486,7 +487,7 @@ class TestDeserializeMessages:
         assert isinstance(result[2], AssistantMessage)
 
     def test_unknown_role_raises(self) -> None:
-        with pytest.raises(ValueError, match="Unknown message role"):
+        with pytest.raises(ExoError, match="Unknown message role"):
             _deserialize_messages([{"role": "unknown", "content": "bad"}])
 
     def test_empty_list(self) -> None:

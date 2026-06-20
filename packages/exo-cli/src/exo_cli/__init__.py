@@ -1,5 +1,7 @@
 """Exo CLI: Command-line agent runner."""
 
+__version__: str = "0.1.0"
+
 from exo_cli.batch import (
     BatchError,
     BatchItem,
@@ -24,7 +26,7 @@ from exo_cli.loader import (
 from exo_cli.main import CLIError, app, find_config, load_config, resolve_config
 from exo_cli.plugins import PluginError, PluginHook, PluginManager, PluginSpec
 
-__all__ = [
+__all__: list[str] = [
     "AgentLoadError",
     "BatchError",
     "BatchItem",

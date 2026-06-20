@@ -1,5 +1,7 @@
 """Exo Eval: Evaluation and scoring framework."""
 
+__version__: str = "0.1.0"
+
 from exo.eval.base import (  # pyright: ignore[reportMissingImports]
     EvalCaseResult,
     EvalCriteria,
@@ -44,7 +46,7 @@ from exo.eval.trajectory_scorers import (  # pyright: ignore[reportMissingImport
     scorer_register,
 )
 
-__all__ = [
+__all__: list[str] = [
     "AnswerAccuracyLLMScorer",
     "ConstraintSatisfactionScorer",
     "EvalCaseResult",

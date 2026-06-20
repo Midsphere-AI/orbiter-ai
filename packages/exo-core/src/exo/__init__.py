@@ -34,7 +34,7 @@ from exo.types import (
     VideoBlock,
 )
 
-__all__ = [
+__all__: list[str] = [
     "Agent",
     "AudioBlock",
     "ConsoleHandler",

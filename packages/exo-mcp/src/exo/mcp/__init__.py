@@ -1,5 +1,7 @@
 """Exo MCP: Model Context Protocol client and tools."""
 
+__version__: str = "0.1.0"
+
 from exo.mcp.client import (  # pyright: ignore[reportMissingImports]
     MCPClient,
     MCPClientError,
@@ -28,7 +30,7 @@ from exo.mcp.tools import (  # pyright: ignore[reportMissingImports]
     parse_namespaced_name,
 )
 
-__all__ = [
+__all__: list[str] = [
     "MCPClient",
     "MCPClientError",
     "MCPExecutionError",

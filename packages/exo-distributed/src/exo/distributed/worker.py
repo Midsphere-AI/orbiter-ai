@@ -34,6 +34,7 @@ from exo.observability.propagation import (  # pyright: ignore[reportMissingImpo
     DictCarrier,
 )
 from exo.observability.tracing import aspan  # pyright: ignore[reportMissingImports]
+from exo.types import ExoError  # pyright: ignore[reportMissingImports]
 
 _log = logging.getLogger(__name__)
 
@@ -84,7 +85,7 @@ def _deserialize_messages(raw: list[dict[str, Any]]) -> list[Any]:
         role = msg.get("role", "")
         cls = _role_map.get(role)
         if cls is None:
-            raise ValueError(f"Unknown message role: {role!r}")
+            raise ExoError(f"Unknown message role: {role!r}")
         messages.append(cls(**msg))
     return messages
 

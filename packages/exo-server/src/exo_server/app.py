@@ -21,15 +21,15 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
-
-logger = logging.getLogger(__name__)
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from exo.runner import run as _run_agent
 from exo_server.agents import agent_router
 from exo_server.sessions import session_router
 from exo_server.streaming import stream_router
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Request / response models
@@ -45,6 +45,8 @@ class ChatRequest(BaseModel):
         stream: Whether to stream the response via SSE.
     """
 
+    model_config = ConfigDict(frozen=True)
+
     message: str
     agent_name: str | None = None
     stream: bool = False
@@ -57,6 +59,8 @@ class InjectRequest(BaseModel):
         message: The message to inject into the running agent's context.
         agent_name: Name of the agent to inject into (optional; uses default if omitted).
     """
+
+    model_config = ConfigDict(frozen=True)
 
     message: str
     agent_name: str | None = None
@@ -71,6 +75,8 @@ class ChatResponse(BaseModel):
         steps: Number of LLM call steps taken.
         usage: Token usage statistics.
     """
+
+    model_config = ConfigDict(frozen=True)
 
     output: str = ""
     agent_name: str = ""

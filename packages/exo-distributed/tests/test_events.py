@@ -14,6 +14,7 @@ from exo.distributed.events import (  # pyright: ignore[reportMissingImports]
 )
 from exo.types import (  # pyright: ignore[reportMissingImports]
     ErrorEvent,
+    ExoError,
     ReasoningEvent,
     StatusEvent,
     StepEvent,
@@ -125,7 +126,7 @@ class TestDeserializeEvent:
         assert event.arguments_delta == '{"query":'
 
     def test_unknown_type_raises(self) -> None:
-        with pytest.raises(ValueError, match="Unknown event type"):
+        with pytest.raises(ExoError, match="Unknown event type"):
             _deserialize_event({"type": "unknown_xyz"})
 
     def test_round_trip_all_types(self) -> None:
@@ -164,7 +165,7 @@ class TestEventPublisherInit:
 
     def test_not_connected_raises(self) -> None:
         pub = EventPublisher("redis://localhost:6379")
-        with pytest.raises(RuntimeError, match="not connected"):
+        with pytest.raises(ExoError, match="not connected"):
             pub._client()
 
 
@@ -172,7 +173,7 @@ class TestEventPublisherConnect:
     @pytest.mark.asyncio
     async def test_connect_creates_client(self) -> None:
         pub = EventPublisher("redis://localhost:6379")
-        with patch("exo.distributed.events.aioredis.from_url") as mock_from_url:
+        with patch("exo.distributed._redis_mixin.aioredis.from_url") as mock_from_url:
             mock_redis = AsyncMock()
             mock_from_url.return_value = mock_redis
 
@@ -184,7 +185,7 @@ class TestEventPublisherConnect:
     @pytest.mark.asyncio
     async def test_disconnect(self) -> None:
         pub = EventPublisher("redis://localhost:6379")
-        with patch("exo.distributed.events.aioredis.from_url") as mock_from_url:
+        with patch("exo.distributed._redis_mixin.aioredis.from_url") as mock_from_url:
             mock_redis = AsyncMock()
             mock_from_url.return_value = mock_redis
 
@@ -290,7 +291,7 @@ class TestEventSubscriberInit:
 
     def test_not_connected_raises(self) -> None:
         sub = EventSubscriber("redis://localhost:6379")
-        with pytest.raises(RuntimeError, match="not connected"):
+        with pytest.raises(ExoError, match="not connected"):
             sub._client()
 
 

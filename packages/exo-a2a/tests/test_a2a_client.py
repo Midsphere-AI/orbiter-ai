@@ -385,10 +385,28 @@ class TestRemoteAgentRun:
 
 
 class TestRemoteAgentDescribe:
-    async def test_describe(self) -> None:
+    def test_describe_sync(self) -> None:
+        """describe() is synchronous to match local Agent.describe() signature."""
         card = _make_card("target-agent", "http://remote:9000")
         agent = RemoteAgent(name="local-proxy", agent_card=card)
-        desc = await agent.describe()
+        desc = agent.describe()
+        assert desc["name"] == "local-proxy"
+        assert desc["remote_name"] == "target-agent"
+        assert desc["url"] == "http://remote:9000"
+
+    def test_describe_unresolved(self) -> None:
+        """describe() on an unresolved agent returns minimal info."""
+        agent = RemoteAgent(name="proxy", agent_card="http://remote:9000/card")
+        desc = agent.describe()
+        assert desc["name"] == "proxy"
+        assert desc["remote_name"] is None
+        assert "http://remote:9000/card" in desc["url"]
+
+    async def test_describe_async(self) -> None:
+        """describe_async() resolves the card and returns full info."""
+        card = _make_card("target-agent", "http://remote:9000")
+        agent = RemoteAgent(name="local-proxy", agent_card=card)
+        desc = await agent.describe_async()
         assert desc["name"] == "local-proxy"
         assert desc["remote_name"] == "target-agent"
         assert desc["url"] == "http://remote:9000"

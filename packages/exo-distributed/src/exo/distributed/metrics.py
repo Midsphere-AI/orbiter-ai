@@ -49,6 +49,28 @@ def _build_attributes(
     return attrs
 
 
+def increment_counter(
+    name: str, attrs: dict[str, Any], *, description: str = "", unit: str = "1"
+) -> None:
+    """Increment a counter metric, routing to OTel or the in-memory collector."""
+    if HAS_OTEL:
+        _get_meter().create_counter(name=name, unit=unit, description=description).add(1, attrs)
+    else:
+        _collector.add_counter(name, 1.0, attrs)
+
+
+def record_histogram_value(
+    name: str, value: float, attrs: dict[str, Any], *, description: str = "", unit: str = "s"
+) -> None:
+    """Record a histogram observation, routing to OTel or the in-memory collector."""
+    if HAS_OTEL:
+        _get_meter().create_histogram(name=name, unit=unit, description=description).record(
+            value, attrs
+        )
+    else:
+        _collector.record_histogram(name, value, attrs)
+
+
 def record_task_submitted(
     *,
     task_id: str = "",
@@ -56,15 +78,11 @@ def record_task_submitted(
 ) -> None:
     """Record that a task was submitted to the distributed queue."""
     attrs = _build_attributes(task_id=task_id, queue_name=queue_name)
-    if HAS_OTEL:
-        meter = _get_meter()
-        meter.create_counter(
-            name=METRIC_DIST_TASKS_SUBMITTED,
-            unit="1",
-            description="Number of distributed tasks submitted",
-        ).add(1, attrs)
-    else:
-        _collector.add_counter(METRIC_DIST_TASKS_SUBMITTED, 1.0, attrs)
+    increment_counter(
+        METRIC_DIST_TASKS_SUBMITTED,
+        attrs,
+        description="Number of distributed tasks submitted",
+    )
 
 
 def record_task_completed(
@@ -83,31 +101,25 @@ def record_task_completed(
         wait_time: Time the task waited in the queue in seconds.
     """
     attrs = _build_attributes(task_id=task_id, worker_id=worker_id)
-    if HAS_OTEL:
-        meter = _get_meter()
-        meter.create_counter(
-            name=METRIC_DIST_TASKS_COMPLETED,
-            unit="1",
-            description="Number of distributed tasks completed",
-        ).add(1, attrs)
-        if duration > 0:
-            meter.create_histogram(
-                name=METRIC_DIST_TASK_DURATION,
-                unit="s",
-                description="Distributed task execution duration",
-            ).record(duration, attrs)
-        if wait_time > 0:
-            meter.create_histogram(
-                name=METRIC_DIST_TASK_WAIT_TIME,
-                unit="s",
-                description="Time task waited in queue before execution",
-            ).record(wait_time, attrs)
-    else:
-        _collector.add_counter(METRIC_DIST_TASKS_COMPLETED, 1.0, attrs)
-        if duration > 0:
-            _collector.record_histogram(METRIC_DIST_TASK_DURATION, duration, attrs)
-        if wait_time > 0:
-            _collector.record_histogram(METRIC_DIST_TASK_WAIT_TIME, wait_time, attrs)
+    increment_counter(
+        METRIC_DIST_TASKS_COMPLETED,
+        attrs,
+        description="Number of distributed tasks completed",
+    )
+    if duration > 0:
+        record_histogram_value(
+            METRIC_DIST_TASK_DURATION,
+            duration,
+            attrs,
+            description="Distributed task execution duration",
+        )
+    if wait_time > 0:
+        record_histogram_value(
+            METRIC_DIST_TASK_WAIT_TIME,
+            wait_time,
+            attrs,
+            description="Time task waited in queue before execution",
+        )
 
 
 def record_task_failed(
@@ -124,23 +136,18 @@ def record_task_failed(
         duration: Execution duration before failure in seconds.
     """
     attrs = _build_attributes(task_id=task_id, worker_id=worker_id)
-    if HAS_OTEL:
-        meter = _get_meter()
-        meter.create_counter(
-            name=METRIC_DIST_TASKS_FAILED,
-            unit="1",
-            description="Number of distributed tasks failed",
-        ).add(1, attrs)
-        if duration > 0:
-            meter.create_histogram(
-                name=METRIC_DIST_TASK_DURATION,
-                unit="s",
-                description="Distributed task execution duration",
-            ).record(duration, attrs)
-    else:
-        _collector.add_counter(METRIC_DIST_TASKS_FAILED, 1.0, attrs)
-        if duration > 0:
-            _collector.record_histogram(METRIC_DIST_TASK_DURATION, duration, attrs)
+    increment_counter(
+        METRIC_DIST_TASKS_FAILED,
+        attrs,
+        description="Number of distributed tasks failed",
+    )
+    if duration > 0:
+        record_histogram_value(
+            METRIC_DIST_TASK_DURATION,
+            duration,
+            attrs,
+            description="Distributed task execution duration",
+        )
 
 
 def record_task_cancelled(
@@ -150,15 +157,11 @@ def record_task_cancelled(
 ) -> None:
     """Record that a task was cancelled."""
     attrs = _build_attributes(task_id=task_id, worker_id=worker_id)
-    if HAS_OTEL:
-        meter = _get_meter()
-        meter.create_counter(
-            name=METRIC_DIST_TASKS_CANCELLED,
-            unit="1",
-            description="Number of distributed tasks cancelled",
-        ).add(1, attrs)
-    else:
-        _collector.add_counter(METRIC_DIST_TASKS_CANCELLED, 1.0, attrs)
+    increment_counter(
+        METRIC_DIST_TASKS_CANCELLED,
+        attrs,
+        description="Number of distributed tasks cancelled",
+    )
 
 
 def record_queue_depth(
@@ -169,8 +172,7 @@ def record_queue_depth(
     """Record the current queue depth."""
     attrs: dict[str, Any] = _build_attributes(queue_name=queue_name)
     if HAS_OTEL:
-        meter = _get_meter()
-        meter.create_up_down_counter(
+        _get_meter().create_up_down_counter(
             name=METRIC_DIST_QUEUE_DEPTH,
             unit="1",
             description="Current distributed task queue depth",

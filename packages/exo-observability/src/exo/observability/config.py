@@ -6,7 +6,7 @@ import logging
 import threading
 from enum import StrEnum
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 logger = logging.getLogger(__name__)
 
@@ -19,7 +19,8 @@ class TraceBackend(StrEnum):
     CONSOLE = "console"
 
 
-class ObservabilityConfig(BaseModel, frozen=True):
+class ObservabilityConfig(BaseModel):
+    model_config = ConfigDict(frozen=True)
     """Immutable configuration for the unified observability layer."""
 
     # Logging

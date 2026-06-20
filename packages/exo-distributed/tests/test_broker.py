@@ -9,6 +9,7 @@ import pytest
 
 from exo.distributed.broker import TaskBroker  # pyright: ignore[reportMissingImports]
 from exo.distributed.models import TaskPayload  # pyright: ignore[reportMissingImports]
+from exo.types import ExoError  # pyright: ignore[reportMissingImports]
 
 
 @pytest.fixture
@@ -34,7 +35,7 @@ class TestTaskBrokerInit:
         assert b.max_retries == 5
 
     def test_not_connected_raises(self, broker: TaskBroker) -> None:
-        with pytest.raises(RuntimeError, match="not connected"):
+        with pytest.raises(ExoError, match="not connected"):
             broker._client()
 
 

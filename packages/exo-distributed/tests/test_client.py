@@ -14,6 +14,7 @@ from exo.distributed.models import (  # pyright: ignore[reportMissingImports]
     TaskResult,
     TaskStatus,
 )
+from exo.types import ExoError  # pyright: ignore[reportMissingImports]
 
 # ---------------------------------------------------------------------------
 # TaskHandle.__init__ / properties
@@ -290,7 +291,7 @@ class TestTaskHandleResult:
             store=store,
             subscriber=MagicMock(),
         )
-        with pytest.raises(RuntimeError, match="failed: boom"):
+        with pytest.raises(ExoError, match="failed: boom"):
             await handle.result()
 
     @pytest.mark.asyncio
@@ -309,7 +310,7 @@ class TestTaskHandleResult:
             store=store,
             subscriber=MagicMock(),
         )
-        with pytest.raises(RuntimeError, match="was cancelled"):
+        with pytest.raises(ExoError, match="was cancelled"):
             await handle.result()
 
     @pytest.mark.asyncio
@@ -379,7 +380,7 @@ class TestDistributed:
         agent = MagicMock()
         with (
             patch.dict("os.environ", {}, clear=True),
-            pytest.raises(ValueError, match="redis_url must be provided"),
+            pytest.raises(ExoError, match="redis_url must be provided"),
         ):
             await distributed(agent, "hello")
 

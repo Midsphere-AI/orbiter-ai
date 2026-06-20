@@ -9,6 +9,13 @@ Usage:
 
 from __future__ import annotations
 
+try:
+    from importlib.metadata import version
+
+    __version__: str = version("exo-search")
+except Exception:
+    __version__ = "0.1.0"
+
 from .config import SearchConfig
 from .conversation import ConversationManager
 from .pipeline import run_search_pipeline, stream_search_pipeline
@@ -75,7 +82,7 @@ async def search_with_details(
     )
 
 
-__all__ = [
+__all__: list[str] = [
     "ConversationManager",
     "PipelineEvent",
     "ResearchMode",

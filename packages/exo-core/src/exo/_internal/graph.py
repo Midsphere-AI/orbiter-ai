@@ -10,8 +10,10 @@ import re
 from collections import deque
 from dataclasses import dataclass, field
 
+from exo.types import ExoError
 
-class GraphError(Exception):
+
+class GraphError(ExoError):
     """Raised for graph-related errors (cycles, invalid DSL, etc.)."""
 
 

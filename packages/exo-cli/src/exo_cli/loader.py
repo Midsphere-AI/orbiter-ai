@@ -23,13 +23,14 @@ from pathlib import Path
 from typing import Any
 
 from exo.agent import Agent
+from exo.types import ExoError  # pyright: ignore[reportMissingImports]
 
 # ---------------------------------------------------------------------------
 # Errors
 # ---------------------------------------------------------------------------
 
 
-class AgentLoadError(Exception):
+class AgentLoadError(ExoError):
     """Raised when agent loading or validation fails."""
 
 

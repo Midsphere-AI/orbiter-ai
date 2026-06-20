@@ -16,6 +16,12 @@ class EventBus:
 
     Handlers are called sequentially in registration order when an event
     is emitted. Event names are plain strings.
+
+    .. note::
+        **Naming divergence (I-14):** ``EventBus`` uses ``on``/``off``/``emit``
+        while ``HookManager`` (``exo.hooks``) uses ``add``/``remove``/``run``.
+        These are intentionally separate APIs — do **not** rename the public
+        methods, as doing so would break existing callers.
     """
 
     def __init__(self) -> None:
@@ -44,6 +50,12 @@ class EventBus:
 
     async def emit(self, event: str, **data: Any) -> None:
         """Emit an event, calling all registered handlers sequentially.
+
+        Handlers are called in registration order.  If a handler raises
+        an exception it propagates immediately, aborting any subsequent
+        handlers for that event — identical to ``HookManager.run()``
+        behavior.  Callers that need isolation must wrap individual
+        handlers in ``try/except`` before registering them.
 
         Args:
             event: The event name to emit.

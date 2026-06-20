@@ -1,5 +1,7 @@
 """Exo Train: Training framework with VeRL integration."""
 
+__version__: str = "0.1.0"
+
 from exo.train.evolution import (  # pyright: ignore[reportMissingImports]
     EpochResult,
     EvolutionConfig,
@@ -9,6 +11,7 @@ from exo.train.evolution import (  # pyright: ignore[reportMissingImports]
     EvolutionResult,
     EvolutionState,
     EvolutionStrategy,
+    GaussianMutationStrategy,
 )
 from exo.train.operator import (  # pyright: ignore[reportMissingImports]
     LLMCallOperator,
@@ -66,7 +69,7 @@ from exo.train.verl import (  # pyright: ignore[reportMissingImports]
     VeRLTrainer,
 )
 
-__all__ = [
+__all__: list[str] = [
     "DataSynthesiser",
     "DefaultStrategy",
     "EpochResult",
@@ -78,6 +81,7 @@ __all__ = [
     "EvolutionState",
     "EvolutionStrategy",
     "FileCheckpointStore",
+    "GaussianMutationStrategy",
     "InstructionOptimizer",
     "LLMCallOperator",
     "LLMCallTrace",

@@ -14,6 +14,7 @@ from exo.a2a.server import (  # pyright: ignore[reportMissingImports]
     TaskStore,
 )
 from exo.a2a.types import (  # pyright: ignore[reportMissingImports]
+    A2ATaskStatus,
     AgentCapabilities,
     AgentCard,
     AgentSkill,
@@ -26,11 +27,14 @@ from exo.a2a.types import (  # pyright: ignore[reportMissingImports]
     TransportMode,
 )
 
-__all__ = [
+__version__: str = "0.1.0"
+
+__all__: list[str] = [
     "A2AClient",
     "A2AClientError",
     "A2AServer",
     "A2AServerError",
+    "A2ATaskStatus",
     "AgentCapabilities",
     "AgentCard",
     "AgentExecutor",

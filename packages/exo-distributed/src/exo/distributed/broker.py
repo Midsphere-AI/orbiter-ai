@@ -7,6 +7,9 @@ import logging
 
 import redis.asyncio as aioredis
 
+from exo.distributed._redis_mixin import (  # pyright: ignore[reportMissingImports]
+    RedisConnectionMixin,
+)
 from exo.distributed.models import (  # pyright: ignore[reportMissingImports]
     TaskPayload,
     TaskStatus,
@@ -15,7 +18,7 @@ from exo.distributed.models import (  # pyright: ignore[reportMissingImports]
 logger = logging.getLogger(__name__)
 
 
-class TaskBroker:
+class TaskBroker(RedisConnectionMixin):
     """Enqueues and distributes agent execution tasks via Redis Streams.
 
     Uses Redis Streams (XADD/XREADGROUP/XACK) with consumer groups for
@@ -29,11 +32,11 @@ class TaskBroker:
         queue_name: str = "exo:tasks",
         max_retries: int = 3,
     ) -> None:
+        super().__init__()
         self._redis_url = redis_url
         self._queue_name = queue_name
         self._max_retries = max_retries
         self._group_name = f"{queue_name}:group"
-        self._redis: aioredis.Redis | None = None
         self._pending_ids: dict[str, str] = {}
 
     @property
@@ -42,31 +45,16 @@ class TaskBroker:
 
     async def connect(self) -> None:
         """Connect to Redis and ensure the consumer group exists."""
-        logger.debug("TaskBroker connecting to Redis (queue=%s)", self._queue_name)
-        self._redis = aioredis.from_url(self._redis_url, decode_responses=True)
+        await super().connect()
+        r = self._client()
         try:
-            await self._redis.xgroup_create(
-                self._queue_name, self._group_name, id="0", mkstream=True
-            )
+            await r.xgroup_create(self._queue_name, self._group_name, id="0", mkstream=True)
             logger.debug("TaskBroker created consumer group %s", self._group_name)
         except aioredis.ResponseError as exc:
             # Group already exists — safe to ignore.
             if "BUSYGROUP" not in str(exc):
                 raise
             logger.debug("TaskBroker consumer group %s already exists", self._group_name)
-
-    async def disconnect(self) -> None:
-        """Close the Redis connection."""
-        if self._redis is not None:
-            await self._redis.aclose()
-            self._redis = None
-            logger.debug("TaskBroker disconnected")
-
-    def _client(self) -> aioredis.Redis:
-        if self._redis is None:
-            msg = "TaskBroker is not connected. Call connect() first."
-            raise RuntimeError(msg)
-        return self._redis
 
     async def submit(self, task: TaskPayload) -> str:
         """Enqueue a task and return its task_id."""

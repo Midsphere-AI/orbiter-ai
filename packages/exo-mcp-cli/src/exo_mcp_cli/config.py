@@ -25,12 +25,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from exo.types import ExoError  # pyright: ignore[reportMissingImports]
+
 _ENV_PATTERN = re.compile(r"\$\{([^}:]+)\}")
 _DEFAULT_CONFIG_NAMES = ("mcp.json",)
 _HOME_CONFIG_DIR = Path.home() / ".exo-mcp"
 
 
-class MCPConfigError(Exception):
+class MCPConfigError(ExoError):
     """Raised on config loading/saving failures."""
 
 

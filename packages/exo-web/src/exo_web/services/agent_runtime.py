@@ -19,6 +19,7 @@ from exo.tool import FunctionTool
 from exo.types import ExoError, Message, TextEvent, Usage, UsageEvent, UserMessage
 from exo_web.crypto import decrypt_api_key
 from exo_web.database import get_db
+from exo_web.services.sandbox import SandboxConfig, execute_code
 
 _log = logging.getLogger(__name__)
 
@@ -120,6 +121,8 @@ async def _resolve_tools(tools_json: str, project_id: str, user_id: str) -> list
         tool_data = dict(row)
         tool_name = tool_data["name"]
         description = tool_data.get("description", "")
+        tool_code: str = tool_data.get("code", "") or ""
+        tool_type: str = tool_data.get("tool_type", "function") or "function"
 
         # Parse schema for parameters
         try:
@@ -127,12 +130,69 @@ async def _resolve_tools(tools_json: str, project_id: str, user_id: str) -> list
         except (json.JSONDecodeError, TypeError):
             schema = {}
 
-        # Create a simple callable wrapper — bind tool_name via default arg
-        async def _tool_stub(_name: str = tool_name, **kwargs: Any) -> str:
-            return json.dumps({"status": "executed", "tool": _name, "args": kwargs})
+        if tool_code and tool_type == "function":
+            # Execute the stored Python code in the sandbox.
+            # Inject call arguments as top-level variables so the user code can
+            # read them, then capture stdout as the result.
+            async def _tool_sandbox(
+                _name: str = tool_name,
+                _code: str = tool_code,
+                **kwargs: Any,
+            ) -> str:
+                # Build a preamble that binds each kwarg as a variable
+                preamble_lines = []
+                for k, v in kwargs.items():
+                    preamble_lines.append(f"{k} = {v!r}")
+                preamble = "\n".join(preamble_lines)
+                full_code = f"{preamble}\n{_code}" if preamble else _code
+
+                _log.debug("tool sandbox exec: tool=%s code_len=%d", _name, len(full_code))
+                result = execute_code(full_code, SandboxConfig())
+
+                if result.success:
+                    output = result.stdout.strip()
+                    return output if output else json.dumps({"status": "ok", "tool": _name})
+                else:
+                    _log.warning(
+                        "tool sandbox failed: tool=%s error=%s stderr=%s",
+                        _name,
+                        result.error,
+                        result.stderr[:200] if result.stderr else "",
+                    )
+                    return json.dumps(
+                        {
+                            "status": "error",
+                            "tool": _name,
+                            "error": result.error or "Execution failed",
+                            "stderr": result.stderr[:500] if result.stderr else "",
+                        }
+                    )
+
+            callable_fn = _tool_sandbox
+        else:
+            # No executable code — return a structured stub indicating the tool
+            # type is not directly executable (e.g. 'http', 'schema', 'mcp').
+            async def _tool_stub(
+                _name: str = tool_name, _ttype: str = tool_type, **kwargs: Any
+            ) -> str:
+                _log.warning(
+                    "tool %r (type=%r) has no executable code; returning stub result",
+                    _name,
+                    _ttype,
+                )
+                return json.dumps(
+                    {
+                        "status": "not_implemented",
+                        "tool": _name,
+                        "tool_type": _ttype,
+                        "args": kwargs,
+                    }
+                )
+
+            callable_fn = _tool_stub
 
         ft = FunctionTool(
-            _tool_stub,
+            callable_fn,
             name=tool_name,
             description=description or f"Tool: {tool_name}",
         )

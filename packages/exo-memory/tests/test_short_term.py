@@ -6,8 +6,8 @@ import pytest
 
 from exo.memory.base import (  # pyright: ignore[reportMissingImports]
     AIMemory,
+    ExoMemoryError,
     HumanMemory,
-    MemoryError,
     MemoryMetadata,
     MemoryStatus,
     MemoryStore,
@@ -74,7 +74,7 @@ class TestShortTermMemoryInit:
         assert mem.max_rounds == 5
 
     def test_invalid_scope(self) -> None:
-        with pytest.raises(MemoryError, match="Invalid scope"):
+        with pytest.raises(ExoMemoryError, match="Invalid scope"):
             ShortTermMemory(scope="invalid")
 
     def test_repr(self) -> None:

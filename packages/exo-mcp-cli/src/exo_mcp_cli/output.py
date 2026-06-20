@@ -49,7 +49,9 @@ def print_servers_table(servers: dict[str, ServerEntry]) -> None:
     table.add_column("Transport", no_wrap=True)
     table.add_column("Endpoint")
     for entry in servers.values():
-        endpoint = entry.url or (f"{entry.command} {' '.join(entry.args)}" if entry.command else "-")
+        endpoint = entry.url or (
+            f"{entry.command} {' '.join(entry.args)}" if entry.command else "-"
+        )
         table.add_row(entry.name, entry.transport, endpoint)
     console.print(table)
 

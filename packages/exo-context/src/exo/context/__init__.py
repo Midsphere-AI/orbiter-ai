@@ -1,5 +1,7 @@
 """Exo Context: hierarchical state, prompt building, processors, workspace."""
 
+__version__: str = "0.1.0"
+
 from exo.context.checkpoint import (  # pyright: ignore[reportMissingImports]
     Checkpoint,
     CheckpointStore,
@@ -50,7 +52,7 @@ from exo.context.workspace import (  # pyright: ignore[reportMissingImports]
     Workspace,
 )
 
-__all__ = [
+__all__: list[str] = [
     "ArtifactType",
     "AutomationMode",
     "Checkpoint",

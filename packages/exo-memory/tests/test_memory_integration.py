@@ -11,18 +11,19 @@ from exo.memory import (  # pyright: ignore[reportMissingImports]
     MEMORY_CLEARED,
     MEMORY_SEARCHED,
     AIMemory,
+    ExoMemoryError,
     ExtractionTask,
     ExtractionType,
     Extractor,
     HumanMemory,
     LongTermMemory,
-    MemoryError,
     MemoryEventEmitter,
     MemoryItem,
     MemoryMetadata,
     MemoryOrchestrator,
     MemoryStatus,
     MemoryStore,
+    MemoryTaskStatus,
     OrchestratorConfig,
     ShortTermMemory,
     Summarizer,
@@ -30,7 +31,6 @@ from exo.memory import (  # pyright: ignore[reportMissingImports]
     SummaryResult,
     SummaryTemplate,
     SystemMemory,
-    TaskStatus,
     ToolMemory,
     check_trigger,
     generate_summary,
@@ -49,7 +49,7 @@ class TestPublicAPIImports:
         assert MemoryMetadata is not None
         assert MemoryStatus is not None
         assert MemoryStore is not None
-        assert MemoryError is not None
+        assert ExoMemoryError is not None
 
     def test_memory_subtypes(self) -> None:
         assert SystemMemory is not None
@@ -67,7 +67,7 @@ class TestPublicAPIImports:
         assert ExtractionTask is not None
         assert ExtractionType is not None
         assert Extractor is not None
-        assert TaskStatus is not None
+        assert MemoryTaskStatus is not None
 
     def test_summary(self) -> None:
         assert SummaryConfig is not None
@@ -302,7 +302,7 @@ class TestEndToEndScenarios:
         # Submit extraction
         tasks = orchestrator.submit(items)
         assert len(tasks) == 1
-        assert tasks[0].status == TaskStatus.PENDING
+        assert tasks[0].status == MemoryTaskStatus.PENDING
 
         # Process with mock extractor
         mock_extractor = AsyncMock()
@@ -310,7 +310,7 @@ class TestEndToEndScenarios:
 
         processed = await orchestrator.process_all(mock_extractor)
         assert len(processed) == 1
-        assert processed[0].status == TaskStatus.COMPLETED
+        assert processed[0].status == MemoryTaskStatus.COMPLETED
 
         # Verify stored in long-term memory
         facts = await long.search(memory_type="facts")

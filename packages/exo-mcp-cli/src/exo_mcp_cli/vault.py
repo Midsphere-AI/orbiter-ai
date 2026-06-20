@@ -22,6 +22,8 @@ from pathlib import Path
 
 from cryptography.fernet import Fernet, InvalidToken
 
+from exo.types import ExoError  # pyright: ignore[reportMissingImports]
+
 _PBKDF2_ITERATIONS = 480_000
 _SALT_LEN = 16
 _DEFAULT_VAULT_DIR = Path.home() / ".exo-mcp"
@@ -29,7 +31,7 @@ _DEFAULT_VAULT_PATH = _DEFAULT_VAULT_DIR / "credentials.vault"
 _ENV_KEY = "EXO_MCP_VAULT_KEY"
 
 
-class VaultError(Exception):
+class VaultError(ExoError):
     """Raised on vault operation failures."""
 
 

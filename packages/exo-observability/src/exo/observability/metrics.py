@@ -203,6 +203,27 @@ def build_tool_attributes(
 
 
 # ---------------------------------------------------------------------------
+# Branching helpers — encapsulate OTel vs in-memory dispatch
+# ---------------------------------------------------------------------------
+
+
+def _increment_counter(name: str, attrs: dict[str, Any], *, value: float = 1.0) -> None:
+    """Increment a counter via OTel or the in-memory fallback."""
+    if HAS_OTEL:
+        _get_meter().create_counter(name=name).add(value, attrs)
+    else:
+        _collector.add_counter(name, value, attrs)
+
+
+def _record_histogram_value(name: str, value: float, attrs: dict[str, Any]) -> None:
+    """Record a histogram observation via OTel or the in-memory fallback."""
+    if HAS_OTEL:
+        _get_meter().create_histogram(name=name).record(value, attrs)
+    else:
+        _collector.record_histogram(name, value, attrs)
+
+
+# ---------------------------------------------------------------------------
 # Recording helpers
 # ---------------------------------------------------------------------------
 
@@ -229,39 +250,15 @@ def record_agent_run(
         output_tokens,
     )
 
-    if HAS_OTEL:
-        meter = _get_meter()
-        meter.create_histogram(
-            name=METRIC_AGENT_RUN_DURATION,
-            unit="s",
-            description="Agent run duration in seconds",
-        ).record(duration, attrs)
-        meter.create_counter(
-            name=METRIC_AGENT_RUN_COUNTER,
-            unit="1",
-            description="Number of agent run invocations",
-        ).add(1, attrs)
-        total_tokens = input_tokens + output_tokens
-        if total_tokens > 0:
-            token_attrs = dict(attrs)
-            token_attrs[GEN_AI_USAGE_INPUT_TOKENS] = input_tokens
-            token_attrs[GEN_AI_USAGE_OUTPUT_TOKENS] = output_tokens
-            token_attrs[GEN_AI_USAGE_TOTAL_TOKENS] = total_tokens
-            meter.create_histogram(
-                name=METRIC_AGENT_TOKEN_USAGE,
-                unit="token",
-                description="Agent token usage per run",
-            ).record(total_tokens, token_attrs)
-    else:
-        _collector.record_histogram(METRIC_AGENT_RUN_DURATION, duration, attrs)
-        _collector.add_counter(METRIC_AGENT_RUN_COUNTER, 1.0, attrs)
-        total_tokens = input_tokens + output_tokens
-        if total_tokens > 0:
-            token_attrs = dict(attrs)
-            token_attrs[GEN_AI_USAGE_INPUT_TOKENS] = input_tokens
-            token_attrs[GEN_AI_USAGE_OUTPUT_TOKENS] = output_tokens
-            token_attrs[GEN_AI_USAGE_TOTAL_TOKENS] = total_tokens
-            _collector.record_histogram(METRIC_AGENT_TOKEN_USAGE, float(total_tokens), token_attrs)
+    _record_histogram_value(METRIC_AGENT_RUN_DURATION, duration, attrs)
+    _increment_counter(METRIC_AGENT_RUN_COUNTER, attrs)
+    total_tokens = input_tokens + output_tokens
+    if total_tokens > 0:
+        token_attrs = dict(attrs)
+        token_attrs[GEN_AI_USAGE_INPUT_TOKENS] = input_tokens
+        token_attrs[GEN_AI_USAGE_OUTPUT_TOKENS] = output_tokens
+        token_attrs[GEN_AI_USAGE_TOTAL_TOKENS] = total_tokens
+        _record_histogram_value(METRIC_AGENT_TOKEN_USAGE, float(total_tokens), token_attrs)
 
 
 def record_tool_step(
@@ -278,21 +275,8 @@ def record_tool_step(
     attrs[TOOL_STEP_SUCCESS] = "1" if success else "0"
     logger.debug("record_tool_step: duration=%.3fs success=%s", duration, success)
 
-    if HAS_OTEL:
-        meter = _get_meter()
-        meter.create_histogram(
-            name=METRIC_TOOL_STEP_DURATION,
-            unit="s",
-            description="Tool step execution duration in seconds",
-        ).record(duration, attrs)
-        meter.create_counter(
-            name=METRIC_TOOL_STEP_COUNTER,
-            unit="1",
-            description="Number of tool step invocations",
-        ).add(1, attrs)
-    else:
-        _collector.record_histogram(METRIC_TOOL_STEP_DURATION, duration, attrs)
-        _collector.add_counter(METRIC_TOOL_STEP_COUNTER, 1.0, attrs)
+    _record_histogram_value(METRIC_TOOL_STEP_DURATION, duration, attrs)
+    _increment_counter(METRIC_TOOL_STEP_COUNTER, attrs)
 
 
 # ---------------------------------------------------------------------------

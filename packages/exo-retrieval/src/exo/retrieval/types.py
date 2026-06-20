@@ -25,7 +25,7 @@ class Document(BaseModel):
     embedding: list[float] | None = None
 
 
-class Chunk(BaseModel, frozen=True):
+class Chunk(BaseModel):
     """An immutable slice of a document for retrieval.
 
     Attributes:
@@ -37,6 +37,8 @@ class Chunk(BaseModel, frozen=True):
         metadata: Arbitrary metadata inherited or derived from the document.
     """
 
+    model_config = {"frozen": True}
+
     document_id: str
     index: int
     content: str
@@ -45,7 +47,7 @@ class Chunk(BaseModel, frozen=True):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
-class RetrievalResult(BaseModel, frozen=True):
+class RetrievalResult(BaseModel):
     """A scored chunk returned from a retrieval query.
 
     Attributes:
@@ -53,6 +55,8 @@ class RetrievalResult(BaseModel, frozen=True):
         score: Similarity or relevance score (higher is better).
         metadata: Additional metadata from the retrieval process.
     """
+
+    model_config = {"frozen": True}
 
     chunk: Chunk
     score: float

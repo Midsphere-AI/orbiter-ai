@@ -12,8 +12,10 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+from exo.types import ExoError  # pyright: ignore[reportMissingImports]
 
-class TrajectoryError(Exception):
+
+class TrajectoryError(ExoError):
     """Error during trajectory operations."""
 
 

@@ -7,8 +7,8 @@ import os
 import pytest
 
 from exo.memory.base import (  # pyright: ignore[reportMissingImports]
+    ExoMemoryError,
     MemoryCategory,
-    MemoryError,
     MemoryItem,
     MemoryMetadata,
     MemoryStatus,
@@ -211,7 +211,7 @@ class TestWrongKey:
         item = MemoryItem(id="wk-1", content="encrypted with key A", memory_type="human")
         await store_a.add(item)
 
-        with pytest.raises(MemoryError, match="Failed to decrypt"):
+        with pytest.raises(ExoMemoryError, match="Failed to decrypt"):
             await store_b.get("wk-1")
 
     @pytest.mark.anyio()

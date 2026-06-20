@@ -26,7 +26,7 @@ from exo.types import (  # pyright: ignore[reportMissingImports]
 )
 
 # Patch HAS_OTEL to False so all recording helpers use the in-memory collector.
-_NO_OTEL_EVENTS = patch("exo.distributed.events.HAS_OTEL", False)
+# events.py now delegates to metrics.py helpers, so only patching metrics is needed.
 _NO_OTEL_METRICS = patch("exo.distributed.metrics.HAS_OTEL", False)
 
 
@@ -34,7 +34,7 @@ _NO_OTEL_METRICS = patch("exo.distributed.metrics.HAS_OTEL", False)
 def _reset() -> None:
     """Reset in-memory metrics and force in-memory path for each test."""
     reset_metrics()
-    with _NO_OTEL_EVENTS, _NO_OTEL_METRICS:
+    with _NO_OTEL_METRICS:
         yield  # type: ignore[misc]
 
 

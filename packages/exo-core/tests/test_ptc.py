@@ -2048,7 +2048,7 @@ class TestPTCSignatureRichMetadata:
 
         # The tool function has no user_id param — if we didn't strip it,
         # this would TypeError.  The strip happens in _make_tool_fn.
-        asyncio.get_event_loop().run_until_complete(run())
+        asyncio.run(run())
 
 
 class TestPTCExtraArgs:
@@ -2091,7 +2091,7 @@ class TestPTCExtraArgs:
                 intent="search all items",
             )
 
-        result = asyncio.get_event_loop().run_until_complete(run())
+        result = asyncio.run(run())
         assert "search all items" in result
 
     def test_extra_args_unknown_keys_filtered(self) -> None:
@@ -2111,7 +2111,7 @@ class TestPTCExtraArgs:
                 bogus_key="should be dropped",
             )
 
-        result = asyncio.get_event_loop().run_until_complete(run())
+        result = asyncio.run(run())
         # Only 'intent' should be in ptc_args; 'bogus_key' dropped
         assert "['intent']" in result
 
@@ -2162,7 +2162,7 @@ class TestPTCExtraArgs:
             b = await ptc_tool.execute(code="print(ptc_args)", key="second")
             return a, b
 
-        a, b = asyncio.get_event_loop().run_until_complete(run())
+        a, b = asyncio.run(run())
         assert "first" in a
         assert "second" in b
         assert "first" not in b

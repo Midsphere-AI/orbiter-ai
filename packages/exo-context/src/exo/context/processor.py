@@ -29,12 +29,14 @@ from abc import ABC, abstractmethod
 from collections import defaultdict
 from typing import Any
 
+from exo.types import ExoError  # pyright: ignore[reportMissingImports]
+
 logger = logging.getLogger(__name__)
 
 from exo.context.context import Context  # pyright: ignore[reportMissingImports]
 
 
-class ProcessorError(Exception):
+class ProcessorError(ExoError):
     """Raised for processor pipeline errors."""
 
 

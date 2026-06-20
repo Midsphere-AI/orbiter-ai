@@ -29,11 +29,13 @@ from pathlib import Path
 from typing import Annotated, Any
 from urllib.parse import urlparse
 
-logger = logging.getLogger(__name__)
-
 import typer
 from rich.console import Console
 from rich.table import Table
+
+from exo.types import ExoError  # pyright: ignore[reportMissingImports]
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Config file discovery
@@ -42,7 +44,7 @@ from rich.table import Table
 _DEFAULT_CONFIG_NAMES = (".exo.yaml", "exo.config.yaml")
 
 
-class CLIError(Exception):
+class CLIError(ExoError):
     """Raised for CLI-level errors (config not found, parse failures)."""
 
 

@@ -22,6 +22,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
+from exo.types import ExoError  # pyright: ignore[reportMissingImports]
 from exo_cli.executor import (  # pyright: ignore[reportMissingImports]
     ExecutionResult,
     LocalExecutor,
@@ -32,7 +33,7 @@ from exo_cli.executor import (  # pyright: ignore[reportMissingImports]
 # ---------------------------------------------------------------------------
 
 
-class BatchError(Exception):
+class BatchError(ExoError):
     """Raised for batch-level errors."""
 
 

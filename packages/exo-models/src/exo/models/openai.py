@@ -14,6 +14,14 @@ import openai
 from openai import AsyncOpenAI
 
 from exo.config import ModelConfig
+from exo.models.provider import ModelProvider, model_registry
+from exo.models.types import (
+    FinishReason,
+    ModelError,
+    ModelResponse,
+    StreamChunk,
+    ToolCallDelta,
+)
 from exo.types import (
     AssistantMessage,
     AudioBlock,
@@ -30,15 +38,6 @@ from exo.types import (
     Usage,
     UserMessage,
     VideoBlock,
-)
-
-from .provider import ModelProvider, model_registry
-from .types import (
-    FinishReason,
-    ModelError,
-    ModelResponse,
-    StreamChunk,
-    ToolCallDelta,
 )
 
 _log = logging.getLogger(__name__)

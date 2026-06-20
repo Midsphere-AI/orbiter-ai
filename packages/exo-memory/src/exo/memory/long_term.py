@@ -79,7 +79,7 @@ class Extractor(Protocol):
 # ---------------------------------------------------------------------------
 
 
-class TaskStatus(StrEnum):
+class MemoryTaskStatus(StrEnum):
     """Lifecycle states for extraction tasks."""
 
     PENDING = "pending"
@@ -106,7 +106,7 @@ class ExtractionTask:
     extraction_type: ExtractionType
     source_items: list[MemoryItem]
     task_id: str = field(default_factory=lambda: uuid.uuid4().hex)
-    status: TaskStatus = TaskStatus.PENDING
+    status: MemoryTaskStatus = MemoryTaskStatus.PENDING
     result: str | None = None
     error: str | None = None
     created_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
@@ -114,17 +114,17 @@ class ExtractionTask:
 
     def start(self) -> None:
         """Mark task as running."""
-        self.status = TaskStatus.RUNNING
+        self.status = MemoryTaskStatus.RUNNING
 
     def complete(self, result: str) -> None:
         """Mark task as completed with result."""
-        self.status = TaskStatus.COMPLETED
+        self.status = MemoryTaskStatus.COMPLETED
         self.result = result
         self.completed_at = datetime.now(UTC).isoformat()
 
     def fail(self, error: str) -> None:
         """Mark task as failed with error."""
-        self.status = TaskStatus.FAILED
+        self.status = MemoryTaskStatus.FAILED
         self.error = error
         self.completed_at = datetime.now(UTC).isoformat()
 
@@ -204,9 +204,7 @@ class LongTermMemory:
             # Original exact-match dedup (no checker)
             for existing in existing_items:
                 if existing.content == item.content and existing.memory_type == item.memory_type:
-                    logger.debug(
-                        "skipping duplicate item type=%s id=%s", item.memory_type, item.id
-                    )
+                    logger.debug("skipping duplicate item type=%s id=%s", item.memory_type, item.id)
                     return
 
         self._items[item.id] = item
@@ -435,7 +433,7 @@ class MemoryOrchestrator:
         Returns:
             List of processed ExtractionTask objects.
         """
-        pending = [t for t in self._tasks.values() if t.status == TaskStatus.PENDING]
+        pending = [t for t in self._tasks.values() if t.status == MemoryTaskStatus.PENDING]
         results: list[ExtractionTask] = []
         for task in pending:
             result = await self.process(task.task_id, extractor, metadata=metadata)
@@ -446,7 +444,7 @@ class MemoryOrchestrator:
         """Get a task by ID."""
         return self._tasks.get(task_id)
 
-    def list_tasks(self, *, status: TaskStatus | None = None) -> list[ExtractionTask]:
+    def list_tasks(self, *, status: MemoryTaskStatus | None = None) -> list[ExtractionTask]:
         """List tasks, optionally filtered by status."""
         if status is None:
             return list(self._tasks.values())

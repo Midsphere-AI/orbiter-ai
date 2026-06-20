@@ -12,12 +12,14 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any, Protocol, runtime_checkable
 
-logger = logging.getLogger(__name__)
-
 from pydantic import BaseModel, Field
 
+from exo.types import ExoError  # pyright: ignore[reportMissingImports]
 
-class MemoryError(Exception):
+logger = logging.getLogger(__name__)
+
+
+class ExoMemoryError(ExoError):
     """Base exception for memory operations."""
 
 
@@ -108,12 +110,12 @@ class MemoryItem(BaseModel):
         """Transition to a new status.
 
         Raises:
-            MemoryError: If the transition is invalid.
+            ExoMemoryError: If the transition is invalid.
         """
         allowed = _VALID_TRANSITIONS.get(self.status, set())
         if new_status not in allowed:
             msg = f"Cannot transition from {self.status!r} to {new_status!r}"
-            raise MemoryError(msg)
+            raise ExoMemoryError(msg)
         old_status = self.status
         self.status = new_status
         self.updated_at = datetime.now(UTC).isoformat()

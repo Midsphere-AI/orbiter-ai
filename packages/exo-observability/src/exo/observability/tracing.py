@@ -53,7 +53,13 @@ class NullSpan:
         pass
 
     def record_exception(self, exception: BaseException) -> None:
-        pass
+        """Log the exception so it is visible without OTel installed."""
+        logger.warning(
+            "exception recorded on NullSpan (OTel not installed): %s: %s",
+            type(exception).__name__,
+            exception,
+            exc_info=exception,
+        )
 
     def set_status(self, status: Any, description: str | None = None) -> None:
         pass
@@ -212,8 +218,12 @@ def traced(
                     for k, v in bound.arguments.items():
                         if k != "self":
                             merged[f"arg.{k}"] = str(v)
-                except TypeError:
-                    pass
+                except TypeError as exc:
+                    logger.debug(
+                        "traced: argument inspection failed for %r: %s",
+                        getattr(func, "__qualname__", func),
+                        exc,
+                    )
             # Flatten list values to strings for OTel compatibility.
             return {k: (str(v) if isinstance(v, list) else v) for k, v in merged.items()}
 

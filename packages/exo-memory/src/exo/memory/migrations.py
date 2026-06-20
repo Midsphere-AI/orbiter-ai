@@ -12,12 +12,12 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from exo.memory.base import MemoryError  # pyright: ignore[reportMissingImports]
+from exo.memory.base import ExoMemoryError  # pyright: ignore[reportMissingImports]
 
 logger = logging.getLogger(__name__)
 
 
-class MigrationError(MemoryError):
+class MigrationError(ExoMemoryError):
     """Raised when a migration fails."""
 
 

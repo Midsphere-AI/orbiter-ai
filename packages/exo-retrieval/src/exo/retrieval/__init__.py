@@ -1,8 +1,14 @@
 """Exo Retrieval: Embeddings, vector stores, and RAG pipeline."""
 
+from importlib.metadata import PackageNotFoundError, version
 from pkgutil import extend_path
 
 __path__ = extend_path(__path__, __name__)
+
+try:
+    __version__: str = version("exo-retrieval")
+except PackageNotFoundError:
+    __version__ = "0.1.0"
 
 from exo.retrieval.agentic_retriever import (
     AgenticRetriever,  # pyright: ignore[reportMissingImports]
@@ -67,7 +73,7 @@ from exo.retrieval.vertex_embeddings import (
     VertexEmbeddings,  # pyright: ignore[reportMissingImports]
 )
 
-__all__ = [
+__all__: list[str] = [
     "AgenticRetriever",
     "CharacterChunker",
     "Chunk",

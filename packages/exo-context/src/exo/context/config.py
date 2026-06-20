@@ -8,7 +8,7 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class AutomationMode(StrEnum):
@@ -43,7 +43,7 @@ class OverflowStrategy(StrEnum):
 _NEW_API_KEYS = frozenset({"limit", "overflow", "keep_recent", "token_pressure", "cache"})
 
 
-class ContextConfig(BaseModel, frozen=True):
+class ContextConfig(BaseModel):
     """Immutable configuration for the context engine.
 
     **Simple API** (preferred)::
@@ -57,6 +57,8 @@ class ContextConfig(BaseModel, frozen=True):
     Both field sets are always present and kept in sync by an internal
     normalisation validator.
     """
+
+    model_config = ConfigDict(frozen=True)
 
     mode: AutomationMode = AutomationMode.COPILOT
 
@@ -194,9 +196,7 @@ class ContextConfig(BaseModel, frozen=True):
             # ── Legacy-only (or bare constructor) → back-fill new fields ─
             data.setdefault("limit", data.get("history_rounds", 20))
             data.setdefault("overflow", "summarize")
-            data.setdefault(
-                "keep_recent", max(2, data.get("summary_threshold", 10) // 2)
-            )
+            data.setdefault("keep_recent", max(2, data.get("summary_threshold", 10) // 2))
             data.setdefault("token_pressure", data.get("token_budget_trigger", 0.8))
             data.setdefault("cache", data.get("enable_snapshots", False))
 

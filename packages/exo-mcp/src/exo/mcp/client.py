@@ -9,6 +9,7 @@ from datetime import timedelta
 from enum import StrEnum
 from typing import Any
 
+from exo.types import ExoError  # pyright: ignore[reportMissingImports]
 from mcp import ClientSession
 from mcp.client.sse import sse_client
 from mcp.client.stdio import StdioServerParameters, stdio_client
@@ -19,7 +20,7 @@ from mcp.types import Tool as MCPTool
 logger = logging.getLogger(__name__)
 
 
-class MCPClientError(Exception):
+class MCPClientError(ExoError):
     """Error raised by MCP client operations."""
 
 

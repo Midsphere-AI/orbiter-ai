@@ -9,14 +9,12 @@ import time
 from collections.abc import AsyncIterator
 from typing import Any
 
-import redis.asyncio as aioredis
-
-logger = logging.getLogger(__name__)
-
-from exo.observability.metrics import (  # pyright: ignore[reportMissingImports]
-    HAS_OTEL,
-    _collector,
-    _get_meter,
+from exo.distributed._redis_mixin import (  # pyright: ignore[reportMissingImports]
+    RedisConnectionMixin,
+)
+from exo.distributed.metrics import (  # pyright: ignore[reportMissingImports]
+    increment_counter,
+    record_histogram_value,
 )
 from exo.observability.semconv import (  # pyright: ignore[reportMissingImports]
     METRIC_STREAM_EVENT_PUBLISH_DURATION,
@@ -25,6 +23,7 @@ from exo.observability.semconv import (  # pyright: ignore[reportMissingImports]
 )
 from exo.types import (  # pyright: ignore[reportMissingImports]
     ErrorEvent,
+    ExoError,
     ReasoningEvent,
     StatusEvent,
     StepEvent,
@@ -35,6 +34,8 @@ from exo.types import (  # pyright: ignore[reportMissingImports]
     ToolResultEvent,
     UsageEvent,
 )
+
+logger = logging.getLogger(__name__)
 
 # Mapping from event type discriminator to the concrete class.
 _EVENT_TYPE_MAP: dict[str, type[Any]] = {
@@ -53,23 +54,18 @@ _EVENT_TYPE_MAP: dict[str, type[Any]] = {
 def _record_event_published(event_type: str, duration: float) -> None:
     """Record metrics for a single event publish operation."""
     attrs: dict[str, str] = {STREAM_EVENT_TYPE: event_type}
-    if HAS_OTEL:
-        meter = _get_meter()
-        meter.create_counter(
-            name=METRIC_STREAM_EVENTS_EMITTED,
-            unit="1",
-            description="Number of streaming events emitted",
-        ).add(1, attrs)
-        if duration > 0:
-            meter.create_histogram(
-                name=METRIC_STREAM_EVENT_PUBLISH_DURATION,
-                unit="s",
-                description="Duration of event publish operations",
-            ).record(duration, attrs)
-    else:
-        _collector.add_counter(METRIC_STREAM_EVENTS_EMITTED, 1.0, attrs)
-        if duration > 0:
-            _collector.record_histogram(METRIC_STREAM_EVENT_PUBLISH_DURATION, duration, attrs)
+    increment_counter(
+        METRIC_STREAM_EVENTS_EMITTED,
+        attrs,
+        description="Number of streaming events emitted",
+    )
+    if duration > 0:
+        record_histogram_value(
+            METRIC_STREAM_EVENT_PUBLISH_DURATION,
+            duration,
+            attrs,
+            description="Duration of event publish operations",
+        )
 
 
 def _deserialize_event(data: dict[str, Any]) -> StreamEvent:
@@ -81,11 +77,11 @@ def _deserialize_event(data: dict[str, Any]) -> StreamEvent:
     cls = _EVENT_TYPE_MAP.get(event_type)  # type: ignore[arg-type]
     if cls is None:
         msg = f"Unknown event type: {event_type!r}"
-        raise ValueError(msg)
+        raise ExoError(msg)
     return cls(**data)  # type: ignore[return-value]
 
 
-class EventPublisher:
+class EventPublisher(RedisConnectionMixin):
     """Publishes streaming events to Redis Pub/Sub and Streams.
 
     Each event is published to:
@@ -103,27 +99,13 @@ class EventPublisher:
         *,
         stream_ttl_seconds: int = 3600,
     ) -> None:
+        super().__init__()
         self._redis_url = redis_url
         self._stream_ttl_seconds = stream_ttl_seconds
-        self._redis: aioredis.Redis | None = None
 
     async def connect(self) -> None:
         """Connect to Redis."""
-        logger.debug("EventPublisher connecting to Redis")
-        self._redis = aioredis.from_url(self._redis_url, decode_responses=True)
-
-    async def disconnect(self) -> None:
-        """Close the Redis connection."""
-        if self._redis is not None:
-            await self._redis.aclose()
-            self._redis = None
-            logger.debug("EventPublisher disconnected")
-
-    def _client(self) -> aioredis.Redis:
-        if self._redis is None:
-            msg = "EventPublisher is not connected. Call connect() first."
-            raise RuntimeError(msg)
-        return self._redis
+        await super().connect()
 
     def _pubsub_channel(self, task_id: str) -> str:
         return f"exo:events:{task_id}"
@@ -156,7 +138,7 @@ class EventPublisher:
         _record_event_published(event.type, duration)
 
 
-class EventSubscriber:
+class EventSubscriber(RedisConnectionMixin):
     """Subscribes to streaming events from Redis.
 
     Provides two consumption modes:
@@ -169,26 +151,12 @@ class EventSubscriber:
     """
 
     def __init__(self, redis_url: str) -> None:
+        super().__init__()
         self._redis_url = redis_url
-        self._redis: aioredis.Redis | None = None
 
     async def connect(self) -> None:
         """Connect to Redis."""
-        logger.debug("EventSubscriber connecting to Redis")
-        self._redis = aioredis.from_url(self._redis_url, decode_responses=True)
-
-    async def disconnect(self) -> None:
-        """Close the Redis connection."""
-        if self._redis is not None:
-            await self._redis.aclose()
-            self._redis = None
-            logger.debug("EventSubscriber disconnected")
-
-    def _client(self) -> aioredis.Redis:
-        if self._redis is None:
-            msg = "EventSubscriber is not connected. Call connect() first."
-            raise RuntimeError(msg)
-        return self._redis
+        await super().connect()
 
     async def subscribe(self, task_id: str) -> AsyncIterator[StreamEvent]:
         """Yield live events via Redis Pub/Sub.

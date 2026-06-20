@@ -6,8 +6,8 @@ import logging
 
 from exo.memory.base import (  # pyright: ignore[reportMissingImports]
     AIMemory,
+    ExoMemoryError,
     MemoryCategory,
-    MemoryError,
     MemoryItem,
     MemoryMetadata,
     MemoryStatus,
@@ -39,7 +39,7 @@ class ShortTermMemory:
     ) -> None:
         if scope not in ("user", "session", "task"):
             msg = f"Invalid scope {scope!r}, must be 'user', 'session', or 'task'"
-            raise MemoryError(msg)
+            raise ExoMemoryError(msg)
         self.scope = scope
         self.max_rounds = max_rounds
         self._items: list[MemoryItem] = []

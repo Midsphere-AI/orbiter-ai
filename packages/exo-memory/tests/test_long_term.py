@@ -16,8 +16,8 @@ from exo.memory.long_term import (  # pyright: ignore[reportMissingImports]
     Extractor,
     LongTermMemory,
     MemoryOrchestrator,
+    MemoryTaskStatus,
     OrchestratorConfig,
-    TaskStatus,
     _format_extraction_items,
 )
 
@@ -95,10 +95,10 @@ class TestExtractionType:
 
 class TestTaskStatus:
     def test_values(self) -> None:
-        assert TaskStatus.PENDING == "pending"
-        assert TaskStatus.RUNNING == "running"
-        assert TaskStatus.COMPLETED == "completed"
-        assert TaskStatus.FAILED == "failed"
+        assert MemoryTaskStatus.PENDING == "pending"
+        assert MemoryTaskStatus.RUNNING == "running"
+        assert MemoryTaskStatus.COMPLETED == "completed"
+        assert MemoryTaskStatus.FAILED == "failed"
 
 
 # ===========================================================================
@@ -110,7 +110,7 @@ class TestExtractionTask:
     def test_creation(self) -> None:
         items = _make_items(2)
         task = ExtractionTask(extraction_type=ExtractionType.FACTS, source_items=items)
-        assert task.status == TaskStatus.PENDING
+        assert task.status == MemoryTaskStatus.PENDING
         assert task.result is None
         assert task.error is None
         assert task.completed_at is None
@@ -119,13 +119,13 @@ class TestExtractionTask:
     def test_start(self) -> None:
         task = ExtractionTask(extraction_type=ExtractionType.FACTS, source_items=[])
         task.start()
-        assert task.status == TaskStatus.RUNNING
+        assert task.status == MemoryTaskStatus.RUNNING
 
     def test_complete(self) -> None:
         task = ExtractionTask(extraction_type=ExtractionType.FACTS, source_items=[])
         task.start()
         task.complete("some facts")
-        assert task.status == TaskStatus.COMPLETED
+        assert task.status == MemoryTaskStatus.COMPLETED
         assert task.result == "some facts"
         assert task.completed_at is not None
 
@@ -133,7 +133,7 @@ class TestExtractionTask:
         task = ExtractionTask(extraction_type=ExtractionType.FACTS, source_items=[])
         task.start()
         task.fail("connection error")
-        assert task.status == TaskStatus.FAILED
+        assert task.status == MemoryTaskStatus.FAILED
         assert task.error == "connection error"
         assert task.completed_at is not None
 
@@ -324,7 +324,7 @@ class TestOrchestratorSubmit:
         items = _make_items(4)
         tasks = orch.submit(items)
         assert len(tasks) == 3  # default: all 3 extraction types
-        assert all(t.status == TaskStatus.PENDING for t in tasks)
+        assert all(t.status == MemoryTaskStatus.PENDING for t in tasks)
 
     def test_submit_single_type(self) -> None:
         store = LongTermMemory()
@@ -358,7 +358,7 @@ class TestOrchestratorProcess:
 
         extractor = MockExtractor(["fact: sky is blue"])
         result = await orch.process(task_id, extractor)
-        assert result.status == TaskStatus.COMPLETED
+        assert result.status == MemoryTaskStatus.COMPLETED
         assert result.result == "fact: sky is blue"
 
         # Should be stored in long-term memory
@@ -383,7 +383,7 @@ class TestOrchestratorProcess:
         tasks = orch.submit(_make_items(4), extraction_type=ExtractionType.FACTS)
 
         result = await orch.process(tasks[0].task_id, FailingExtractor())
-        assert result.status == TaskStatus.FAILED
+        assert result.status == MemoryTaskStatus.FAILED
         assert "LLM service unavailable" in (result.error or "")
         assert len(store) == 0  # Nothing stored on failure
 
@@ -411,7 +411,7 @@ class TestOrchestratorProcessAll:
         extractor = MockExtractor(["profile info", "experience info", "facts info"])
         results = await orch.process_all(extractor)
         assert len(results) == 3
-        assert all(t.status == TaskStatus.COMPLETED for t in results)
+        assert all(t.status == MemoryTaskStatus.COMPLETED for t in results)
         assert len(store) == 3
 
     async def test_process_all_skips_non_pending(self) -> None:
@@ -421,11 +421,11 @@ class TestOrchestratorProcessAll:
 
         # Process the first task
         await orch.process(tasks[0].task_id, MockExtractor())
-        assert tasks[0].status == TaskStatus.COMPLETED
+        assert tasks[0].status == MemoryTaskStatus.COMPLETED
 
         # Submit a second task
         new_tasks = orch.submit(_make_items(4), extraction_type=ExtractionType.USER_PROFILE)
-        assert new_tasks[0].status == TaskStatus.PENDING
+        assert new_tasks[0].status == MemoryTaskStatus.PENDING
 
         # process_all should only process the new pending task
         results = await orch.process_all(MockExtractor(["new profile"]))
@@ -462,9 +462,9 @@ class TestOrchestratorTaskManagement:
         store = LongTermMemory()
         orch = MemoryOrchestrator(store)
         orch.submit(_make_items(4))
-        pending = orch.list_tasks(status=TaskStatus.PENDING)
+        pending = orch.list_tasks(status=MemoryTaskStatus.PENDING)
         assert len(pending) == 3
-        completed = orch.list_tasks(status=TaskStatus.COMPLETED)
+        completed = orch.list_tasks(status=MemoryTaskStatus.COMPLETED)
         assert len(completed) == 0
 
     def test_repr(self) -> None:

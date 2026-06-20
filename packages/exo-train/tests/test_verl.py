@@ -319,15 +319,22 @@ class TestVeRLTrainerTrain:
 
 
 class TestVeRLTrainerEvaluate:
+    async def test_evaluate_verl_not_installed(self) -> None:
+        t = VeRLTrainer()
+        with pytest.raises(TrainerError, match="VeRL is required"):
+            await t.evaluate(test_data=[{"input": "t1"}])
+
     async def test_evaluate_with_data(self) -> None:
         t = VeRLTrainer()
-        metrics = await t.evaluate(test_data=[{"input": "t1"}, {"input": "t2"}])
+        with patch("exo.train.verl._check_verl_available", return_value=object()):
+            metrics = await t.evaluate(test_data=[{"input": "t1"}, {"input": "t2"}])
         assert metrics.steps == 2
         assert metrics.extra["eval_items"] == 2
 
     async def test_evaluate_no_data(self) -> None:
         t = VeRLTrainer()
-        metrics = await t.evaluate()
+        with patch("exo.train.verl._check_verl_available", return_value=object()):
+            metrics = await t.evaluate()
         assert metrics.steps == 0
         assert metrics.extra["eval_items"] == 0
 
@@ -337,7 +344,8 @@ class TestVeRLTrainerEvaluate:
             [{"input": "train"}],
             test_data=[{"input": "t1"}, {"input": "t2"}, {"input": "t3"}],
         )
-        metrics = await t.evaluate()
+        with patch("exo.train.verl._check_verl_available", return_value=object()):
+            metrics = await t.evaluate()
         assert metrics.steps == 3
 
 
@@ -374,8 +382,9 @@ class TestVeRLTrainerLifecycle:
         assert t.state == TrainerState.COMPLETED
         assert train_metrics.extra["algorithm"] == "ppo"
 
-        # Phase 3: Evaluation
-        eval_metrics = await t.evaluate()
+        # Phase 3: Evaluation (also requires VeRL)
+        with patch("exo.train.verl._check_verl_available", return_value=object()):
+            eval_metrics = await t.evaluate()
         assert eval_metrics.steps == 1  # Uses test_data from check_dataset
 
     async def test_cannot_train_twice(self) -> None:

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+__version__: str = "0.1.0"
+
 from exo.distributed.alerts import (
     register_distributed_alerts,  # pyright: ignore[reportMissingImports]
 )

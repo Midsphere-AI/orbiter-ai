@@ -11,6 +11,7 @@ from exo.distributed.models import (  # pyright: ignore[reportMissingImports]
     TaskStatus,
 )
 from exo.distributed.store import TaskStore  # pyright: ignore[reportMissingImports]
+from exo.types import ExoError  # pyright: ignore[reportMissingImports]
 
 
 @pytest.fixture
@@ -34,7 +35,7 @@ class TestTaskStoreInit:
         assert s._ttl_seconds == 3600
 
     def test_not_connected_raises(self, store: TaskStore) -> None:
-        with pytest.raises(RuntimeError, match="not connected"):
+        with pytest.raises(ExoError, match="not connected"):
             store._client()
 
 

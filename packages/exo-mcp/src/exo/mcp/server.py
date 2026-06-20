@@ -8,12 +8,13 @@ import inspect
 import logging
 from typing import Any
 
+from exo.types import ExoError  # pyright: ignore[reportMissingImports]
 from mcp.server.fastmcp import FastMCP
 
 logger = logging.getLogger(__name__)
 
 
-class MCPServerError(Exception):
+class MCPServerError(ExoError):
     """Error raised by MCP server operations."""
 
 
@@ -97,7 +98,7 @@ def _register_methods(instance: Any, mcp: FastMCP) -> list[str]:
     tool_names: list[str] = []
 
     for method_name, method in inspect.getmembers(instance, inspect.ismethod):
-        if method_name.startswith("_") or method_name in ("run", "stop"):
+        if method_name.startswith("_") or method_name in ("run", "run_async", "stop"):
             continue
 
         description = (inspect.getdoc(method) or f"{method_name} tool").strip().split("\n")[0]
@@ -197,11 +198,84 @@ def mcp_server(
                 raise MCPServerError("MCP server not initialized")
             self._mcp.run(transport=transport, **kwargs)
 
-        def stop(self: Any) -> None:
-            """Stop the MCP server (placeholder)."""
+        async def run_async(
+            self: Any, *, transport: str = default_transport, **kwargs: Any
+        ) -> None:
+            """Run the MCP server asynchronously, tracking the task for clean shutdown.
+
+            The running coroutine is stored in ``_mcp_task`` so that
+            :meth:`stop` can cancel it.
+
+            Args:
+                transport: "stdio" or "sse".
+                **kwargs: Passed to the matching ``FastMCP.run_*_async()`` method.
+            """
+            if not hasattr(self, "_mcp") or self._mcp is None:
+                raise MCPServerError("MCP server not initialized")
+            if getattr(self, "_mcp_stopped", False):
+                raise MCPServerError(f"MCP server {server_name!r} has already been stopped")
+
+            async def _run() -> None:
+                t = transport.replace("-", "_")
+                runner = getattr(self._mcp, f"run_{t}_async", None)
+                if runner is None:
+                    raise MCPServerError(f"No async runner for transport {transport!r}")
+                await runner(**kwargs)
+
+            task = asyncio.ensure_future(_run())
+            self._mcp_task: asyncio.Task[None] = task  # pyright: ignore[reportAttributeAccessIssue]
+            try:
+                await task
+            except asyncio.CancelledError:
+                logger.info("MCP server %r task cancelled", server_name)
+                raise
+            finally:
+                self._mcp_task = None  # pyright: ignore[reportAttributeAccessIssue]
+
+        async def stop(self: Any) -> None:
+            """Stop the MCP server and release resources.
+
+            This method is idempotent — calling it multiple times is safe.
+            It cancels any background task started by :meth:`run_async`, waits
+            for it to finish, and sets a stopped flag so subsequent calls are
+            no-ops.
+            """
+            if getattr(self, "_mcp_stopped", False):
+                logger.debug("MCP server %r already stopped", server_name)
+                return
+
+            self._mcp_stopped = True  # pyright: ignore[reportAttributeAccessIssue]
             logger.info("Stopping MCP server %r", server_name)
 
+            task: asyncio.Task[None] | None = getattr(self, "_mcp_task", None)
+            if task is not None and not task.done():
+                task.cancel()
+                try:
+                    await asyncio.wait_for(asyncio.shield(task), timeout=5.0)
+                except (asyncio.CancelledError, TimeoutError):
+                    pass
+                except Exception as exc:
+                    logger.warning("MCP server %r task raised on cancel: %s", server_name, exc)
+                self._mcp_task = None  # pyright: ignore[reportAttributeAccessIssue]
+
+            # Close the underlying FastMCP session manager if available.
+            mcp: FastMCP | None = getattr(self, "_mcp", None)
+            if mcp is not None:
+                session_manager = getattr(mcp, "session_manager", None)
+                if session_manager is not None:
+                    shutdown = getattr(session_manager, "shutdown", None)
+                    if shutdown is not None:
+                        try:
+                            await shutdown()
+                        except Exception as exc:
+                            logger.warning(
+                                "MCP server %r session_manager.shutdown() raised: %s",
+                                server_name,
+                                exc,
+                            )
+
         cls.run = run  # type: ignore[attr-defined]
+        cls.run_async = run_async  # type: ignore[attr-defined]
         cls.stop = stop  # type: ignore[attr-defined]
 
         server_registry.register(server_name, cls)

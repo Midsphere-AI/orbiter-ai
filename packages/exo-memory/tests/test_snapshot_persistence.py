@@ -2,10 +2,6 @@
 
 from __future__ import annotations
 
-import json
-
-import pytest
-
 from exo.memory.base import HumanMemory, MemoryMetadata
 from exo.memory.persistence import MemoryPersistence
 from exo.memory.short_term import ShortTermMemory
@@ -19,7 +15,6 @@ from exo.memory.snapshot import (
     snapshot_id,
 )
 from exo.types import AssistantMessage, SystemMessage, ToolCall, ToolResult, UserMessage
-
 
 # ---------------------------------------------------------------------------
 # SnapshotMemory model

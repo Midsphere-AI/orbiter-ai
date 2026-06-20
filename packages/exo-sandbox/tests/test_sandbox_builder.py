@@ -138,6 +138,9 @@ class _StubSandbox(Sandbox):
     async def cleanup(self) -> None:
         self._transition(SandboxStatus.CLOSED)
 
+    async def run_tool(self, tool_name: str, arguments: dict[str, Any]) -> Any:
+        return {"tool": tool_name, "arguments": arguments, "status": "ok"}
+
 
 class TestBuilderCustomClass:
     def test_with_sandbox_class_at_init(self) -> None:
@@ -211,7 +214,8 @@ class TestBuilderLazy:
         assert sb.status == SandboxStatus.CLOSED
 
     async def test_lazy_run_tool(self) -> None:
-        builder = SandboxBuilder().with_sandbox_id("lazy-t")
+        # Use _StubSandbox which has a trivial run_tool implementation
+        builder = SandboxBuilder(sandbox_class=_StubSandbox).with_sandbox_id("lazy-t")
         await builder.start()
         result = await builder.run_tool("test", {"a": 1})
         assert result["tool"] == "test"

@@ -19,8 +19,8 @@ from cryptography.hazmat.primitives.ciphers.aead import (
 )
 
 from exo.memory.base import (  # pyright: ignore[reportMissingImports]
+    ExoMemoryError,
     MemoryCategory,
-    MemoryError,
     MemoryItem,
     MemoryMetadata,
     MemoryStatus,
@@ -98,7 +98,7 @@ class EncryptedMemoryStore:
             decrypted = self._decrypt(item.content)
         except Exception as exc:
             msg = f"Failed to decrypt memory item {item_id}"
-            raise MemoryError(msg) from exc
+            raise ExoMemoryError(msg) from exc
         return item.model_copy(update={"content": decrypted})
 
     async def search(

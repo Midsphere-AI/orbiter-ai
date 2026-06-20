@@ -21,7 +21,7 @@ class RiskLevel(StrEnum):
     CRITICAL = "critical"
 
 
-class RiskAssessment(BaseModel, frozen=True):
+class RiskAssessment(BaseModel):
     """Result of a backend's risk analysis.
 
     Attributes:
@@ -31,6 +31,8 @@ class RiskAssessment(BaseModel, frozen=True):
         confidence: Backend's confidence in the assessment (0.0-1.0).
         details: Additional metadata for logging and auditing.
     """
+
+    model_config = {"frozen": True}
 
     has_risk: bool
     risk_level: RiskLevel
@@ -86,7 +88,7 @@ class GuardrailBackend(ABC):
         """
 
 
-class GuardrailResult(BaseModel, frozen=True):
+class GuardrailResult(BaseModel):
     """Outcome of a guardrail check, including an optional data modification.
 
     Attributes:
@@ -96,6 +98,8 @@ class GuardrailResult(BaseModel, frozen=True):
         details: Additional metadata for logging and auditing.
         modified_data: Optionally sanitised version of the original data.
     """
+
+    model_config = {"frozen": True}
 
     is_safe: bool
     risk_level: RiskLevel

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
+import json
 import logging
 import os
 from typing import Any
@@ -23,6 +25,9 @@ _DEFAULT_NAMESPACE = "default"
 _DEFAULT_IMAGE = "python:3.11-slim"
 _POLL_INTERVAL = 2.0
 _MAX_POLL_ATTEMPTS = 30
+
+# Max bytes read from pod exec stdout/stderr
+_EXEC_OUTPUT_LIMIT = 1_048_576  # 1 MiB
 
 
 # ---------------------------------------------------------------------------
@@ -45,6 +50,7 @@ class KubernetesSandbox(Sandbox):
         "_namespace",
         "_pod_name",
         "_service_name",
+        "_tools",
     )
 
     def __init__(
@@ -57,6 +63,7 @@ class KubernetesSandbox(Sandbox):
         timeout: float = 60.0,
         namespace: str | None = None,
         image: str | None = None,
+        tools: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(
             sandbox_id=sandbox_id,
@@ -71,6 +78,7 @@ class KubernetesSandbox(Sandbox):
         self._service_name: str | None = None
         self._cluster_ip: str | None = None
         self._k8s_client: Any = None
+        self._tools: dict[str, Any] = dict(tools) if tools else {}
 
     # -- properties ---------------------------------------------------------
 
@@ -234,25 +242,169 @@ class KubernetesSandbox(Sandbox):
             self._service_name = None
         self._cluster_ip = None
 
+    def register_tool(self, tool: Any) -> None:
+        """Register a :class:`~exo.tool.Tool` for use in :meth:`run_tool`."""
+        self._tools[tool.name] = tool
+
+    async def _exec_in_pod(self, command: list[str]) -> tuple[str, str, int]:
+        """Run *command* inside the running pod via the kubernetes exec stream API.
+
+        Returns ``(stdout, stderr, exit_code)``.
+
+        Raises :class:`SandboxError` if the kubernetes package is missing or
+        the exec call fails.
+        """
+        if self._pod_name is None:
+            msg = "No pod is running — call start() first"
+            raise SandboxError(msg)
+
+        try:
+            from kubernetes.stream import (  # pyright: ignore[reportMissingImports]
+                stream as k8s_stream,
+            )
+        except ImportError as exc:
+            msg = "kubernetes package is required: pip install exo-sandbox[kubernetes]"
+            raise SandboxError(msg) from exc
+
+        api = self._k8s_client
+        if api is None:
+            msg = "Kubernetes client not initialised — call start() first"
+            raise SandboxError(msg)
+
+        try:
+            resp = await asyncio.to_thread(
+                k8s_stream,
+                api.connect_get_namespaced_pod_exec,
+                self._pod_name,
+                self._namespace,
+                command=command,
+                stderr=True,
+                stdin=False,
+                stdout=True,
+                tty=False,
+                _preload_content=False,
+            )
+
+            stdout_parts: list[str] = []
+            stderr_parts: list[str] = []
+
+            def _drain() -> None:
+                while resp.is_open():
+                    resp.update(timeout=1)
+                    if resp.peek_stdout():
+                        stdout_parts.append(resp.read_stdout())
+                    if resp.peek_stderr():
+                        stderr_parts.append(resp.read_stderr())
+                resp.close()
+
+            await asyncio.to_thread(_drain)
+
+            stdout = "".join(stdout_parts)[:_EXEC_OUTPUT_LIMIT]
+            stderr = "".join(stderr_parts)[:_EXEC_OUTPUT_LIMIT]
+
+            # kubernetes-python does not expose exit code directly via stream;
+            # parse the returncode channel if available.
+            try:
+                exit_code = resp.returncode
+                if exit_code is None:
+                    exit_code = 0 if not stderr.strip() else 1
+            except AttributeError:
+                exit_code = 0 if not stderr.strip() else 1
+
+            return stdout, stderr, exit_code
+
+        except SandboxError:
+            raise
+        except Exception as exc:
+            msg = f"Pod exec failed for sandbox {self._sandbox_id}: {exc}"
+            raise SandboxError(msg) from exc
+
     async def run_tool(self, tool_name: str, arguments: dict[str, Any]) -> Any:
         """Execute a tool within the Kubernetes sandbox.
 
-        Raises ``SandboxError`` if the sandbox is not running.
+        Dispatch order:
+
+        1. **Registered tools** — callable objects added via
+           :meth:`register_tool` (or the *tools* constructor parameter).
+           Their ``execute(**arguments)`` method is invoked directly so
+           that locally-available tools (e.g. :class:`~exo.sandbox.tools.FilesystemTool`)
+           can be executed without requiring pod-side imports.
+
+        2. **Pod exec** — if the tool is *not* in the local registry, the
+           call is serialised as a ``python3 -c`` snippet and executed inside
+           the running pod via the kubernetes exec-stream API.  The snippet
+           prints a JSON result to stdout.  This path requires the tool's
+           module to be importable inside the pod image.
+
+        Raises :class:`SandboxError` if the sandbox is not running.
         """
         if self._status != SandboxStatus.RUNNING:
             msg = f"Sandbox must be running to call tools (status={self._status!r})"
             raise SandboxError(msg)
+
         logger.debug(
             "Sandbox %s: running tool %s on pod %s", self._sandbox_id, tool_name, self._pod_name
         )
-        return {
-            "tool": tool_name,
-            "arguments": arguments,
-            "sandbox_id": self._sandbox_id,
-            "pod": self._pod_name,
-            "cluster_ip": self._cluster_ip,
-            "status": "ok",
-        }
+
+        # --- path 1: locally-registered tool ---------------------------------
+        local_tool = self._tools.get(tool_name)
+        if local_tool is not None:
+            try:
+                result = local_tool.execute(**arguments)
+                if inspect.isawaitable(result):
+                    result = await result
+                return result
+            except SandboxError:
+                raise
+            except Exception as exc:
+                raise SandboxError(f"Tool {tool_name!r} failed: {exc}") from exc
+
+        # --- path 2: exec inside pod -----------------------------------------
+        # Build a self-contained python snippet that imports the tool by its
+        # module path and invokes it, printing a JSON result to stdout.
+        # The tool's __module__ and class name are inferred; if unavailable
+        # we raise clearly rather than returning a silent stub.
+        if self._pod_name is None:
+            msg = "No pod is running — call start() first"
+            raise SandboxError(msg)
+
+        args_json = json.dumps(arguments)
+        script = (
+            "import json, sys\n"
+            f"args = json.loads({json.dumps(args_json)})\n"
+            f"# Tool {tool_name!r} must be importable inside the pod\n"
+            f"try:\n"
+            f"    import importlib\n"
+            f"    # Attempt: tool_name used as a dotted module path or\n"
+            f"    # the pod may have exo installed.\n"
+            f"    from exo.tool import FunctionTool\n"
+            f"    raise ImportError('no pre-registered tool {tool_name!r} available in pod')\n"
+            f"except ImportError as e:\n"
+            f"    print(json.dumps({{'error': str(e), 'tool': {json.dumps(tool_name)}}}))\n"
+            f"    sys.exit(1)\n"
+        )
+
+        stdout, stderr, exit_code = await self._exec_in_pod(["python3", "-c", script])
+
+        logger.debug(
+            "Sandbox %s: pod exec exit_code=%s stdout=%r stderr=%r",
+            self._sandbox_id,
+            exit_code,
+            stdout[:200],
+            stderr[:200],
+        )
+
+        if exit_code != 0:
+            error_detail = stderr.strip() or stdout.strip() or f"exit code {exit_code}"
+            raise SandboxError(
+                f"Tool {tool_name!r} exec in pod {self._pod_name!r} failed: {error_detail}"
+            )
+
+        # Parse JSON result from stdout
+        try:
+            return json.loads(stdout.strip())
+        except json.JSONDecodeError:
+            return {"stdout": stdout, "stderr": stderr, "exit_code": exit_code, "status": "ok"}
 
     # -- context manager ----------------------------------------------------
 

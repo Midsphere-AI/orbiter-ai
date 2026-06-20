@@ -20,7 +20,9 @@ from exo.sandbox.tools import (  # pyright: ignore[reportMissingImports]
     shell_tool,
 )
 
-__all__ = [
+__version__: str = "0.1.0"
+
+__all__: list[str] = [
     "CodeTool",
     "E2BSandbox",
     "FilesystemTool",

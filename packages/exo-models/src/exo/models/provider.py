@@ -13,11 +13,10 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from exo.config import ModelConfig, parse_model_string
+from exo.models.context_windows import MODEL_CONTEXT_WINDOWS
+from exo.models.types import ModelError, ModelResponse, StreamChunk
 from exo.registry import Registry, RegistryError
 from exo.types import Message
-
-from .context_windows import MODEL_CONTEXT_WINDOWS
-from .types import ModelError, ModelResponse, StreamChunk
 
 # ---------------------------------------------------------------------------
 # Registry

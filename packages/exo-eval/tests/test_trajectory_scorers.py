@@ -227,11 +227,19 @@ class TestAnswerAccuracyLLMScorer:
 
 
 class TestLabelDistributionScorer:
-    async def test_per_case_placeholder(self) -> None:
+    async def test_per_case_labelled(self) -> None:
+        # Per-case score is 1.0 when a label is present
         scorer = LabelDistributionScorer()
         result = await scorer.score("c1", {"label": "positive"}, "out")
-        assert result.score == 0.0
+        assert result.score == 1.0
         assert result.details["label"] == "positive"
+
+    async def test_per_case_unlabelled(self) -> None:
+        # Per-case score is 0.0 when label is absent
+        scorer = LabelDistributionScorer()
+        result = await scorer.score("c1", {"text": "hello"}, "out")
+        assert result.score == 0.0
+        assert result.details["label"] is None
 
     async def test_no_label(self) -> None:
         scorer = LabelDistributionScorer()
@@ -241,11 +249,13 @@ class TestLabelDistributionScorer:
     async def test_non_dict_input(self) -> None:
         scorer = LabelDistributionScorer()
         result = await scorer.score("c1", "raw", "out")
+        assert result.score == 0.0
         assert result.details["label"] is None
 
     async def test_custom_label_key(self) -> None:
         scorer = LabelDistributionScorer(label_key="category")
         result = await scorer.score("c1", {"category": "A"}, "out")
+        assert result.score == 1.0
         assert result.details["label"] == "A"
 
     async def test_custom_name(self) -> None:

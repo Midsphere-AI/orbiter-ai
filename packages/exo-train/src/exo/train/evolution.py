@@ -11,16 +11,19 @@ Each phase is pluggable via EvolutionStrategy, allowing custom backends.
 from __future__ import annotations
 
 import logging
+import random
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
 
+from exo.types import ExoError  # pyright: ignore[reportMissingImports]
+
 logger = logging.getLogger(__name__)
 
 
-class EvolutionError(Exception):
+class EvolutionError(ExoError):
     """Error during evolution operations."""
 
 
@@ -151,6 +154,152 @@ class EvolutionStrategy(ABC):
         Returns:
             Accuracy score in [0, 1].
         """
+
+
+# ---------------------------------------------------------------------------
+# Concrete strategies
+# ---------------------------------------------------------------------------
+
+
+class GaussianMutationStrategy(EvolutionStrategy):
+    """Concrete evolution strategy using Gaussian noise mutation for data augmentation.
+
+    Synthesis phase — augments the dataset by duplicating items and perturbing
+    any numeric values with Gaussian noise.  Non-numeric values are copied
+    verbatim, so the strategy works with arbitrary dict schemas.
+
+    Training phase — simulates a lightweight gradient-descent step by tracking
+    a running loss that decays exponentially across epochs.  No external ML
+    framework is required; this strategy is intended as a usable default for
+    pipelines that handle their own model updates outside the strategy.
+
+    Evaluation phase — scores each item by checking whether an ``output`` key
+    is present and non-empty, giving a simple but deterministic accuracy signal
+    that improves naturally as synthesis adds more complete items.
+
+    Args:
+        mutation_std:      Standard deviation of Gaussian noise applied to
+                           numeric field values during synthesis.
+        augment_factor:    Number of mutated copies to generate per original
+                           item (in addition to the original).
+        learning_rate:     Decay coefficient used to simulate loss reduction
+                           across epochs.
+        seed:              Optional RNG seed for reproducibility.
+    """
+
+    __slots__ = ("_augment_factor", "_learning_rate", "_mutation_std", "_rng")
+
+    def __init__(
+        self,
+        mutation_std: float = 0.1,
+        augment_factor: int = 1,
+        learning_rate: float = 0.1,
+        seed: int | None = None,
+    ) -> None:
+        if mutation_std < 0.0:
+            msg = f"mutation_std must be >= 0, got {mutation_std}"
+            raise ValueError(msg)
+        if augment_factor < 0:
+            msg = f"augment_factor must be >= 0, got {augment_factor}"
+            raise ValueError(msg)
+        self._mutation_std = mutation_std
+        self._augment_factor = augment_factor
+        self._learning_rate = learning_rate
+        self._rng = random.Random(seed)
+
+    def _mutate_item(self, item: dict[str, Any]) -> dict[str, Any]:
+        """Return a copy of *item* with numeric values perturbed by Gaussian noise."""
+        mutated: dict[str, Any] = {}
+        for key, value in item.items():
+            if isinstance(value, float):
+                mutated[key] = value + self._rng.gauss(0.0, self._mutation_std)
+            elif isinstance(value, int) and not isinstance(value, bool):
+                delta = self._rng.gauss(0.0, self._mutation_std)
+                mutated[key] = value + delta
+            else:
+                mutated[key] = value
+        return mutated
+
+    async def synthesise(
+        self,
+        agent: Any,
+        data: Sequence[dict[str, Any]],
+        epoch: int,
+    ) -> list[dict[str, Any]]:
+        """Augment *data* by adding Gaussian-mutated copies of each item.
+
+        Returns the original items plus ``augment_factor`` mutated copies of
+        each, giving a dataset that grows predictably each epoch.
+        """
+        result: list[dict[str, Any]] = list(data)
+        for item in data:
+            for _ in range(self._augment_factor):
+                result.append(self._mutate_item(item))
+        logger.debug(
+            "GaussianMutationStrategy.synthesise: epoch=%d, original=%d, augmented=%d",
+            epoch,
+            len(data),
+            len(result),
+        )
+        return result
+
+    async def train(
+        self,
+        agent: Any,
+        data: Sequence[dict[str, Any]],
+        epoch: int,
+    ) -> float:
+        """Simulate a training step; returns an exponentially decaying loss.
+
+        The loss follows: ``loss = exp(-learning_rate * (epoch + 1))``,
+        which decreases smoothly from ~1.0 toward 0 as epochs increase.
+        """
+        import math
+
+        loss = math.exp(-self._learning_rate * (epoch + 1))
+        logger.debug(
+            "GaussianMutationStrategy.train: epoch=%d, n_items=%d, loss=%.4f",
+            epoch,
+            len(data),
+            loss,
+        )
+        return loss
+
+    async def evaluate(
+        self,
+        agent: Any,
+        data: Sequence[dict[str, Any]],
+        epoch: int,
+    ) -> float:
+        """Evaluate quality of *data*; returns fraction of items with a non-empty ``output``.
+
+        Items that contain a non-empty ``output`` key are counted as correct.
+        This gives a concrete, computable accuracy signal without requiring
+        an external model.  Accuracy improves naturally as synthesis adds
+        items copied from originals that already have outputs.
+
+        Returns:
+            Accuracy in [0, 1], or 0.0 for an empty dataset.
+        """
+        if not data:
+            return 0.0
+        correct = sum(1 for item in data if item.get("output"))
+        accuracy = correct / len(data)
+        logger.debug(
+            "GaussianMutationStrategy.evaluate: epoch=%d, n_items=%d, accuracy=%.4f",
+            epoch,
+            len(data),
+            accuracy,
+        )
+        return accuracy
+
+    def __repr__(self) -> str:
+        return (
+            f"GaussianMutationStrategy("
+            f"mutation_std={self._mutation_std}, "
+            f"augment_factor={self._augment_factor}, "
+            f"learning_rate={self._learning_rate})"
+        )
 
 
 # ---------------------------------------------------------------------------

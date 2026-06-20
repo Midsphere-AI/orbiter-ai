@@ -7,8 +7,6 @@ from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-logger = logging.getLogger(__name__)
-
 from exo.eval.base import (  # pyright: ignore[reportMissingImports]
     Scorer,
     ScorerResult,
@@ -37,6 +35,8 @@ from exo.types import (  # pyright: ignore[reportMissingImports]
     StreamEvent,
     TextEvent,
 )
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Types

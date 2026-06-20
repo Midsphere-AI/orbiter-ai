@@ -7,18 +7,21 @@ import uuid
 from collections.abc import AsyncIterator
 from typing import Any, Protocol, runtime_checkable
 
-logger = logging.getLogger(__name__)
-
 from exo.a2a.types import (  # pyright: ignore[reportMissingImports]
+    A2ATaskStatus,
     AgentCapabilities,
     AgentCard,
     ServingConfig,
     TaskArtifactUpdateEvent,
     TaskState,
-    TaskStatus,
     TaskStatusUpdateEvent,
 )
 from exo.types import ExoError  # pyright: ignore[reportMissingImports]
+
+logger = logging.getLogger(__name__)
+
+# Convenience alias used throughout this module.
+TaskStatus = A2ATaskStatus
 
 
 class A2AServerError(ExoError):
@@ -79,12 +82,29 @@ class AgentExecutor:
         self._streaming = streaming
 
     async def execute(self, text: str, *, provider: Any = None) -> str:
-        """Run the wrapped agent and return text output."""
+        """Run the wrapped agent and return text output.
+
+        Handles both ``AgentOutput`` (has ``.text``) returned by ``Agent.run()``
+        and ``RunResult`` (has ``.output``) returned by the public ``run()``
+        function or a ``Swarm``.  Falls back gracefully when neither attribute
+        is present.
+
+        Priority: ``.text`` (AgentOutput) → ``.output`` (RunResult/Swarm) → str().
+        """
         kwargs: dict[str, Any] = {}
         if provider is not None:
             kwargs["provider"] = provider
         result = await self._agent.run(text, **kwargs)
-        return result.text or ""
+        # AgentOutput exposes .text; RunResult (and Swarm output) exposes .output.
+        # Use _has_attr sentinel to distinguish "attribute absent" from "value is None".
+        _sentinel = object()
+        text_val = getattr(result, "text", _sentinel)
+        if text_val is not _sentinel:
+            return text_val or ""
+        output_val = getattr(result, "output", _sentinel)
+        if output_val is not _sentinel:
+            return output_val or ""
+        return str(result) if result is not None else ""
 
     @property
     def agent_name(self) -> str:

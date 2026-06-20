@@ -144,8 +144,9 @@ async def get_config(user: dict = Depends(require_role("admin"))) -> VectorStore
 
 @router.put("")
 async def update_config(
-    body: VectorStoreUpdate, user: dict = Depends(require_role("admin"))
-) -> VectorStoreResponse:  # noqa: B008
+    body: VectorStoreUpdate,
+    user: dict = Depends(require_role("admin")),  # noqa: B008
+) -> VectorStoreResponse:
     """Update the active vector store configuration."""
     async with get_db() as db:
         # Ensure config exists

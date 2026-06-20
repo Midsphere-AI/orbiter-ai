@@ -15,8 +15,10 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
 
+from exo.types import ExoError  # pyright: ignore[reportMissingImports]
 
-class TrainerError(Exception):
+
+class TrainerError(ExoError):
     """Error during training operations."""
 
 

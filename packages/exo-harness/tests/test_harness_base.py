@@ -531,9 +531,7 @@ class TestHarnessPTCEvents:
             return msg
 
         agent = Agent(name="worker", tools=[echo], ptc=True)
-        provider = _make_stream_provider(
-            _ptc_stream_rounds('await default_api.echo(msg="hello")')
-        )
+        provider = _make_stream_provider(_ptc_stream_rounds('await default_api.echo(msg="hello")'))
 
         h = PassthroughHarness(name="h", agents=[agent])
 
@@ -569,9 +567,7 @@ class TestHarnessPTCEvents:
                         ToolCall(
                             id="tc1",
                             name=PTC_TOOL_NAME,
-                            arguments=json.dumps(
-                                {"code": 'await default_api.echo(msg="stale")'}
-                            ),
+                            arguments=json.dumps({"code": 'await default_api.echo(msg="stale")'}),
                         )
                     ],
                 ),
@@ -588,6 +584,4 @@ class TestHarnessPTCEvents:
 
         # The key assertion: the agent's _event_queue must be clean after
         # the non-streaming run. PTC events should have been drained.
-        assert agent._event_queue.empty(), (
-            "PTC events should be drained after non-streaming run"
-        )
+        assert agent._event_queue.empty(), "PTC events should be drained after non-streaming run"

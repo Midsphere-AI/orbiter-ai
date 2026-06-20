@@ -10,12 +10,14 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from exo.types import ExoError  # pyright: ignore[reportMissingImports]
+
 logger = logging.getLogger(__name__)
 
 from exo.context.state import ContextState  # pyright: ignore[reportMissingImports]
 
 
-class VariableResolveError(Exception):
+class VariableResolveError(ExoError):
     """Raised when a variable path cannot be resolved."""
 
 

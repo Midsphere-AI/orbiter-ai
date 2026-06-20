@@ -24,12 +24,14 @@ from typing import Any
 from rich.console import Console as RichConsole
 from rich.panel import Panel
 
+from exo.types import ExoError  # pyright: ignore[reportMissingImports]
+
 # ---------------------------------------------------------------------------
 # Errors
 # ---------------------------------------------------------------------------
 
 
-class ExecutorError(Exception):
+class ExecutorError(ExoError):
     """Raised for execution-level errors."""
 
 

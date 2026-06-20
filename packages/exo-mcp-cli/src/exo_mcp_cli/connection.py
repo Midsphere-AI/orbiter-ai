@@ -17,13 +17,14 @@ from mcp.client.sse import sse_client
 from mcp.client.stdio import StdioServerParameters, stdio_client
 from mcp.client.streamable_http import streamablehttp_client
 
+from exo.types import ExoError  # pyright: ignore[reportMissingImports]
 from exo_mcp_cli.config import ServerEntry, substitute_env_vars
 from exo_mcp_cli.vault import Vault
 
 _VAULT_PATTERN = re.compile(r"\$\{vault:([^}]+)\}")
 
 
-class MCPConnectionError(Exception):
+class MCPConnectionError(ExoError):
     """Raised when connecting to an MCP server fails."""
 
 

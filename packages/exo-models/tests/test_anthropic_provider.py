@@ -186,14 +186,38 @@ class TestBuildMessages:
         assert msgs[0]["role"] == "user"
         assert len(msgs[0]["content"]) == 2
 
-    def test_tool_result_after_user_not_merged(self) -> None:
+    def test_tool_result_after_user_merged_for_alternation(self) -> None:
+        # A UserMessage followed immediately by a ToolResult both become role=user.
+        # The alternation pass must merge them into a single user turn so the
+        # sequence is valid for the Anthropic API.
         _, msgs = _build_messages(
             [
                 UserMessage(content="hi"),
                 ToolResult(tool_call_id="tc1", tool_name="search", content="r1"),
             ]
         )
-        assert len(msgs) == 2
+        assert len(msgs) == 1
+        assert msgs[0]["role"] == "user"
+        content = msgs[0]["content"]
+        assert isinstance(content, list)
+        # First block: the original user text, second: the tool_result block
+        assert content[0] == {"type": "text", "text": "hi"}
+        assert content[1]["type"] == "tool_result"
+
+    def test_alternation_enforced_for_consecutive_user_messages(self) -> None:
+        # Two consecutive UserMessages must be merged into a single user turn.
+        _, msgs = _build_messages(
+            [
+                UserMessage(content="first"),
+                UserMessage(content="second"),
+            ]
+        )
+        assert len(msgs) == 1
+        assert msgs[0]["role"] == "user"
+        content = msgs[0]["content"]
+        assert isinstance(content, list)
+        assert content[0] == {"type": "text", "text": "first"}
+        assert content[1] == {"type": "text", "text": "second"}
 
 
 # ---------------------------------------------------------------------------
@@ -593,7 +617,7 @@ class TestApplyCacheBreakpoints:
             {"role": "assistant", "content": [{"type": "text", "text": "ok"}]},
             {"role": "user", "content": "third"},
         ]
-        kwargs = _apply_cache_breakpoints({"messages": messages})
+        _apply_cache_breakpoints({"messages": messages})
         # First user message untouched
         assert messages[0]["content"] == "first"
         # Second user message marked
@@ -607,7 +631,7 @@ class TestApplyCacheBreakpoints:
 
     def test_user_string_content_converted(self) -> None:
         messages = [{"role": "user", "content": "hello"}]
-        kwargs = _apply_cache_breakpoints({"messages": messages})
+        _apply_cache_breakpoints({"messages": messages})
         assert messages[0]["content"] == [
             {"type": "text", "text": "hello", "cache_control": {"type": "ephemeral"}}
         ]
@@ -622,7 +646,7 @@ class TestApplyCacheBreakpoints:
                 ],
             }
         ]
-        kwargs = _apply_cache_breakpoints({"messages": messages})
+        _apply_cache_breakpoints({"messages": messages})
         assert "cache_control" not in messages[0]["content"][0]
         assert messages[0]["content"][1]["cache_control"] == {"type": "ephemeral"}
 
@@ -635,7 +659,7 @@ class TestApplyCacheBreakpoints:
 
     def test_no_user_messages_no_error(self) -> None:
         messages = [{"role": "assistant", "content": [{"type": "text", "text": "hi"}]}]
-        kwargs = _apply_cache_breakpoints({"messages": messages})
+        _apply_cache_breakpoints({"messages": messages})
         assert "cache_control" not in messages[0]["content"][0]
 
 

@@ -13,11 +13,12 @@ import re
 from dataclasses import dataclass
 
 from exo.observability.logging import get_logger  # pyright: ignore[reportMissingImports]
+from exo.types import ExoError  # pyright: ignore[reportMissingImports]
 
 _log = get_logger(__name__)
 
 
-class KnowledgeError(Exception):
+class KnowledgeError(ExoError):
     """Raised for knowledge store operation errors."""
 
 

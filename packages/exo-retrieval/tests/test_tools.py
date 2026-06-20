@@ -276,4 +276,4 @@ class TestAgentIntegration:
         assert "index_document" in agent.tools
         schemas = agent.get_tool_schemas()
         tool_names = {s["function"]["name"] for s in schemas}
-        assert tool_names == {"retrieve", "index_document", "retrieve_artifact"}
+        assert tool_names == {"retrieve", "index_document"}

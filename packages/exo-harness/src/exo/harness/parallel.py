@@ -29,7 +29,7 @@ from exo.harness.types import (
     SubAgentStatus,
     SubAgentTask,
 )
-from exo.types import AssistantMessage, ErrorEvent, StatusEvent, StreamEvent, TextEvent
+from exo.types import AssistantMessage, ErrorEvent, ExoError, StatusEvent, StreamEvent, TextEvent
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -46,7 +46,7 @@ LOG_DIR = Path("/tmp")
 # ---------------------------------------------------------------------------
 
 
-class SubAgentError(Exception):
+class SubAgentError(ExoError):
     """Raised when parallel sub-agent execution fails in fail-fast mode.
 
     Carries partial results so callers can inspect what completed

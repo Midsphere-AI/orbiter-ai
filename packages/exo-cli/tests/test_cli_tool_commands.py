@@ -13,7 +13,6 @@ from exo_cli.main import app
 from exo_cli.tool_commands import (
     _build_arguments,
     _coerce_value,
-    _collect_tools_from_module,
     _discover,
     _format_result,
 )
@@ -248,8 +247,13 @@ class TestToolCallCLI:
         result = runner.invoke(
             app,
             [
-                "tool", "call", "greet", "--from", str(tools_file),
-                "-j", '{"name": "Alice", "greeting": "Hey"}',
+                "tool",
+                "call",
+                "greet",
+                "--from",
+                str(tools_file),
+                "-j",
+                '{"name": "Alice", "greeting": "Hey"}',
             ],
         )
         assert result.exit_code == 0
@@ -267,8 +271,14 @@ class TestToolCallCLI:
         result = runner.invoke(
             app,
             [
-                "tool", "call", "greet", "--from", str(tools_file),
-                "-a", "name=X", "--raw",
+                "tool",
+                "call",
+                "greet",
+                "--from",
+                str(tools_file),
+                "-a",
+                "name=X",
+                "--raw",
             ],
         )
         assert result.exit_code == 0
@@ -276,9 +286,7 @@ class TestToolCallCLI:
         assert data["result"] == "Hello, X!"
 
     def test_call_missing_tool(self, tools_file: Path) -> None:
-        result = runner.invoke(
-            app, ["tool", "call", "nope", "--from", str(tools_file)]
-        )
+        result = runner.invoke(app, ["tool", "call", "nope", "--from", str(tools_file)])
         assert result.exit_code != 0
         assert "not found" in result.output.lower() or "nope" in result.output
 
@@ -286,8 +294,15 @@ class TestToolCallCLI:
         result = runner.invoke(
             app,
             [
-                "tool", "call", "greet", "--from", str(tools_file),
-                "-i", "name=Injected", "-a", "greeting=Hey",
+                "tool",
+                "call",
+                "greet",
+                "--from",
+                str(tools_file),
+                "-i",
+                "name=Injected",
+                "-a",
+                "greeting=Hey",
             ],
         )
         assert result.exit_code == 0
@@ -297,8 +312,15 @@ class TestToolCallCLI:
         result = runner.invoke(
             app,
             [
-                "tool", "call", "greet", "--from", str(tools_file),
-                "-i", "name=Injected", "-a", "name=Explicit",
+                "tool",
+                "call",
+                "greet",
+                "--from",
+                str(tools_file),
+                "-i",
+                "name=Injected",
+                "-a",
+                "name=Explicit",
             ],
         )
         assert result.exit_code == 0
@@ -348,9 +370,7 @@ class TestToolSourceEnvVar:
 class TestToolInjectEnvVar:
     def test_inject_from_env(self, tools_file: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("EXO_TOOL_INJECT", '{"name": "EnvInjected"}')
-        result = runner.invoke(
-            app, ["tool", "call", "greet", "--from", str(tools_file)]
-        )
+        result = runner.invoke(app, ["tool", "call", "greet", "--from", str(tools_file)])
         assert result.exit_code == 0
         assert "Hello, EnvInjected!" in result.output
 
@@ -398,16 +418,12 @@ class TestToolInjectEnvVar:
 
 class TestToolSchemaCLI:
     def test_schema_output(self, tools_file: Path) -> None:
-        result = runner.invoke(
-            app, ["tool", "schema", "greet", "--from", str(tools_file)]
-        )
+        result = runner.invoke(app, ["tool", "schema", "greet", "--from", str(tools_file)])
         assert result.exit_code == 0
         data = json.loads(result.output)
         assert data["function"]["name"] == "greet"
         assert "name" in data["function"]["parameters"]["properties"]
 
     def test_schema_missing_tool(self, tools_file: Path) -> None:
-        result = runner.invoke(
-            app, ["tool", "schema", "nope", "--from", str(tools_file)]
-        )
+        result = runner.invoke(app, ["tool", "schema", "nope", "--from", str(tools_file)])
         assert result.exit_code != 0

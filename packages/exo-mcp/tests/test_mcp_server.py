@@ -394,7 +394,7 @@ class TestMCPServerDecoratorRun:
         with pytest.raises(MCPServerError, match="not initialized"):
             inst.run()  # pyright: ignore[reportAttributeAccessIssue]
 
-    def test_stop_method_added(self) -> None:
+    async def test_stop_method_added(self) -> None:
         mock_fast_mcp_cls = MagicMock()
         mock_fast_mcp = MagicMock()
         mock_fast_mcp.tool.return_value = lambda fn: fn
@@ -409,7 +409,7 @@ class TestMCPServerDecoratorRun:
             inst = StopServer()
 
         assert hasattr(inst, "stop")
-        inst.stop()  # pyright: ignore[reportAttributeAccessIssue]
+        await inst.stop()  # pyright: ignore[reportAttributeAccessIssue]
 
 
 # ---------------------------------------------------------------------------

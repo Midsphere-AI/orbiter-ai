@@ -81,23 +81,49 @@ _RETRIEVAL_NODE_TYPE = "knowledge_retrieval"
 _APPROVAL_GATE_TYPE = "approval_gate"
 
 
+def _build_incoming_edge_map(edges: list[dict[str, Any]]) -> dict[str, list[str]]:
+    """Build a map from node_id -> list of source node_ids (incoming edges).
+
+    Building this once before iteration makes upstream-input gathering O(1)
+    per node (amortized) instead of O(E) per node (L-16).
+    """
+    incoming: dict[str, list[str]] = defaultdict(list)
+    for edge in edges:
+        src = edge.get("source", "")
+        tgt = edge.get("target", "")
+        if src and tgt:
+            incoming[tgt].append(src)
+    return dict(incoming)
+
+
 def _gather_upstream_inputs(
     node_id: str,
     edges: list[dict[str, Any]],
     variables: dict[str, Any],
+    *,
+    incoming_map: dict[str, list[str]] | None = None,
 ) -> str:
     """Collect text from all upstream nodes feeding into this node.
 
     Joins upstream outputs separated by newlines. Returns an empty string
     if no upstream data is available.
+
+    When ``incoming_map`` is provided (pre-built via ``_build_incoming_edge_map``),
+    the lookup is O(1) amortized; otherwise falls back to O(E) linear scan.
     """
     parts: list[str] = []
-    for edge in edges:
-        if edge.get("target") == node_id:
-            src_id = edge.get("source", "")
+    if incoming_map is not None:
+        for src_id in incoming_map.get(node_id, []):
             val = variables.get(src_id, "")
             if val:
                 parts.append(str(val))
+    else:
+        for edge in edges:
+            if edge.get("target") == node_id:
+                src_id = edge.get("source", "")
+                val = variables.get(src_id, "")
+                if val:
+                    parts.append(str(val))
     return "\n".join(parts)
 
 
@@ -455,6 +481,256 @@ async def _execute_approval_gate(
         await asyncio.sleep(2)
 
 
+async def _execute_llm_node(
+    node: dict[str, Any],
+    edges: list[dict[str, Any]],
+    variables: dict[str, Any],
+    event_callback: Any | None = None,
+    *,
+    user_id: str = "",
+    incoming_map: dict[str, list[str]] | None = None,
+) -> dict[str, Any]:
+    """Execute an ``llm`` workflow node by calling a real model completion.
+
+    Reads ``provider``, ``model``, and ``prompt`` from node config.  The prompt
+    may reference ``{upstream}`` which is replaced with any upstream outputs.
+    Falls back to the inline-agent path from ``_execute_agent_node`` so that
+    provider resolution, API-key lookup, and token tracking all reuse the
+    existing infrastructure.
+    """
+    from exo_web.services.agent_runtime import AgentRuntimeError, _resolve_provider
+
+    node_data = node.get("data", {})
+    node_id = node["id"]
+
+    provider_type = node_data.get("provider", "")
+    model_name = node_data.get("model", "")
+    prompt_template = node_data.get("prompt", "")
+
+    upstream_text = _gather_upstream_inputs(node_id, edges, variables, incoming_map=incoming_map)
+    prompt = (
+        prompt_template.replace("{upstream}", upstream_text) if upstream_text else prompt_template
+    )
+
+    if not provider_type or not model_name:
+        return {
+            "node_id": node_id,
+            "node_type": "llm",
+            "label": node_data.get("label", ""),
+            "result": "Error: llm node has no provider/model configured",
+            "logs": "Missing provider or model in node config",
+            "token_usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+        }
+
+    try:
+        from exo.agent import Agent
+
+        provider = await _resolve_provider(provider_type, model_name, user_id)
+        agent = Agent(
+            name=f"llm-node-{node_id[:8]}",
+            model=f"{provider_type}:{model_name}",
+            instructions=node_data.get("system_prompt", ""),
+            max_steps=1,
+        )
+        output = await agent.run(input=prompt, provider=provider)
+        response_text = output.text or ""
+        usage_dict = {
+            "prompt_tokens": output.usage.input_tokens if output.usage else 0,
+            "completion_tokens": output.usage.output_tokens if output.usage else 0,
+            "total_tokens": output.usage.total_tokens if output.usage else 0,
+        }
+        return {
+            "node_id": node_id,
+            "node_type": "llm",
+            "label": node_data.get("label", ""),
+            "result": response_text,
+            "logs": (
+                f"provider: {provider_type}\nmodel: {model_name}\n"
+                f"prompt: {prompt[:200]}\nresponse: {response_text[:500]}"
+            ),
+            "token_usage": usage_dict,
+        }
+    except AgentRuntimeError as exc:
+        _log.warning("LLM node %s failed: %s", node_id, exc)
+        return {
+            "node_id": node_id,
+            "node_type": "llm",
+            "label": node_data.get("label", ""),
+            "result": f"Error: {exc}",
+            "logs": f"provider: {provider_type}\nmodel: {model_name}\nerror: {exc}",
+            "token_usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+        }
+    except Exception as exc:
+        _log.warning("LLM node %s unexpected error: %s", node_id, exc)
+        raise
+
+
+async def _execute_code_node(
+    node: dict[str, Any],
+    edges: list[dict[str, Any]],
+    variables: dict[str, Any],
+    *,
+    incoming_map: dict[str, list[str]] | None = None,
+) -> dict[str, Any]:
+    """Execute a ``code`` workflow node via the existing sandbox service.
+
+    Runs in a thread-pool executor so the blocking subprocess call does not
+    block the event loop.  Upstream outputs are injected as the ``_upstream``
+    variable in the sandbox environment by prepending a binding line.
+    """
+    import asyncio
+
+    from exo_web.services.sandbox import SandboxConfig, execute_code
+
+    node_data = node.get("data", {})
+    node_id = node["id"]
+    code = node_data.get("code", "")
+    timeout_seconds = int(node_data.get("timeout_seconds", 30))
+
+    upstream_text = _gather_upstream_inputs(node_id, edges, variables, incoming_map=incoming_map)
+
+    # Inject upstream data as a Python variable so user code can access it.
+    if upstream_text:
+        injected = f"_upstream = {upstream_text!r}\n"
+        full_code = injected + code
+    else:
+        full_code = code
+
+    config = SandboxConfig(timeout_seconds=timeout_seconds)
+
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(None, execute_code, full_code, config)
+
+    if result.success:
+        output_text = result.stdout or "(no output)"
+        logs = (
+            f"stdout: {result.stdout}\nstderr: {result.stderr}\n"
+            f"execution_time_ms: {result.execution_time_ms}\ncode: {code[:200]}"
+        )
+        return {
+            "node_id": node_id,
+            "node_type": "code",
+            "label": node_data.get("label", ""),
+            "result": output_text,
+            "logs": logs,
+        }
+    else:
+        error_detail = result.error or result.stderr or "Unknown error"
+        logs = (
+            f"stdout: {result.stdout}\nstderr: {result.stderr}\n"
+            f"error: {error_detail}\nexecution_time_ms: {result.execution_time_ms}\n"
+            f"code: {code[:200]}"
+        )
+        return {
+            "node_id": node_id,
+            "node_type": "code",
+            "label": node_data.get("label", ""),
+            "result": f"Error: {error_detail}",
+            "logs": logs,
+        }
+
+
+async def _execute_api_node(
+    node: dict[str, Any],
+    edges: list[dict[str, Any]],
+    variables: dict[str, Any],
+    *,
+    incoming_map: dict[str, list[str]] | None = None,
+) -> dict[str, Any]:
+    """Execute an ``api`` workflow node by making a real HTTP request via httpx.
+
+    Node config keys:
+    - ``url``: target URL (required)
+    - ``method``: HTTP method (default ``GET``)
+    - ``headers``: dict of request headers (optional)
+    - ``body``: request body string or JSON-serialisable object (optional)
+    - ``timeout_seconds``: per-request timeout (default 30)
+    """
+    try:
+        import httpx
+    except ImportError as exc:
+        node_data = node.get("data", {})
+        node_id = node["id"]
+        _log.error("httpx not available for api node %s: %s", node_id, exc)
+        return {
+            "node_id": node_id,
+            "node_type": "api",
+            "label": node_data.get("label", ""),
+            "result": "Error: httpx is not installed",
+            "logs": str(exc),
+        }
+
+    node_data = node.get("data", {})
+    node_id = node["id"]
+
+    url = node_data.get("url", "").strip()
+    method = node_data.get("method", "GET").upper()
+    headers: dict[str, str] = node_data.get("headers") or {}
+    body = node_data.get("body")
+    timeout_seconds = float(node_data.get("timeout_seconds", 30))
+
+    if not url:
+        return {
+            "node_id": node_id,
+            "node_type": "api",
+            "label": node_data.get("label", ""),
+            "result": "Error: api node has no url configured",
+            "logs": "Missing url in node config",
+        }
+
+    # Normalise body — if it's a dict/list, serialise to JSON.
+    content: str | bytes | None = None
+    if body is not None:
+        if isinstance(body, (dict, list)):
+            content = json.dumps(body)
+            headers.setdefault("Content-Type", "application/json")
+        else:
+            content = str(body)
+
+    try:
+        async with httpx.AsyncClient(timeout=timeout_seconds, follow_redirects=True) as client:
+            response = await client.request(
+                method,
+                url,
+                headers=headers or None,
+                content=content,
+            )
+        status_code = response.status_code
+        try:
+            response_body = response.text
+        except Exception:
+            response_body = ""
+        result_text = f"{status_code} {response.reason_phrase}\n{response_body}"
+        logs = (
+            f"request: {method} {url}\nstatus: {status_code}\nresponse_body: {response_body[:500]}"
+        )
+        return {
+            "node_id": node_id,
+            "node_type": "api",
+            "label": node_data.get("label", ""),
+            "result": result_text,
+            "logs": logs,
+        }
+    except httpx.TimeoutException as exc:
+        _log.warning("API node %s timed out: %s", node_id, exc)
+        return {
+            "node_id": node_id,
+            "node_type": "api",
+            "label": node_data.get("label", ""),
+            "result": f"Error: request timed out after {timeout_seconds}s",
+            "logs": f"request: {method} {url}\nerror: {exc}",
+        }
+    except httpx.RequestError as exc:
+        _log.warning("API node %s request error: %s", node_id, exc)
+        return {
+            "node_id": node_id,
+            "node_type": "api",
+            "label": node_data.get("label", ""),
+            "result": f"Error: {exc}",
+            "logs": f"request: {method} {url}\nerror: {exc}",
+        }
+
+
 async def _execute_node(
     node: dict[str, Any],
     edges: list[dict[str, Any]] | None = None,
@@ -464,17 +740,23 @@ async def _execute_node(
     run_id: str = "",
     user_id: str = "",
     cancel_event: asyncio.Event | None = None,
+    incoming_map: dict[str, list[str]] | None = None,
 ) -> dict[str, Any]:
     """Execute a single workflow node and return its output.
 
     For agent nodes (agent_node, sub_agent), delegates to ``_execute_agent_node``
-    which calls the real Exo Agent runtime. Other node types use stub logic.
+    which calls the real Exo Agent runtime. Other node types have real
+    implementations (llm, code, api) or fall through to a generic stub.
+
+    ``incoming_map`` (pre-built via ``_build_incoming_edge_map``) accelerates
+    upstream-input gathering from O(E) to O(1) per node (L-16).
 
     Args:
         node: The workflow node dict with ``id``, ``data``, etc.
         edges: All workflow edges (used to gather upstream inputs).
         variables: Outputs from already-executed upstream nodes.
         event_callback: Optional async callable for streaming events.
+        incoming_map: Optional pre-built node_id -> [source_id, ...] map.
 
     Returns a dict with keys: node_id, node_type, label, result, and optionally
     logs (str) and token_usage (dict) for inspection support.
@@ -486,12 +768,16 @@ async def _execute_node(
 
     # --- Agent nodes: real execution via AgentService ---
     if node_type in _AGENT_NODE_TYPES:
-        upstream_text = _gather_upstream_inputs(node["id"], edges, variables)
+        upstream_text = _gather_upstream_inputs(
+            node["id"], edges, variables, incoming_map=incoming_map
+        )
         return await _execute_agent_node(node, upstream_text, event_callback)
 
     # --- Knowledge retrieval node ---
     if node_type == _RETRIEVAL_NODE_TYPE:
-        query_text = _gather_upstream_inputs(node["id"], edges, variables)
+        query_text = _gather_upstream_inputs(
+            node["id"], edges, variables, incoming_map=incoming_map
+        )
         return await _execute_retrieval_node(node, query_text)
 
     # --- Approval gate node ---
@@ -504,30 +790,28 @@ async def _execute_node(
             cancel_event=cancel_event,
         )
 
-    # --- Other node types: stub execution ---
-    await asyncio.sleep(0.01)
+    # --- LLM node: real model/agent completion ---
+    if node_type == "llm":
+        return await _execute_llm_node(
+            node, edges, variables, event_callback, user_id=user_id, incoming_map=incoming_map
+        )
 
-    result: dict[str, Any] = {
+    # --- Code node: real sandboxed execution ---
+    if node_type == "code":
+        return await _execute_code_node(node, edges, variables, incoming_map=incoming_map)
+
+    # --- API node: real HTTP request via httpx ---
+    if node_type == "api":
+        return await _execute_api_node(node, edges, variables, incoming_map=incoming_map)
+
+    # --- Unknown / unimplemented node types ---
+    await asyncio.sleep(0.01)
+    return {
         "node_id": node["id"],
         "node_type": node_type,
         "label": node_data.get("label", ""),
         "result": f"Executed {node_type} node",
     }
-
-    if node_type == "llm":
-        prompt = node_data.get("prompt", "")
-        result["result"] = f"LLM response for: {prompt[:100]}"
-        result["logs"] = f"prompt: {prompt}\nresponse: {result['result']}"
-        result["token_usage"] = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
-    elif node_type == "code":
-        code = node_data.get("code", "")
-        result["result"] = "Code executed successfully"
-        result["logs"] = f"stdout: \nstderr: \ncode: {code[:200]}"
-    elif node_type == "api":
-        url = node_data.get("url", "")
-        result["logs"] = f"request: {node_data.get('method', 'GET')} {url}\nresponse: 200 OK"
-
-    return result
 
 
 # ---------------------------------------------------------------------------
@@ -556,6 +840,7 @@ async def _execute_node_with_retry(
     run_id: str = "",
     user_id: str = "",
     cancel_event: asyncio.Event | None = None,
+    incoming_map: dict[str, list[str]] | None = None,
 ) -> dict[str, Any]:
     """Execute a node with retry logic, timeout, and on_error strategies.
 
@@ -591,6 +876,7 @@ async def _execute_node_with_retry(
                     run_id=run_id,
                     user_id=user_id,
                     cancel_event=cancel_event,
+                    incoming_map=incoming_map,
                 ),
                 timeout=timeout_s,
             )
@@ -856,6 +1142,9 @@ async def execute_workflow(
 
     node_map = {n["id"]: n for n in nodes}
 
+    # Build incoming-edge map once (O(E)) so each node's upstream lookup is O(1) — L-16.
+    incoming_map = _build_incoming_edge_map(edges)
+
     # Inject runtime context (_user_id, _workflow_id) into agent nodes so
     # the agent service can resolve providers and tools.
     for n in nodes:
@@ -920,6 +1209,7 @@ async def execute_workflow(
                     run_id=run_id,
                     user_id=user_id,
                     cancel_event=cancel_event,
+                    incoming_map=incoming_map,
                 )
             )
 
@@ -1105,6 +1395,9 @@ async def execute_workflow_debug(
 
     node_map = {n["id"]: n for n in nodes}
 
+    # Build incoming-edge map once (O(E)) so each node's upstream lookup is O(1) — L-16.
+    incoming_map = _build_incoming_edge_map(edges)
+
     # Inject runtime context into agent nodes.
     for n in nodes:
         nt = n.get("data", {}).get("nodeType", "")
@@ -1112,36 +1405,39 @@ async def execute_workflow_debug(
             n.setdefault("data", {})["_user_id"] = user_id
             n["data"]["_workflow_id"] = workflow_id
 
-    # Flatten layers into a sequential execution order for debug stepping.
-    execution_order: list[str] = []
-    for layer in layers:
-        execution_order.extend(layer)
-
     now = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
     await _update_run_status(run_id, "running", started_at=now)
 
     final_status = "completed"
 
-    for nid in execution_order:
+    # Debug mode steps through layers rather than individual nodes.
+    # Nodes within a layer are still executed concurrently (matching normal
+    # execution semantics) — we only gate at layer boundaries.  This ensures
+    # side-effecting nodes inside the same parallel layer behave identically
+    # to non-debug mode (L-12).
+    for layer in layers:
         if cancel_event.is_set():
             final_status = "cancelled"
             break
 
-        node = node_map.get(nid)
-        if node is None:
+        layer_node_ids = [nid for nid in layer if node_map.get(nid) is not None]
+        if not layer_node_ids:
             continue
 
-        # Emit paused event — client should display controls.
+        # Announce the layer so the client knows which nodes are about to run.
         await emit(
             {
                 "type": "debug_paused",
-                "node_id": nid,
+                "layer": layer_node_ids,
+                # Also include the first node_id for backward-compat with
+                # single-node step UIs.
+                "node_id": layer_node_ids[0],
                 "variables": variables,
                 "breakpoints": list(breakpoints),
             }
         )
 
-        # Wait for a command from the client.
+        # Wait for a single layer-level command from the client.
         action = await _wait_for_debug_command(command_queue, cancel_event, breakpoints, variables)
 
         if action == "stop" or cancel_event.is_set():
@@ -1149,100 +1445,144 @@ async def execute_workflow_debug(
             break
 
         if action == "skip":
-            # Log the node as skipped.
-            log_id = str(uuid.uuid4())
-            started = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
-            async with get_db() as db:
-                await db.execute(
-                    "INSERT INTO workflow_run_logs (id, run_id, node_id, status, started_at, completed_at) VALUES (?, ?, ?, 'skipped', ?, ?)",
-                    (log_id, run_id, nid, started, started),
-                )
-                await db.commit()
-            await emit({"type": "node_skipped", "node_id": nid})
+            # Skip every node in this layer.
+            for nid in layer_node_ids:
+                log_id = str(uuid.uuid4())
+                started = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
+                async with get_db() as db:
+                    await db.execute(
+                        "INSERT INTO workflow_run_logs (id, run_id, node_id, status, started_at, completed_at)"
+                        " VALUES (?, ?, ?, 'skipped', ?, ?)",
+                        (log_id, run_id, nid, started, started),
+                    )
+                    await db.commit()
+                await emit({"type": "node_skipped", "node_id": nid})
             continue
 
-        # action == "continue" — execute the node.
-        log_id = str(uuid.uuid4())
-        started = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
-        input_snapshot = json.dumps(node.get("data", {}))
-        cfg = _get_node_error_config(node)
-        async with get_db() as db:
-            await db.execute(
-                "INSERT INTO workflow_run_logs (id, run_id, node_id, status, started_at, input_json, retry_attempt, max_retries, on_error) VALUES (?, ?, ?, 'running', ?, ?, 0, ?, ?)",
-                (log_id, run_id, nid, started, input_snapshot, cfg["retry_count"], cfg["on_error"]),
-            )
-            await db.commit()
+        # action == "continue" — execute all nodes in this layer concurrently
+        # (same semantics as normal execution mode).
+        tasks: dict[str, asyncio.Task[dict[str, Any]]] = {}
+        node_start_times: dict[str, float] = {}
 
-        await emit({"type": "node_started", "node_id": nid})
-
-        try:
-            output = await _execute_node_with_retry(
-                node,
-                edges=edges,
-                variables=variables,
-                event_callback=emit,
-                run_id=run_id,
-                user_id=user_id,
-                cancel_event=cancel_event,
-            )
-            completed_at = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
-
-            logs_text = output.pop("logs", None)
-            token_usage = output.pop("token_usage", None)
-            token_usage_json = json.dumps(token_usage) if token_usage else None
-            retry_attempt = output.pop("_retry_attempt", 0)
-            max_retries = output.pop("_max_retries", 0)
-            on_error = output.pop("_on_error", "fail")
-            is_skipped = output.pop("_skipped", False)
-            output.pop("_fallback", False)
-
-            node_status = "skipped" if is_skipped else "completed"
-
+        for nid in layer_node_ids:
+            node = node_map[nid]
+            log_id = str(uuid.uuid4())
+            started = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
+            input_snapshot = json.dumps(node.get("data", {}))
+            cfg = _get_node_error_config(node)
             async with get_db() as db:
                 await db.execute(
-                    "UPDATE workflow_run_logs SET status = ?, output_json = ?, logs_text = ?, token_usage_json = ?, completed_at = ?, retry_attempt = ?, max_retries = ?, on_error = ? WHERE run_id = ? AND node_id = ?",
+                    "INSERT INTO workflow_run_logs"
+                    " (id, run_id, node_id, status, started_at, input_json, retry_attempt, max_retries, on_error)"
+                    " VALUES (?, ?, ?, 'running', ?, ?, 0, ?, ?)",
                     (
-                        node_status,
-                        json.dumps(output),
-                        logs_text,
-                        token_usage_json,
-                        completed_at,
-                        retry_attempt,
-                        max_retries,
-                        on_error,
+                        log_id,
                         run_id,
                         nid,
+                        started,
+                        input_snapshot,
+                        cfg["retry_count"],
+                        cfg["on_error"],
                     ),
                 )
                 await db.commit()
 
-            # Store node output in variables for downstream inspection.
-            variables[nid] = output.get("result", "") if not is_skipped else None
-
-            event_type = "node_skipped" if is_skipped else "node_completed"
-            await emit(
-                {
-                    "type": event_type,
-                    "node_id": nid,
-                    "output": output,
-                    "variables": variables,
-                    **({"retry_attempts": retry_attempt} if retry_attempt > 0 else {}),
-                }
+            await emit({"type": "node_started", "node_id": nid})
+            node_start_times[nid] = time.monotonic()
+            tasks[nid] = asyncio.create_task(
+                _execute_node_with_retry(
+                    node,
+                    edges=edges,
+                    variables=variables,
+                    event_callback=emit,
+                    run_id=run_id,
+                    user_id=user_id,
+                    cancel_event=cancel_event,
+                    incoming_map=incoming_map,
+                )
             )
 
-        except Exception as exc:
-            error_msg = str(exc)
-            completed_at = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
+        for nid, task in tasks.items():
+            try:
+                if cancel_event.is_set():
+                    task.cancel()
+                    final_status = "cancelled"
+                    continue
 
-            async with get_db() as db:
-                await db.execute(
-                    "UPDATE workflow_run_logs SET status = 'failed', error = ?, completed_at = ? WHERE run_id = ? AND node_id = ?",
-                    (error_msg, completed_at, run_id, nid),
+                output = await task
+                completed_at = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
+
+                logs_text = output.pop("logs", None)
+                token_usage = output.pop("token_usage", None)
+                token_usage_json = json.dumps(token_usage) if token_usage else None
+                retry_attempt = output.pop("_retry_attempt", 0)
+                max_retries = output.pop("_max_retries", 0)
+                on_error = output.pop("_on_error", "fail")
+                is_skipped = output.pop("_skipped", False)
+                output.pop("_fallback", False)
+
+                node_status = "skipped" if is_skipped else "completed"
+
+                async with get_db() as db:
+                    await db.execute(
+                        "UPDATE workflow_run_logs SET status = ?, output_json = ?, logs_text = ?,"
+                        " token_usage_json = ?, completed_at = ?, retry_attempt = ?, max_retries = ?,"
+                        " on_error = ? WHERE run_id = ? AND node_id = ?",
+                        (
+                            node_status,
+                            json.dumps(output),
+                            logs_text,
+                            token_usage_json,
+                            completed_at,
+                            retry_attempt,
+                            max_retries,
+                            on_error,
+                            run_id,
+                            nid,
+                        ),
+                    )
+                    await db.commit()
+
+                # Store node output in variables for downstream inspection.
+                variables[nid] = output.get("result", "") if not is_skipped else None
+
+                event_type = "node_skipped" if is_skipped else "node_completed"
+                await emit(
+                    {
+                        "type": event_type,
+                        "node_id": nid,
+                        "output": output,
+                        "variables": variables,
+                        **({"retry_attempts": retry_attempt} if retry_attempt > 0 else {}),
+                    }
                 )
-                await db.commit()
 
-            await emit({"type": "node_failed", "node_id": nid, "error": error_msg})
-            final_status = "failed"
+            except asyncio.CancelledError:
+                async with get_db() as db:
+                    await db.execute(
+                        "UPDATE workflow_run_logs SET status = 'skipped' WHERE run_id = ? AND node_id = ?",
+                        (run_id, nid),
+                    )
+                    await db.commit()
+                final_status = "cancelled"
+
+            except Exception as exc:
+                error_msg = str(exc)
+                completed_at = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
+
+                async with get_db() as db:
+                    await db.execute(
+                        "UPDATE workflow_run_logs SET status = 'failed', error = ?, completed_at = ?"
+                        " WHERE run_id = ? AND node_id = ?",
+                        (error_msg, completed_at, run_id, nid),
+                    )
+                    await db.commit()
+
+                await emit({"type": "node_failed", "node_id": nid, "error": error_msg})
+                final_status = "failed"
+                break
+
+        if final_status in ("failed", "cancelled"):
             break
 
     # Finalize.

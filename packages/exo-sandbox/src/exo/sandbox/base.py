@@ -2,16 +2,19 @@
 
 from __future__ import annotations
 
+import inspect
 import logging
 import uuid
 from abc import ABC, abstractmethod
 from enum import StrEnum
 from typing import Any
 
+from exo.types import ExoError  # pyright: ignore[reportMissingImports]
+
 logger = logging.getLogger(__name__)
 
 
-class SandboxError(Exception):
+class SandboxError(ExoError):
     """Raised for sandbox-level errors."""
 
 
@@ -125,6 +128,14 @@ class Sandbox(ABC):
     async def cleanup(self) -> None:
         """Release all resources and close the sandbox permanently."""
 
+    @abstractmethod
+    async def run_tool(self, tool_name: str, arguments: dict[str, Any]) -> Any:
+        """Execute a named tool within this sandbox.
+
+        Raises :class:`SandboxError` if the sandbox is not running or the
+        tool cannot be found/executed.
+        """
+
     # -- convenience --------------------------------------------------------
 
     def describe(self) -> dict[str, Any]:
@@ -147,7 +158,45 @@ class Sandbox(ABC):
 
 
 class LocalSandbox(Sandbox):
-    """Sandbox that executes on the local machine."""
+    """Sandbox that executes on the local machine.
+
+    Pass a *tools* mapping of ``{tool_name: Tool}`` to enable real tool
+    execution via :meth:`run_tool`.  Tools must expose an async
+    ``execute(**kwargs)`` method (as defined by :class:`exo.tool.Tool`).
+    """
+
+    __slots__ = (
+        "_agents",
+        "_mcp_config",
+        "_sandbox_id",
+        "_status",
+        "_timeout",
+        "_tools",
+        "_workspace",
+    )
+
+    def __init__(
+        self,
+        *,
+        sandbox_id: str | None = None,
+        workspace: list[str] | None = None,
+        mcp_config: dict[str, Any] | None = None,
+        agents: dict[str, Any] | None = None,
+        timeout: float = 30.0,
+        tools: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(
+            sandbox_id=sandbox_id,
+            workspace=workspace,
+            mcp_config=mcp_config,
+            agents=agents,
+            timeout=timeout,
+        )
+        self._tools: dict[str, Any] = dict(tools) if tools else {}
+
+    def register_tool(self, tool: Any) -> None:
+        """Register a :class:`~exo.tool.Tool` instance for use in :meth:`run_tool`."""
+        self._tools[tool.name] = tool
 
     async def start(self) -> None:
         logger.info("Sandbox %s: starting", self._sandbox_id)
@@ -161,15 +210,35 @@ class LocalSandbox(Sandbox):
         self._transition(SandboxStatus.CLOSED)
 
     async def run_tool(self, tool_name: str, arguments: dict[str, Any]) -> Any:
-        """Execute a tool within this sandbox.
+        """Execute a registered tool by name within this sandbox.
 
-        Raises ``SandboxError`` if the sandbox is not running.
+        The tool's ``execute(**arguments)`` method is called directly.
+        Both async and sync callables are supported (sync callables are
+        awaited if they return a coroutine).
+
+        Raises :class:`SandboxError` if the sandbox is not running or if
+        no tool matching *tool_name* is registered.
         """
         if self._status != SandboxStatus.RUNNING:
             msg = f"Sandbox must be running to call tools (status={self._status!r})"
             raise SandboxError(msg)
-        logger.debug("Sandbox %s: running tool %s", self._sandbox_id, tool_name)
-        return {"tool": tool_name, "arguments": arguments, "status": "ok"}
+
+        tool = self._tools.get(tool_name)
+        if tool is None:
+            msg = f"Tool {tool_name!r} is not registered in this sandbox"
+            raise SandboxError(msg)
+
+        logger.debug("Sandbox %s: executing tool %r", self._sandbox_id, tool_name)
+        try:
+            result = tool.execute(**arguments)
+            if inspect.isawaitable(result):
+                result = await result
+            return result
+        except SandboxError:
+            raise
+        except Exception as exc:
+            logger.error("Sandbox %s: tool %r raised %s", self._sandbox_id, tool_name, exc)
+            raise SandboxError(f"Tool {tool_name!r} failed: {exc}") from exc
 
     async def __aenter__(self) -> LocalSandbox:
         await self.start()

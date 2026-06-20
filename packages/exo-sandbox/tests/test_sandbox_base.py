@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 from exo.sandbox.base import (  # pyright: ignore[reportMissingImports]
@@ -10,6 +12,21 @@ from exo.sandbox.base import (  # pyright: ignore[reportMissingImports]
     SandboxError,
     SandboxStatus,
 )
+from exo.tool import FunctionTool  # pyright: ignore[reportMissingImports]
+
+# ---------------------------------------------------------------------------
+# Helper: a simple FunctionTool for tests
+# ---------------------------------------------------------------------------
+
+
+def _make_echo_tool() -> FunctionTool:
+    """Return a FunctionTool that echoes its arguments back as a dict."""
+
+    async def echo(message: str) -> dict[str, Any]:
+        return {"echo": message}
+
+    return FunctionTool(echo, name="echo")
+
 
 # ---------------------------------------------------------------------------
 # SandboxStatus enum
@@ -190,24 +207,48 @@ class TestLocalSandboxLifecycle:
 
 class TestLocalSandboxRunTool:
     async def test_run_tool_while_running(self) -> None:
-        sb = LocalSandbox()
+        echo = _make_echo_tool()
+        sb = LocalSandbox(tools={"echo": echo})
         await sb.start()
-        result = await sb.run_tool("my_tool", {"key": "val"})
-        assert result["tool"] == "my_tool"
-        assert result["arguments"] == {"key": "val"}
-        assert result["status"] == "ok"
+        result = await sb.run_tool("echo", {"message": "hello"})
+        assert result == {"echo": "hello"}
 
     async def test_run_tool_not_running(self) -> None:
         sb = LocalSandbox()
         with pytest.raises(SandboxError, match="must be running"):
-            await sb.run_tool("t", {})
+            await sb.run_tool("echo", {})
 
     async def test_run_tool_after_stop(self) -> None:
         sb = LocalSandbox()
         await sb.start()
         await sb.stop()
         with pytest.raises(SandboxError, match="must be running"):
-            await sb.run_tool("t", {})
+            await sb.run_tool("echo", {})
+
+    async def test_run_tool_unknown_raises(self) -> None:
+        sb = LocalSandbox()
+        await sb.start()
+        with pytest.raises(SandboxError, match="not registered"):
+            await sb.run_tool("no_such_tool", {})
+
+    async def test_run_tool_exception_wrapped(self) -> None:
+        async def failing(**kwargs: Any) -> str:
+            raise ValueError("boom")
+
+        tool = FunctionTool(failing, name="failing")
+        sb = LocalSandbox(tools={"failing": tool})
+        await sb.start()
+        with pytest.raises(SandboxError, match="failing"):
+            await sb.run_tool("failing", {})
+
+    async def test_register_tool_and_run(self) -> None:
+        """register_tool() adds a tool that run_tool can invoke."""
+        echo = _make_echo_tool()
+        sb = LocalSandbox()
+        sb.register_tool(echo)
+        await sb.start()
+        result = await sb.run_tool("echo", {"message": "world"})
+        assert result == {"echo": "world"}
 
 
 # ---------------------------------------------------------------------------

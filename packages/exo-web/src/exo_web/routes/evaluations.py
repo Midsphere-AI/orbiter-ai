@@ -7,6 +7,7 @@ and retrieving scored results.
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 from datetime import UTC, datetime
 from typing import Any
@@ -27,6 +28,7 @@ from exo_web.services.safety import (
 )
 
 router = APIRouter(prefix="/api/v1/evaluations", tags=["evaluations"])
+_log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -88,6 +90,14 @@ class SafetyRunResponse(BaseModel):
     pass_rate: float = Field(description="Pass rate")
     flagged_count: int = Field(description="Flagged count")
     total_count: int = Field(description="Total count")
+    # Transparency fields: indicates whether AI judging was available.
+    # Present on /run responses; absent on historical /safety-results rows.
+    ai_judge_available: bool | None = Field(
+        None, description="Whether AI judging was used (False = heuristic fallback)"
+    )
+    ai_judge_error: str | None = Field(
+        None, description="Reason AI judging was unavailable, if applicable"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -438,9 +448,12 @@ async def run_safety_evaluation(
     category_thresholds = policy.get("category_thresholds", {})
     rules: list[str] = policy.get("rules", DEFAULT_POLICY["rules"])
 
-    # Resolve provider for LLM judging
+    # Resolve provider for LLM judging.  If resolution fails we fall back to
+    # heuristic judging and surface the degradation to the caller.
     provider = None
     model_name = ""
+    ai_judge_available = True
+    ai_judge_error: str | None = None
     try:
         from exo_web.services.agent_runtime import _load_agent_row, _resolve_provider
 
@@ -449,8 +462,18 @@ async def run_safety_evaluation(
         model_name = agent_row.get("model_name", "")
         if provider_type and model_name:
             provider = await _resolve_provider(provider_type, model_name, user["id"])
-    except Exception:
-        pass
+        else:
+            ai_judge_available = False
+            ai_judge_error = "Agent has no model configured; heuristic judging used"
+            _log.warning("Safety evaluation %s: %s", evaluation_id, ai_judge_error)
+    except Exception as exc:
+        ai_judge_available = False
+        ai_judge_error = f"Provider resolution failed ({exc!s}); heuristic judging used"
+        _log.warning(
+            "Safety evaluation %s: provider resolution failed — falling back to heuristic judging: %s",
+            evaluation_id,
+            exc,
+        )
 
     # Determine which categories to test
     selected_categories = body.categories if body.categories else list(SAFETY_CATEGORIES.keys())
@@ -564,7 +587,12 @@ async def run_safety_evaluation(
 
         cursor = await db.execute("SELECT * FROM safety_runs WHERE id = ?", (run_id,))
         row = await cursor.fetchone()
-        return _row_to_dict(row)
+        result = _row_to_dict(row)
+        # Surface AI judging availability so callers know whether results used
+        # heuristic fallback.  These fields are not persisted to the DB.
+        result["ai_judge_available"] = ai_judge_available
+        result["ai_judge_error"] = ai_judge_error
+        return result
 
 
 @router.get(

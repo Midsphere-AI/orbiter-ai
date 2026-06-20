@@ -25,6 +25,11 @@ from contextvars import ContextVar
 from datetime import UTC, datetime
 from typing import Any
 
+# NOTE (D-5): _PREFIX is also defined in exo-core/src/exo/log.py.  That module
+# is a backward-compat shim that re-exports symbols from this file and re-declares
+# _PREFIX locally so it can be imported standalone without pulling in this package.
+# The duplication is intentional — do not import _PREFIX from exo.log here, as
+# that would create a circular-import risk (exo.log imports from this module).
 _PREFIX = "exo"
 
 # ---------------------------------------------------------------------------

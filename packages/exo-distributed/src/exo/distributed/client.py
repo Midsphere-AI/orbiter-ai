@@ -22,7 +22,7 @@ from exo.observability.propagation import (  # pyright: ignore[reportMissingImpo
     DictCarrier,
 )
 from exo.observability.tracing import aspan  # pyright: ignore[reportMissingImports]
-from exo.types import StreamEvent  # pyright: ignore[reportMissingImports]
+from exo.types import ExoError, StreamEvent  # pyright: ignore[reportMissingImports]
 
 logger = logging.getLogger(__name__)
 
@@ -108,13 +108,13 @@ class TaskHandle:
                 if task_result.status == TaskStatus.CANCELLED:
                     logger.info("Task %s was cancelled", self._task_id)
                     msg = f"Task {self._task_id} was cancelled"
-                    raise RuntimeError(msg)
+                    raise ExoError(msg)
                 # FAILED
                 logger.error(
                     "Task %s failed: %s", self._task_id, task_result.error or "unknown error"
                 )
                 msg = f"Task {self._task_id} failed: {task_result.error or 'unknown error'}"
-                raise RuntimeError(msg)
+                raise ExoError(msg)
             await asyncio.sleep(poll_interval)
 
     async def stream(self) -> AsyncIterator[StreamEvent]:
@@ -172,7 +172,7 @@ async def distributed(
     url = redis_url or os.environ.get(_DEFAULT_REDIS_ENV)
     if url is None:
         msg = "redis_url must be provided or EXO_REDIS_URL environment variable must be set"
-        raise ValueError(msg)
+        raise ExoError(msg)
 
     agent_name = getattr(agent, "name", "")
     logger.debug("distributed() submitting task (agent=%s)", agent_name)

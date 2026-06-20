@@ -12,10 +12,12 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
+from exo.types import ExoError  # pyright: ignore[reportMissingImports]
+
 logger = logging.getLogger(__name__)
 
 
-class CheckpointError(Exception):
+class CheckpointError(ExoError):
     """Raised for checkpoint lifecycle errors."""
 
 

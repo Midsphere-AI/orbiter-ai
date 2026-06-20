@@ -13,6 +13,8 @@ Sub-module imports always work::
 
 from __future__ import annotations
 
+__version__: str = "0.1.0"
+
 # ---------------------------------------------------------------------------
 # Eager imports: core symbols that cover 90 % of use-cases
 # ---------------------------------------------------------------------------
@@ -261,6 +263,7 @@ for _name in _SEMCONV_NAMES:
 # __all__ — everything available from this package
 # ---------------------------------------------------------------------------
 __all__: list[str] = [
+    "__version__",
     # config (eager)
     "ObservabilityConfig",
     "TraceBackend",

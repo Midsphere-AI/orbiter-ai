@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -15,6 +16,15 @@ from exo.sandbox.kubernetes import (  # pyright: ignore[reportMissingImports]
     _DEFAULT_NAMESPACE,
     KubernetesSandbox,
 )
+from exo.tool import FunctionTool  # pyright: ignore[reportMissingImports]
+
+
+def _make_echo_tool() -> FunctionTool:
+    async def echo(message: str) -> dict[str, Any]:
+        return {"echo": message}
+
+    return FunctionTool(echo, name="echo")
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -270,22 +280,53 @@ class TestCleanup:
 
 
 class TestRunTool:
-    async def test_run_tool_when_running(self) -> None:
-        sb = KubernetesSandbox(sandbox_id="s9")
+    async def test_run_tool_registered_tool(self) -> None:
+        """Registered tool is executed locally, bypassing pod exec."""
+        echo = _make_echo_tool()
+        sb = KubernetesSandbox(sandbox_id="s9", tools={"echo": echo})
         api = _mock_k8s_api()
         sb._k8s_client = api
         await sb.start()
 
-        result = await sb.run_tool("my_tool", {"arg1": "val1"})
-        assert result["tool"] == "my_tool"
-        assert result["pod"] == "exo-s9"
-        assert result["cluster_ip"] == "10.0.0.42"
-        assert result["status"] == "ok"
+        result = await sb.run_tool("echo", {"message": "hi"})
+        assert result == {"echo": "hi"}
+
+    async def test_run_tool_register_method(self) -> None:
+        """register_tool() adds a tool callable for run_tool dispatch."""
+        echo = _make_echo_tool()
+        sb = KubernetesSandbox(sandbox_id="s9b")
+        api = _mock_k8s_api()
+        sb._k8s_client = api
+        await sb.start()
+        sb.register_tool(echo)
+
+        result = await sb.run_tool("echo", {"message": "via register"})
+        assert result == {"echo": "via register"}
 
     async def test_run_tool_not_running(self) -> None:
         sb = KubernetesSandbox(sandbox_id="s10")
         with pytest.raises(SandboxError, match="Sandbox must be running"):
             await sb.run_tool("tool", {})
+
+    async def test_run_tool_unregistered_pod_exec_fails_no_client(self) -> None:
+        """Unregistered tool triggers pod exec path; raises if k8s unavailable."""
+        sb = KubernetesSandbox(sandbox_id="s11")
+        api = _mock_k8s_api()
+        sb._k8s_client = api
+        await sb.start()
+
+        # Mock the kubernetes stream import to simulate missing package
+        with (
+            patch.dict(
+                "sys.modules",
+                {
+                    "kubernetes.stream": None,
+                    "kubernetes.stream.stream": None,
+                },
+            ),
+            pytest.raises(SandboxError),
+        ):
+            await sb.run_tool("unknown_tool", {})
 
 
 # ---------------------------------------------------------------------------

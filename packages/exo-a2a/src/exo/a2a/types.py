@@ -35,8 +35,10 @@ class TaskState(StrEnum):
 # ---------------------------------------------------------------------------
 
 
-class AgentSkill(BaseModel, frozen=True):
+class AgentSkill(BaseModel):
     """A single capability advertised by an agent."""
+
+    model_config = {"frozen": True}
 
     id: str = Field(description="Unique skill identifier")
     name: str = Field(description="Human-readable name")
@@ -51,19 +53,23 @@ class AgentSkill(BaseModel, frozen=True):
         return data
 
 
-class AgentCapabilities(BaseModel, frozen=True):
+class AgentCapabilities(BaseModel):
     """Runtime capabilities of an A2A agent."""
+
+    model_config = {"frozen": True}
 
     streaming: bool = Field(default=False, description="Supports streaming responses")
     push_notifications: bool = Field(default=False, description="Supports push notifications")
     state_transition_history: bool = Field(default=False, description="Tracks state transitions")
 
 
-class AgentCard(BaseModel, frozen=True):
+class AgentCard(BaseModel):
     """Complete metadata descriptor for a remote A2A agent.
 
     Published at ``/.well-known/agent-card`` for discovery.
     """
+
+    model_config = {"frozen": True}
 
     name: str = Field(description="Agent identifier")
     description: str = Field(default="", description="Agent purpose")
@@ -102,8 +108,10 @@ class AgentCard(BaseModel, frozen=True):
 # ---------------------------------------------------------------------------
 
 
-class ServingConfig(BaseModel, frozen=True):
+class ServingConfig(BaseModel):
     """Server-side configuration for publishing an agent via A2A."""
+
+    model_config = {"frozen": True}
 
     host: str = Field(default="localhost", description="Bind host")
     port: int = Field(default=0, description="Bind port (0 = auto)")
@@ -131,8 +139,10 @@ class ServingConfig(BaseModel, frozen=True):
         return data
 
 
-class ClientConfig(BaseModel, frozen=True):
+class ClientConfig(BaseModel):
     """Client-side configuration for connecting to a remote A2A agent."""
+
+    model_config = {"frozen": True}
 
     streaming: bool = Field(default=False, description="Request streaming")
     timeout: float = Field(default=600.0, gt=0, description="Request timeout (sec)")
@@ -162,22 +172,37 @@ class ClientConfig(BaseModel, frozen=True):
 # ---------------------------------------------------------------------------
 
 
-class TaskStatus(BaseModel, frozen=True):
-    """Current status of a remote A2A task."""
+class A2ATaskStatus(BaseModel):
+    """Current status of a remote A2A task.
+
+    Named ``A2ATaskStatus`` to avoid collision with ``TaskStatus`` in other
+    packages (e.g. ``exo-web``).  Exported from this package as both
+    ``A2ATaskStatus`` (canonical) and ``TaskStatus`` (back-compat alias).
+    """
+
+    model_config = {"frozen": True}
 
     state: TaskState = Field(description="Task lifecycle state")
     reason: str = Field(default="", description="Reason / error message")
 
 
-class TaskStatusUpdateEvent(BaseModel, frozen=True):
+# Back-compat alias so existing code using ``TaskStatus`` continues to work.
+TaskStatus = A2ATaskStatus
+
+
+class TaskStatusUpdateEvent(BaseModel):
     """Emitted when a remote task changes state."""
 
+    model_config = {"frozen": True}
+
     task_id: str = Field(description="Task being updated")
-    status: TaskStatus = Field(description="New status")
+    status: A2ATaskStatus = Field(description="New status")
 
 
-class TaskArtifactUpdateEvent(BaseModel, frozen=True):
+class TaskArtifactUpdateEvent(BaseModel):
     """Emitted when a remote task produces output."""
+
+    model_config = {"frozen": True}
 
     task_id: str = Field(description="Task being updated")
     text: str = Field(default="", description="Artifact text content")

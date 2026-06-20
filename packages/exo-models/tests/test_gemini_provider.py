@@ -7,6 +7,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from google.genai import errors as genai_errors
 
 from exo.config import ModelConfig  # pyright: ignore[reportMissingImports]
 from exo.models.gemini import (  # pyright: ignore[reportMissingImports]
@@ -493,7 +494,7 @@ class TestGeminiProviderComplete:
         provider = GeminiProvider(config)
         provider._client = MagicMock()
         provider._client.aio.models.generate_content = AsyncMock(
-            side_effect=RuntimeError("rate limited")
+            side_effect=genai_errors.ClientError(429, {"error": {"message": "rate limited"}})
         )
 
         with pytest.raises(ModelError, match="rate limited"):
@@ -577,7 +578,7 @@ class TestGeminiProviderStream:
         provider = GeminiProvider(config)
         provider._client = MagicMock()
         provider._client.aio.models.generate_content_stream = AsyncMock(
-            side_effect=RuntimeError("server error")
+            side_effect=genai_errors.ServerError(500, {"error": {"message": "server error"}})
         )
 
         with pytest.raises(ModelError, match="server error"):

@@ -32,6 +32,8 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
+from exo.types import ExoError  # pyright: ignore[reportMissingImports]
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -56,7 +58,7 @@ class PluginHook(StrEnum):
 # ---------------------------------------------------------------------------
 
 
-class PluginError(Exception):
+class PluginError(ExoError):
     """Raised when plugin loading or lifecycle fails."""
 
 

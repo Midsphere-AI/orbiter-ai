@@ -10,12 +10,14 @@ import ast
 import operator
 from typing import Any
 
+from exo.types import ExoError
+
 MAX_EXPRESSION_LENGTH = 500
 MAX_AST_DEPTH = 10
 MAX_COLLECTION_SIZE = 1000
 
 
-class ExpressionError(Exception):
+class ExpressionError(ExoError):
     """Raised when an expression is invalid or violates safety constraints."""
 
 

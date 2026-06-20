@@ -15,6 +15,14 @@ import anthropic
 from anthropic import AsyncAnthropic
 
 from exo.config import ModelConfig
+from exo.models.provider import ModelProvider, model_registry
+from exo.models.types import (
+    FinishReason,
+    ModelError,
+    ModelResponse,
+    StreamChunk,
+    ToolCallDelta,
+)
 from exo.types import (
     AssistantMessage,
     AudioBlock,
@@ -31,15 +39,6 @@ from exo.types import (
     Usage,
     UserMessage,
     VideoBlock,
-)
-
-from .provider import ModelProvider, model_registry
-from .types import (
-    FinishReason,
-    ModelError,
-    ModelResponse,
-    StreamChunk,
-    ToolCallDelta,
 )
 
 _log = logging.getLogger(__name__)
@@ -128,12 +127,48 @@ def _message_content_to_anthropic(content: MessageContent) -> str | list[dict[st
     return _content_blocks_to_anthropic(content)
 
 
+def _merge_same_role(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Merge consecutive messages with the same role into one.
+
+    Anthropic requires strict user/assistant alternation.  When two adjacent
+    messages share a role (e.g. two ``user`` turns produced by a tool-result
+    followed by a plain user message) their ``content`` lists are concatenated
+    into a single message so the final sequence strictly alternates.
+
+    Args:
+        messages: Anthropic-format message list (no system messages).
+
+    Returns:
+        New list where no two adjacent messages share a role.
+    """
+    merged: list[dict[str, Any]] = []
+    for msg in messages:
+        if merged and merged[-1]["role"] == msg["role"]:
+            prev = merged[-1]
+            # Normalise the previous content to a list if it is still a string
+            if isinstance(prev["content"], str):
+                prev["content"] = [{"type": "text", "text": prev["content"]}]
+            # Normalise the incoming content to a list
+            incoming: list[dict[str, Any]]
+            if isinstance(msg["content"], str):
+                incoming = [{"type": "text", "text": msg["content"]}]
+            else:
+                incoming = list(msg["content"])
+            prev["content"].extend(incoming)
+        else:
+            # Shallow-copy so callers don't share structure
+            merged.append(dict(msg))
+    return merged
+
+
 def _build_messages(messages: list[Message]) -> tuple[str, list[dict[str, Any]]]:
     """Convert Exo messages to Anthropic format.
 
     Extracts system messages into a single system string (Anthropic takes
     ``system=`` as a separate kwarg). Consecutive tool results are merged
-    into one ``user`` message to maintain strict alternation.
+    into one ``user`` message to maintain strict alternation.  A final
+    alternation pass ensures the output sequence never has two adjacent
+    messages with the same role (which the Anthropic API rejects).
 
     Args:
         messages: Exo message sequence.
@@ -187,7 +222,8 @@ def _build_messages(messages: list[Message]) -> tuple[str, list[dict[str, Any]]]
             else:
                 result.append({"role": "user", "content": [tool_block]})
 
-    return "\n".join(system_parts), result
+    # Enforce strict user/assistant alternation required by Anthropic API
+    return "\n".join(system_parts), _merge_same_role(result)
 
 
 def _convert_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -248,9 +284,7 @@ def _apply_cache_breakpoints(kwargs: dict[str, Any]) -> dict[str, Any]:
             continue
         content = msg["content"]
         if isinstance(content, str):
-            msg["content"] = [
-                {"type": "text", "text": content, "cache_control": _CACHE_CONTROL}
-            ]
+            msg["content"] = [{"type": "text", "text": content, "cache_control": _CACHE_CONTROL}]
         elif isinstance(content, list) and content:
             content[-1]["cache_control"] = _CACHE_CONTROL
         user_marked += 1
