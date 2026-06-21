@@ -11,6 +11,12 @@ from exo._internal.workflow_checkpoint import WorkflowCheckpoint, WorkflowCheckp
 from exo.agent import Agent, AgentError
 from exo.hooks import HookManager, HookPoint
 from exo.human import ConsoleHandler, HumanInputHandler
+from exo.namespaces import (
+    GuardrailsConfig,
+    PlannerConfig,
+    SubagentsConfig,
+    ToolBatchConfig,
+)
 from exo.observability.logging import (  # pyright: ignore[reportMissingImports]
     configure_logging as configure,
 )
@@ -86,6 +92,7 @@ __all__: list[str] = [
     "ErrorEvent",
     "EventType",
     "ExoError",
+    "GuardrailsConfig",
     "HITLApprovalEvent",
     "HookManager",
     "HookPoint",
@@ -97,6 +104,7 @@ __all__: list[str] = [
     "MessageContent",
     "MessageInjectedEvent",
     "ParallelGroup",
+    "PlannerConfig",
     "RalphNode",
     "ReasoningEvent",
     "RefinementNode",
@@ -108,6 +116,7 @@ __all__: list[str] = [
     "SubAgentResult",
     "SubAgentStatus",
     "SubAgentTask",
+    "SubagentsConfig",
     "Swarm",
     "SwarmNode",
     "SystemMessage",
@@ -115,6 +124,7 @@ __all__: list[str] = [
     "TextEvent",
     "TokenCounter",
     "Tool",
+    "ToolBatchConfig",
     "ToolCall",
     "ToolCallDeltaEvent",
     "ToolCallEvent",

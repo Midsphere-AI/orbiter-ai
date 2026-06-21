@@ -34,6 +34,12 @@ from exo.config import (
 )
 from exo.hooks import Hook, HookManager, HookPoint
 from exo.human import HumanInputHandler
+from exo.namespaces import (
+    GuardrailsConfig,
+    PlannerConfig,
+    SubagentsConfig,
+    ToolBatchConfig,
+)
 from exo.observability.logging import get_logger  # pyright: ignore[reportMissingImports]
 from exo.rail import Guard, GuardAbortError, GuardManager
 from exo.skills import DictToolResolver, SkillError, SkillRegistry, ToolResolver
@@ -721,6 +727,22 @@ class Agent:
 
     All parameters are keyword-only; only ``name`` is required.
 
+    Related params can be configured through one grouped namespace object
+    instead of the flat kwargs (additive — the flat kwargs still work)::
+
+        Agent(
+            name="researcher",
+            planner=PlannerConfig(enabled=True, model="openai:gpt-4o-mini"),
+            subagents=SubagentsConfig(max_depth=2, max_children=3),
+            batch_tools=ToolBatchConfig(enabled=True, timeout=120),
+            guardrails=GuardrailsConfig(approval_tools=["deploy"]),
+            context=ContextConfig(limit=50, overflow="summarize"),
+        )
+
+    The resolved configs are exposed as read attributes (``agent.planner``,
+    ``agent.subagents``, ``agent.guardrails``). Passing both a namespace config
+    and a conflicting flat kwarg for the same concern raises ``AgentError``.
+
     Args:
         name: Unique identifier for this agent.
         model: Model string in ``"provider:model_name"`` format.
@@ -800,11 +822,13 @@ class Agent:
         max_steps: int = 10,
         temperature: float = 1.0,
         max_tokens: int | None = None,
+        planner: PlannerConfig | None = None,
         planning_enabled: bool = False,
         planning_model: str | None = None,
         planning_instructions: str = "",
         context_pressure: str | None = _RENAMED_UNSET,
         budget_awareness: str | None = None,
+        guardrails: GuardrailsConfig | None = None,
         approval_tools: list[str] | None = _RENAMED_UNSET,
         hitl_tools: list[str] | None = None,
         bare_tools: bool = False,
@@ -819,11 +843,11 @@ class Agent:
         context_limit: int | None = None,
         overflow: str | None = None,
         cache: bool | None = None,
-        subagents: bool | None = None,
+        subagents: bool | SubagentsConfig | None = None,
         allow_self_spawn: bool = _SPAWN_UNSET,
         max_spawn_depth: int = 3,
         max_spawn_children: int = 4,
-        batch_tools: bool = _RENAMED_UNSET,
+        batch_tools: bool | ToolBatchConfig = _RENAMED_UNSET,
         batch_tools_timeout: int = _RENAMED_UNSET,
         batch_tools_max_output_bytes: int = _RENAMED_UNSET,
         batch_tools_max_tool_calls: int = _RENAMED_UNSET,
@@ -839,6 +863,71 @@ class Agent:
     ) -> None:
         if max_steps < 1:
             raise AgentError(f"max_steps must be >= 1, got {max_steps}")
+
+        # ---- Namespace configs → flat locals --------------------------------
+        # The grouped *Config objects (planner=, subagents=, batch_tools=,
+        # guardrails=) are additive sugar over the flat kwargs. Each explodes
+        # into the flat locals the existing resolution logic already understands;
+        # passing both a config and a conflicting flat kwarg for the same concern
+        # is rejected so there is exactly one source of truth.
+        if planner is not None:
+            if planning_enabled or planning_model is not None or planning_instructions:
+                raise AgentError(
+                    "Cannot combine planner=PlannerConfig(...) with planning_enabled/"
+                    "planning_model/planning_instructions. Pass one or the other."
+                )
+            planning_enabled = planner.enabled
+            planning_model = planner.model
+            planning_instructions = planner.instructions
+
+        if isinstance(subagents, SubagentsConfig):
+            if allow_self_spawn is not _SPAWN_UNSET:
+                raise AgentError(
+                    "Cannot combine subagents=SubagentsConfig(...) with allow_self_spawn=. "
+                    "Pass one or the other."
+                )
+            _sub_cfg = subagents
+            subagents = _sub_cfg.enabled
+            max_spawn_depth = _sub_cfg.max_depth
+            max_spawn_children = _sub_cfg.max_children
+
+        if isinstance(batch_tools, ToolBatchConfig):
+            if ptc or any(
+                x is not _RENAMED_UNSET
+                for x in (
+                    batch_tools_timeout,
+                    batch_tools_max_output_bytes,
+                    batch_tools_max_tool_calls,
+                    batch_tools_extra_args,
+                )
+            ):
+                raise AgentError(
+                    "Cannot combine batch_tools=ToolBatchConfig(...) with the flat "
+                    "ptc*/batch_tools_* kwargs. Pass one or the other."
+                )
+            _batch_cfg = batch_tools
+            batch_tools = _batch_cfg.enabled
+            batch_tools_timeout = _batch_cfg.timeout
+            batch_tools_max_output_bytes = _batch_cfg.max_output_bytes
+            batch_tools_max_tool_calls = _batch_cfg.max_tool_calls
+            batch_tools_extra_args = _batch_cfg.extra_args
+
+        if guardrails is not None:
+            if (
+                guards is not _RENAMED_UNSET
+                or rails is not None
+                or approval_tools is not _RENAMED_UNSET
+                or hitl_tools is not None
+                or human_input_handler is not None
+            ):
+                raise AgentError(
+                    "Cannot combine guardrails=GuardrailsConfig(...) with guards/rails/"
+                    "approval_tools/hitl_tools/human_input_handler. Pass one or the other."
+                )
+            guards = list(guardrails.guards)
+            approval_tools = list(guardrails.approval_tools)
+            human_input_handler = guardrails.human_input_handler
+
         self.name = name
         self.model = model
         self.provider_name, self.model_name = parse_model_string(model)
@@ -1058,7 +1147,22 @@ class Agent:
                 self.context = _CtxClass(task_id="__default__", config=_CtxConfig(**_kw))
                 self._context_is_auto = False
         elif context is not _CONTEXT_UNSET:
-            self.context = context
+            # Accept a ready Context, a ContextConfig (wrapped into a Context),
+            # or None (context disabled).
+            try:
+                from exo.context.config import (  # pyright: ignore[reportMissingImports]
+                    ContextConfig as _CtxConfig,
+                )
+                from exo.context.context import (  # pyright: ignore[reportMissingImports]
+                    Context as _CtxClass,
+                )
+            except ImportError:
+                self.context = context
+            else:
+                if isinstance(context, _CtxConfig):
+                    self.context = _CtxClass(task_id="__default__", config=context)
+                else:
+                    self.context = context
             self._context_is_auto = False
         elif context_mode is not _CONTEXT_UNSET:
             self.context = None if context_mode is None else _make_context_from_mode(context_mode)
@@ -1194,6 +1298,26 @@ class Agent:
         # Auto-attach memory persistence hooks when a MemoryStore is provided
         if memory is not None:
             self._attach_memory_persistence(memory)
+
+        # ---- Inspectable namespace configs (Tier-3) -------------------------
+        # Expose the resolved per-concern config as a read attribute so callers
+        # can introspect/serialize (``agent.planner.enabled``,
+        # ``agent.subagents.max_depth``, ``agent.guardrails.approval_tools``).
+        self.planner = PlannerConfig(
+            enabled=self.planning_enabled,
+            model=self.planning_model,
+            instructions=self.planning_instructions,
+        )
+        self.subagents = SubagentsConfig(
+            enabled=self.allow_self_spawn,
+            max_depth=self.max_spawn_depth,
+            max_children=self.max_spawn_children,
+        )
+        self.guardrails = GuardrailsConfig(
+            guards=list(_guards) if _guards else [],
+            approval_tools=list(self.hitl_tools),
+            human_input_handler=self._human_input_handler,
+        )
 
     # ---- Canonical-name read aliases (Tier-2 vocabulary) -------------------
     # The constructor accepts modern names (``transfers``/``approval_tools``/

@@ -58,6 +58,10 @@ class Swarm:
         mode: Execution mode — ``"workflow"``, ``"handoff"``, or ``"team"``.
         max_handoffs: Maximum number of handoff transitions before
             raising an error (handoff mode only).
+        context: Grouped context handle propagated to every member agent.
+            Accepts a ready ``Context``, a ``ContextConfig`` (wrapped into a
+            ``Context``), or ``None`` to disable context. Mutually exclusive
+            with ``context_mode``/``context_limit``/``overflow``/``cache``.
     """
 
     def __init__(
@@ -67,6 +71,7 @@ class Swarm:
         flow: str | None = None,
         mode: SwarmMode = "workflow",
         max_handoffs: int = 10,
+        context: Any = _SWARM_CONTEXT_UNSET,
         context_mode: Any = _SWARM_CONTEXT_UNSET,
         context_limit: int | None = None,
         overflow: str | None = None,
@@ -126,13 +131,40 @@ class Swarm:
 
         # Propagate context to all member agents when explicitly provided.
         _has_new_ctx = any(x is not None for x in (context_limit, overflow, cache))
+        _has_context = context is not _SWARM_CONTEXT_UNSET
         if _has_new_ctx and context_mode is not _SWARM_CONTEXT_UNSET:
             raise SwarmError(
                 "Cannot combine 'context_mode' with 'context_limit'/'overflow'/'cache'. "
                 "Use either context_mode= or the shorthand params."
             )
+        if _has_context and (_has_new_ctx or context_mode is not _SWARM_CONTEXT_UNSET):
+            raise SwarmError(
+                "Cannot combine 'context' with 'context_mode'/'context_limit'/'overflow'/"
+                "'cache'. Use context= (accepts a Context or ContextConfig) for the "
+                "grouped form, or the shorthand params."
+            )
 
-        if _has_new_ctx:
+        if _has_context:
+            # context= accepts a ready Context, a ContextConfig (wrapped into a
+            # Context), or None (context disabled) — shared with Agent's handle.
+            ctx = context
+            if ctx is not None:
+                try:
+                    from exo.context.config import (  # pyright: ignore[reportMissingImports]
+                        ContextConfig as _CtxConfig,
+                    )
+                    from exo.context.context import (  # pyright: ignore[reportMissingImports]
+                        Context as _CtxClass,
+                    )
+                except ImportError:
+                    ctx = None
+                else:
+                    if isinstance(ctx, _CtxConfig):
+                        ctx = _CtxClass(task_id="__default__", config=ctx)
+            for agent in self.agents.values():
+                agent.context = ctx
+                agent._context_is_auto = False
+        elif _has_new_ctx:
             try:
                 from exo.context.config import (  # pyright: ignore[reportMissingImports]
                     ContextConfig as _CtxConfig,

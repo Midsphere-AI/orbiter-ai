@@ -1371,3 +1371,36 @@ class TestSwarmContextMode:
         swarm = Swarm(agents=[lead, worker])
         assert isinstance(swarm.agents["lead"].context, Context)
         assert isinstance(swarm.agents["worker"].context, Context)
+
+    def test_swarm_context_config_propagates_to_agents(self) -> None:
+        """Swarm(context=ContextConfig(...)) wraps + propagates to all agents."""
+        try:
+            from exo.context.config import ContextConfig  # pyright: ignore[reportMissingImports]
+            from exo.context.context import Context  # pyright: ignore[reportMissingImports]
+        except ImportError:
+            pytest.skip("exo-context not installed")
+
+        lead = Agent(name="lead")
+        worker = Agent(name="worker")
+        swarm = Swarm(agents=[lead, worker], context=ContextConfig(limit=42, overflow="truncate"))
+
+        for name in ("lead", "worker"):
+            ctx = swarm.agents[name].context
+            assert isinstance(ctx, Context)
+            assert ctx.config.limit == 42
+
+    def test_swarm_context_none_disables_context(self) -> None:
+        """Swarm(context=None) disables context on all agents."""
+        lead = Agent(name="lead")
+        swarm = Swarm(agents=[lead], context=None)
+        assert swarm.agents["lead"].context is None
+
+    def test_swarm_context_conflicts_with_shorthand(self) -> None:
+        """context= cannot be combined with the context_limit/overflow shorthand."""
+        try:
+            from exo.context.config import ContextConfig  # pyright: ignore[reportMissingImports]
+        except ImportError:
+            pytest.skip("exo-context not installed")
+
+        with pytest.raises(SwarmError, match="Cannot combine 'context'"):
+            Swarm(agents=[Agent(name="a")], context=ContextConfig(), context_limit=5)

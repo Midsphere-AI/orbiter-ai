@@ -1428,7 +1428,9 @@ class TestDefaultLongTermCreation:
         import os
 
         assert store.db_path.endswith("memory.db")
-        assert not os.path.exists(store.db_path), "SQLite file should not be created at construction"
+        assert not os.path.exists(store.db_path), (
+            "SQLite file should not be created at construction"
+        )
 
     def test_default_long_term_with_explicit_path(self, tmp_path: Any) -> None:
         """Explicit db_path is respected."""
@@ -1668,9 +1670,10 @@ class TestAgentContextDefaults:
 
         custom_ctx = ContextConfig(limit=10, overflow="summarize", cache=True)
         agent = Agent(name="bot", context=custom_ctx, context_mode="pilot")
-        assert isinstance(agent.context, ContextConfig)
-        assert agent.context.limit == 10
-        assert agent.context.cache is True
+        # A ContextConfig is wrapped into a live Context using that config.
+        assert agent.context.config is custom_ctx
+        assert agent.context.config.limit == 10
+        assert agent.context.config.cache is True
 
     def test_explicit_context_config_accepted(self) -> None:
         """Agent(context=ContextConfig(...)) uses the provided config directly."""
@@ -1681,8 +1684,9 @@ class TestAgentContextDefaults:
 
         cfg = ContextConfig(limit=50)
         agent = Agent(name="bot", context=cfg)
-        assert agent.context is cfg
-        assert agent.context.limit == 50
+        # A ContextConfig is wrapped into a live Context using that config.
+        assert agent.context.config is cfg
+        assert agent.context.config.limit == 50
         assert agent._context_is_auto is False
 
     def test_auto_context_not_raised_in_to_dict(self) -> None:
@@ -1702,3 +1706,102 @@ class TestAgentContextDefaults:
         agent = Agent(name="bot", context=ContextConfig())
         with pytest.raises(ValueError, match="context engine"):
             agent.to_dict()
+
+
+class TestNamespaceConfigs:
+    """Tier-3 grouped namespace configs on Agent.__init__."""
+
+    def test_planner_config_explodes_to_flat(self) -> None:
+        from exo import PlannerConfig
+
+        agent = Agent(
+            name="bot",
+            planner=PlannerConfig(
+                enabled=True, model="openai:gpt-4o-mini", instructions="plan well"
+            ),
+        )
+        assert agent.planning_enabled is True
+        assert agent.planning_model == "openai:gpt-4o-mini"
+        assert agent.planning_instructions == "plan well"
+        # Inspectable namespace mirrors the resolved flat state.
+        assert agent.planner.enabled is True
+        assert agent.planner.model == "openai:gpt-4o-mini"
+
+    def test_planner_config_conflict_raises(self) -> None:
+        from exo import PlannerConfig
+
+        with pytest.raises(AgentError, match="Cannot combine planner"):
+            Agent(name="bot", planner=PlannerConfig(enabled=True), planning_enabled=True)
+
+    def test_subagents_config_explodes_to_flat(self) -> None:
+        from exo import SubagentsConfig
+
+        agent = Agent(
+            name="bot", subagents=SubagentsConfig(enabled=True, max_depth=2, max_children=3)
+        )
+        assert agent.allow_self_spawn is True
+        assert agent.max_spawn_depth == 2
+        assert agent.max_spawn_children == 3
+        assert agent.subagents.max_depth == 2
+
+    def test_subagents_config_disabled(self) -> None:
+        from exo import SubagentsConfig
+
+        agent = Agent(name="bot", subagents=SubagentsConfig(enabled=False))
+        assert agent.allow_self_spawn is False
+        assert "spawn_self" not in agent.tools
+
+    def test_subagents_bool_still_works(self) -> None:
+        agent = Agent(name="bot", subagents=False)
+        assert agent.allow_self_spawn is False
+
+    def test_subagents_config_conflict_raises(self) -> None:
+        from exo import SubagentsConfig
+
+        with pytest.raises(AgentError, match="Cannot combine subagents"):
+            Agent(name="bot", subagents=SubagentsConfig(), allow_self_spawn=True)
+
+    def test_batch_tools_config_explodes_to_flat(self) -> None:
+        from exo import ToolBatchConfig
+
+        agent = Agent(
+            name="bot",
+            batch_tools=ToolBatchConfig(
+                enabled=True, timeout=120, max_output_bytes=1000, max_tool_calls=10
+            ),
+        )
+        assert agent.ptc is True
+        assert agent.batch_tools is True
+        assert agent.ptc_timeout == 120
+        assert agent.ptc_max_output_bytes == 1000
+        assert agent.ptc_max_tool_calls == 10
+
+    def test_batch_tools_config_conflict_raises(self) -> None:
+        from exo import ToolBatchConfig
+
+        with pytest.raises(AgentError, match="Cannot combine batch_tools"):
+            Agent(name="bot", batch_tools=ToolBatchConfig(enabled=True), ptc_timeout=99)
+
+    def test_guardrails_config_explodes_to_flat(self) -> None:
+        from exo import GuardrailsConfig
+        from exo.tool import tool
+
+        @tool
+        def deploy() -> str:
+            """Deploy."""
+            return "ok"
+
+        agent = Agent(
+            name="bot",
+            tools=[deploy],
+            guardrails=GuardrailsConfig(approval_tools=["deploy"]),
+        )
+        assert agent.hitl_tools == ["deploy"]
+        assert agent.approval_tools == ["deploy"]
+        assert agent.guardrails.approval_tools == ["deploy"]
+
+    def test_guardrails_config_conflict_raises(self) -> None:
+        from exo import GuardrailsConfig
+
+        with pytest.raises(AgentError, match="Cannot combine guardrails"):
+            Agent(name="bot", guardrails=GuardrailsConfig(), hitl_tools=[])
