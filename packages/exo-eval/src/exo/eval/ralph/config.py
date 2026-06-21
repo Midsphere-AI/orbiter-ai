@@ -1,4 +1,4 @@
-"""Ralph loop configuration and iteration state tracking."""
+"""Refinement loop configuration and iteration state tracking."""
 
 from __future__ import annotations
 
@@ -85,13 +85,13 @@ class StopConditionConfig:
 
 
 # ---------------------------------------------------------------------------
-# RalphConfig — top-level unified configuration
+# RefinementConfig — top-level unified configuration
 # ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True, slots=True)
-class RalphConfig:
-    """Unified configuration for the Ralph iterative refinement loop.
+class RefinementConfig:
+    """Unified configuration for the iterative refinement loop.
 
     Aggregates validation (scoring), reflection, and stop-condition settings.
     """
@@ -102,6 +102,10 @@ class RalphConfig:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
+# Deprecated alias: use RefinementConfig
+RalphConfig = RefinementConfig
+
+
 # ---------------------------------------------------------------------------
 # LoopState — mutable iteration tracker
 # ---------------------------------------------------------------------------
@@ -109,7 +113,7 @@ class RalphConfig:
 
 @dataclass(slots=True)
 class LoopState:
-    """Runtime state for a Ralph loop execution.
+    """Runtime state for a refinement loop execution.
 
     Tracks iteration count, timing, cost, and aggregated score/reflection
     history across the iterative refinement lifecycle.

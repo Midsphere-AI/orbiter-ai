@@ -35,7 +35,7 @@ from exo.config import (
 from exo.hooks import Hook, HookManager, HookPoint
 from exo.human import HumanInputHandler
 from exo.observability.logging import get_logger  # pyright: ignore[reportMissingImports]
-from exo.rail import Rail, RailAbortError, RailManager
+from exo.rail import Guard, GuardAbortError, GuardManager
 from exo.skills import DictToolResolver, SkillError, SkillRegistry, ToolResolver
 from exo.task_controller import TaskLoopEvent, TaskLoopEventType, TaskLoopQueue
 from exo.tool import FunctionTool, Tool, ToolError
@@ -58,6 +58,43 @@ _log = get_logger(__name__)
 _MEMORY_UNSET: Any = object()
 _CONTEXT_UNSET: Any = object()
 _SPAWN_UNSET: Any = object()
+_RENAMED_UNSET: Any = object()
+
+
+def _resolve_renamed(
+    new: Any,
+    old: Any,
+    *,
+    default: Any,
+    new_name: str,
+    old_name: str,
+) -> Any:
+    """Resolve a renamed keyword argument with a deprecated alias.
+
+    ``new`` is the canonical kwarg (sentinel-defaulted to ``_RENAMED_UNSET``);
+    ``old`` is the deprecated alias carrying its original concrete *default*.
+    The canonical value wins; supplying the deprecated alias emits a
+    :class:`DeprecationWarning`; passing both (with conflicting values) raises.
+    """
+    new_given = new is not _RENAMED_UNSET
+    old_given = old is not default and old != default
+    if new_given:
+        if old_given:
+            raise AgentError(
+                f"Cannot combine {new_name}= and {old_name}= — they are the same "
+                f"setting. Use {new_name}= (it replaces {old_name}=)."
+            )
+        return new
+    if old_given:
+        import warnings
+
+        warnings.warn(
+            f"Agent({old_name}=...) is deprecated; use {new_name}= instead.",
+            DeprecationWarning,
+            stacklevel=3,
+        )
+        return old
+    return default
 
 
 # ---------------------------------------------------------------------------
@@ -242,27 +279,46 @@ def _make_default_context() -> Any:
         return None
 
 
+# Canonical context-size modes → their deprecated aviation-metaphor aliases.
+_CONTEXT_MODE_ALIASES: dict[str, str] = {
+    "pilot": "large",
+    "copilot": "balanced",
+    "navigator": "compact",
+}
+
+
 def _make_context_from_mode(mode: Any) -> Any:
     """Create a Context from a mode string.
 
-    Accepted modes: "pilot", "copilot", "navigator".
-    Returns None if exo-context is not installed.
+    Accepted modes: "large", "balanced", "compact". The legacy aviation
+    metaphors ("pilot", "copilot", "navigator") remain accepted as
+    deprecated aliases. Returns None if exo-context is not installed.
     """
     try:
         from exo.context.config import ContextConfig  # pyright: ignore[reportMissingImports]
         from exo.context.context import Context as CtxClass  # pyright: ignore[reportMissingImports]
 
         mode_str = str(mode).lower()
-        if mode_str == "pilot":
+        if mode_str in _CONTEXT_MODE_ALIASES:
+            import warnings
+
+            canonical = _CONTEXT_MODE_ALIASES[mode_str]
+            warnings.warn(
+                f"context_mode={mode_str!r} is deprecated; use {canonical!r} instead.",
+                DeprecationWarning,
+                stacklevel=3,
+            )
+            mode_str = canonical
+
+        if mode_str == "large":
             cfg = ContextConfig(limit=100, overflow="summarize")
-        elif mode_str == "navigator":
+        elif mode_str == "compact":
             cfg = ContextConfig(limit=10, overflow="summarize", cache=True)
-        elif mode_str == "copilot":
+        elif mode_str == "balanced":
             cfg = ContextConfig()
         else:
             raise AgentError(
-                f"Unknown context_mode {mode!r}. "
-                f"Valid modes are 'pilot', 'copilot', or 'navigator'."
+                f"Unknown context_mode {mode!r}. Valid modes are 'large', 'balanced', or 'compact'."
             )
         return CtxClass(task_id="__default__", config=cfg)
     except ImportError:
@@ -671,7 +727,10 @@ class Agent:
         instructions: System prompt. Can be a string or an async callable
             that receives a context dict and returns a string.
         tools: Tools available to this agent.
-        handoffs: Other agents this agent can delegate to via handoff.
+        transfers: Other agents this agent can hand control to. (Deprecated
+            alias: ``handoffs``.)
+        guards: Input/output guards run around LLM and tool calls. (Deprecated
+            alias: ``rails``.)
         hooks: Lifecycle hooks as ``(HookPoint, Hook)`` tuples.
         output_type: Pydantic model class for structured output validation.
         max_steps: Maximum LLM-tool round-trips before stopping.
@@ -682,14 +741,16 @@ class Agent:
         planning_model: Optional planner model override. When unset, planning
             uses the main agent model.
         planning_instructions: Optional planner-only instructions.
-        budget_awareness: Optional context-budget mode. Valid values are
-            ``"per-message"`` and ``"limit:<0-100>"``.
-        hitl_tools: Tool names that require human approval before execution.
+        context_pressure: Optional context-pressure mode that nudges the agent
+            as its context fills. Valid values are ``"per-message"`` and
+            ``"limit:<0-100>"``. (Deprecated alias: ``budget_awareness``.)
+        approval_tools: Tool names that require human approval before execution.
+            (Deprecated alias: ``hitl_tools``.)
         bare_tools: When ``True``, suppress auto-registered helper tools
             (``retrieve_artifact``, context tools). ``activate_skill``,
-            ``spawn_self``, and PTC tools are **not** affected.
-        human_input_handler: Handler for HITL approval prompts. When set
-            alongside ``hitl_tools``, tools in that list will block for
+            ``spawn_self``, and batch-tools (PTC) tools are **not** affected.
+        human_input_handler: Handler for approval prompts. When set
+            alongside ``approval_tools``, tools in that list will block for
             human approval before executing. Defaults to ``None`` (no gate).
         emit_mcp_progress: Whether MCP progress events should be emitted.
         injected_tool_args: Schema-only tool arguments exposed to the LLM.
@@ -730,9 +791,11 @@ class Agent:
         model: str = "openai:gpt-4o-mini",
         instructions: str | Callable[..., Any] = "",
         tools: list[Tool] | None = None,
+        transfers: list[Agent] | None = _RENAMED_UNSET,
         handoffs: list[Agent] | None = None,
         hooks: list[tuple[HookPoint, Hook]] | None = None,
-        rails: list[Rail] | None = None,
+        guards: list[Guard] | None = _RENAMED_UNSET,
+        rails: list[Guard] | None = None,
         output_type: type[BaseModel] | None = None,
         max_steps: int = 10,
         temperature: float = 1.0,
@@ -740,7 +803,9 @@ class Agent:
         planning_enabled: bool = False,
         planning_model: str | None = None,
         planning_instructions: str = "",
+        context_pressure: str | None = _RENAMED_UNSET,
         budget_awareness: str | None = None,
+        approval_tools: list[str] | None = _RENAMED_UNSET,
         hitl_tools: list[str] | None = None,
         bare_tools: bool = False,
         human_input_handler: HumanInputHandler | None = None,
@@ -748,7 +813,8 @@ class Agent:
         injected_tool_args: dict[str, str] | None = None,
         store: MemoryStore | AgentMemory | str | bool | None = _MEMORY_UNSET,
         memory: AgentMemory | MemoryStore | None = _MEMORY_UNSET,
-        context_mode: Literal["pilot", "copilot", "navigator"] | None = _CONTEXT_UNSET,
+        context_mode: Literal["large", "balanced", "compact", "pilot", "copilot", "navigator"]
+        | None = _CONTEXT_UNSET,
         context: Context | ContextConfig | None = _CONTEXT_UNSET,
         context_limit: int | None = None,
         overflow: str | None = None,
@@ -757,6 +823,11 @@ class Agent:
         allow_self_spawn: bool = _SPAWN_UNSET,
         max_spawn_depth: int = 3,
         max_spawn_children: int = 4,
+        batch_tools: bool = _RENAMED_UNSET,
+        batch_tools_timeout: int = _RENAMED_UNSET,
+        batch_tools_max_output_bytes: int = _RENAMED_UNSET,
+        batch_tools_max_tool_calls: int = _RENAMED_UNSET,
+        batch_tools_extra_args: dict[str, str] | None = _RENAMED_UNSET,
         ptc: bool = False,
         ptc_timeout: int = 60,
         ptc_max_output_bytes: int = 200_000,
@@ -779,10 +850,28 @@ class Agent:
         self.planning_enabled = planning_enabled
         self.planning_model = validate_planning_model(planning_model)
         self.planning_instructions = planning_instructions
-        self.budget_awareness = validate_budget_awareness(budget_awareness)
+        # ``context_pressure=`` is the canonical knob; ``budget_awareness=`` is
+        # a deprecated alias.
+        _context_pressure = _resolve_renamed(
+            context_pressure,
+            budget_awareness,
+            default=None,
+            new_name="context_pressure",
+            old_name="budget_awareness",
+        )
+        self.budget_awareness = validate_budget_awareness(_context_pressure)
         self.emit_mcp_progress = emit_mcp_progress
         self.injected_tool_args = validate_injected_tool_args(injected_tool_args)
-        normalized_hitl_tools = _normalize_hitl_tools(hitl_tools)
+        # ``approval_tools=`` is the canonical knob; ``hitl_tools=`` is a
+        # deprecated alias.
+        _approval_tools = _resolve_renamed(
+            approval_tools,
+            hitl_tools,
+            default=None,
+            new_name="approval_tools",
+            old_name="hitl_tools",
+        )
+        normalized_hitl_tools = _normalize_hitl_tools(_approval_tools)
         self.bare_tools: bool = bare_tools
         # Self-spawn: on by default. ``subagents=`` is the canonical knob;
         # ``allow_self_spawn=`` is a deprecated alias kept for backward compat.
@@ -804,15 +893,45 @@ class Agent:
         self.allow_self_spawn: bool = _effective_self_spawn
         self.max_spawn_depth: int = max_spawn_depth
         self.max_spawn_children: int = validate_max_spawn_children(max_spawn_children)
-        self.ptc: bool = ptc
-        self.ptc_timeout: int = ptc_timeout
-        self.ptc_max_output_bytes: int = ptc_max_output_bytes
-        self.ptc_max_tool_calls: int = ptc_max_tool_calls
+        # ``batch_tools*`` are the canonical knobs for Programmatic Tool Calling;
+        # the ``ptc*`` spellings remain as deprecated aliases. Internally the
+        # state is still tracked under the ``self.ptc*`` attributes.
+        self.ptc: bool = _resolve_renamed(
+            batch_tools, ptc, default=False, new_name="batch_tools", old_name="ptc"
+        )
+        self.ptc_timeout: int = _resolve_renamed(
+            batch_tools_timeout,
+            ptc_timeout,
+            default=60,
+            new_name="batch_tools_timeout",
+            old_name="ptc_timeout",
+        )
+        self.ptc_max_output_bytes: int = _resolve_renamed(
+            batch_tools_max_output_bytes,
+            ptc_max_output_bytes,
+            default=200_000,
+            new_name="batch_tools_max_output_bytes",
+            old_name="ptc_max_output_bytes",
+        )
+        self.ptc_max_tool_calls: int = _resolve_renamed(
+            batch_tools_max_tool_calls,
+            ptc_max_tool_calls,
+            default=200,
+            new_name="batch_tools_max_tool_calls",
+            old_name="ptc_max_tool_calls",
+        )
         # Schema-only args added to the outer ``__exo_ptc__`` tool call.
         # The LLM fills them alongside ``code``; they are NOT propagated
         # to inner tools (unlike ``injected_tool_args``) and are instead
         # exposed to the executing PTC code as a ``ptc_args`` dict.
-        self.ptc_extra_args: dict[str, str] = validate_injected_tool_args(ptc_extra_args)
+        _batch_extra_args = _resolve_renamed(
+            batch_tools_extra_args,
+            ptc_extra_args,
+            default=None,
+            new_name="batch_tools_extra_args",
+            old_name="ptc_extra_args",
+        )
+        self.ptc_extra_args: dict[str, str] = validate_injected_tool_args(_batch_extra_args)
         # Internal: spawn depth (0 for top-level agents; incremented for each spawn level)
         self._spawn_depth: int = 0
         # Internal: provider reference stored during run() for use by spawn_self tool
@@ -988,10 +1107,15 @@ class Agent:
             # Auto-load context tools (planning, knowledge, file) when context is available
             self._auto_load_context_tools()
 
-        # Handoff targets indexed by name
+        # Transfer targets indexed by name. ``transfers=`` is the canonical
+        # knob; ``handoffs=`` is a deprecated alias. Stored under
+        # ``self.handoffs`` for backward compat.
+        _transfers = _resolve_renamed(
+            transfers, handoffs, default=None, new_name="transfers", old_name="handoffs"
+        )
         self.handoffs: dict[str, Agent] = {}
-        if handoffs:
-            for agent in handoffs:
+        if _transfers:
+            for agent in _transfers:
                 self._register_handoff(agent)
 
         # Lock for asyncio-safe runtime mutations (add_tool, add_mcp_server, add_handoff)
@@ -1042,11 +1166,14 @@ class Agent:
             for point, hook in hooks:
                 self.hook_manager.add(point, hook)
 
-        # Rails integration: create RailManager and register hooks for all points
-        if rails:
-            self.rail_manager: RailManager | None = RailManager()
-            for rail in rails:
-                self.rail_manager.add(rail)
+        # Guards integration: create GuardManager and register hooks for all
+        # points. ``guards=`` is the canonical knob; ``rails=`` is a deprecated
+        # alias. State is stored under ``self.rail_manager`` for backward compat.
+        _guards = _resolve_renamed(guards, rails, default=None, new_name="guards", old_name="rails")
+        if _guards:
+            self.rail_manager: GuardManager | None = GuardManager()
+            for guard in _guards:
+                self.rail_manager.add(guard)
             for point in HookPoint:
                 if point == HookPoint.CONTEXT_WINDOW:
                     continue  # context windowing is not a guardrail concern
@@ -1067,6 +1194,32 @@ class Agent:
         # Auto-attach memory persistence hooks when a MemoryStore is provided
         if memory is not None:
             self._attach_memory_persistence(memory)
+
+    # ---- Canonical-name read aliases (Tier-2 vocabulary) -------------------
+    # The constructor accepts modern names (``transfers``/``approval_tools``/
+    # ``context_pressure``/``batch_tools``/``guards``); internally the state is
+    # stored under the historical attribute names. These read-only properties
+    # expose the modern spelling for inspection without duplicating state.
+
+    @property
+    def transfers(self) -> dict[str, Agent]:
+        """Transfer (handoff) targets keyed by agent name."""
+        return self.handoffs
+
+    @property
+    def approval_tools(self) -> list[str]:
+        """Tool names that require human approval before executing."""
+        return list(self.hitl_tools)
+
+    @property
+    def context_pressure(self) -> str | None:
+        """Context-pressure mode (``"per-message"`` / ``"limit:<0-100>"``)."""
+        return self.budget_awareness
+
+    @property
+    def batch_tools(self) -> bool:
+        """Whether Programmatic Tool Calling (batch tools) is enabled."""
+        return self.ptc
 
     def _register_tool(self, t: Tool) -> None:
         """Add a tool, raising on duplicate names.
@@ -1386,14 +1539,15 @@ class Agent:
                             store=child_memory,
                             context=child_context,
                             subagents=False,
-                            # Inherit PTC settings so the child re-registers
-                            # its own PTCTool and the schema filter hides
-                            # PTC-eligible tools from the child's LLM call.
-                            ptc=parent.ptc,
-                            ptc_timeout=parent.ptc_timeout,
-                            ptc_max_output_bytes=parent.ptc_max_output_bytes,
-                            ptc_max_tool_calls=parent.ptc_max_tool_calls,
-                            ptc_extra_args=dict(parent.ptc_extra_args) or None,
+                            # Inherit batch-tools (PTC) settings so the child
+                            # re-registers its own batch-tools tool and the
+                            # schema filter hides batch-eligible tools from the
+                            # child's LLM call.
+                            batch_tools=parent.ptc,
+                            batch_tools_timeout=parent.ptc_timeout,
+                            batch_tools_max_output_bytes=parent.ptc_max_output_bytes,
+                            batch_tools_max_tool_calls=parent.ptc_max_tool_calls,
+                            batch_tools_extra_args=dict(parent.ptc_extra_args) or None,
                         )
                         child_agent._spawn_depth = parent._spawn_depth + 1
 
@@ -2358,7 +2512,7 @@ class Agent:
                     usage=response.usage,
                 )
 
-            except RailAbortError:
+            except GuardAbortError:
                 raise
 
             except Exception as exc:
@@ -2488,7 +2642,7 @@ class Agent:
                     tool_name=action.tool_name,
                     result=result,
                 )
-            except RailAbortError:
+            except GuardAbortError:
                 raise  # Security blocks must propagate — never swallow
             except BaseException as exc:
                 _log.warning("Tool '%s' failed on '%s': %s", action.tool_name, self.name, exc)
@@ -2619,7 +2773,7 @@ class Agent:
             model=data.get("model", "openai:gpt-4o"),
             instructions=data.get("instructions", ""),
             tools=tools,
-            handoffs=handoffs,
+            transfers=handoffs,
             output_type=output_type,
             max_steps=data.get("max_steps", 10),
             temperature=data.get("temperature", 1.0),
@@ -2627,18 +2781,18 @@ class Agent:
             planning_enabled=data.get("planning_enabled", False),
             planning_model=data.get("planning_model"),
             planning_instructions=data.get("planning_instructions", ""),
-            budget_awareness=data.get("budget_awareness"),
-            hitl_tools=data.get("hitl_tools"),
+            context_pressure=data.get("budget_awareness"),
+            approval_tools=data.get("hitl_tools"),
             emit_mcp_progress=data.get("emit_mcp_progress", True),
             injected_tool_args=data.get("injected_tool_args"),
             subagents=data.get("allow_self_spawn", True),
             max_spawn_depth=data.get("max_spawn_depth", 3),
             max_spawn_children=data.get("max_spawn_children", 4),
-            ptc=data.get("ptc", False),
-            ptc_timeout=data.get("ptc_timeout", 60),
-            ptc_max_output_bytes=data.get("ptc_max_output_bytes", 200_000),
-            ptc_max_tool_calls=data.get("ptc_max_tool_calls", 200),
-            ptc_extra_args=data.get("ptc_extra_args"),
+            batch_tools=data.get("ptc", False),
+            batch_tools_timeout=data.get("ptc_timeout", 60),
+            batch_tools_max_output_bytes=data.get("ptc_max_output_bytes", 200_000),
+            batch_tools_max_tool_calls=data.get("ptc_max_tool_calls", 200),
+            batch_tools_extra_args=data.get("ptc_extra_args"),
             bare_tools=data.get("bare_tools", False),
         )
 

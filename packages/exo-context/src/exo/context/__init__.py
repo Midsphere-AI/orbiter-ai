@@ -22,8 +22,16 @@ from exo.context.info import (  # pyright: ignore[reportMissingImports]
     build_context_window_info,
 )
 from exo.context.neuron import (  # pyright: ignore[reportMissingImports]
+    HistoryNeuron,
+    HistorySection,
     Neuron,
+    PromptSection,
+    SystemNeuron,
+    SystemSection,
+    TaskNeuron,
+    TaskSection,
     neuron_registry,
+    section_registry,
 )
 from exo.context.processor import (  # pyright: ignore[reportMissingImports]
     ContextProcessor,
@@ -59,10 +67,17 @@ __all__: list[str] = [
     "ContextWindowHook",
     "ContextWindowInfo",
     "DialogueCompressor",
-    "Neuron",
+    "HistoryNeuron",  # Deprecated alias for HistorySection
+    "HistorySection",
+    "Neuron",  # Deprecated alias for PromptSection
     "OverflowStrategy",
     "ProcessorPipeline",
     "PromptBuilder",
+    "PromptSection",
+    "SystemNeuron",  # Deprecated alias for SystemSection
+    "SystemSection",
+    "TaskNeuron",  # Deprecated alias for TaskSection
+    "TaskSection",
     "TokenTracker",
     "ToolResultOffloader",
     "Workspace",
@@ -71,5 +86,6 @@ __all__: list[str] = [
     "get_file_tools",
     "get_knowledge_tools",
     "get_planning_tools",
-    "neuron_registry",
+    "neuron_registry",  # Deprecated alias for section_registry
+    "section_registry",
 ]

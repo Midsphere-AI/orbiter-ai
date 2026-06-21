@@ -1,4 +1,4 @@
-"""RalphRunner — iterative refinement loop: Run → Analyze → Learn → Plan → Halt."""
+"""RefinementLoop — iterative refinement loop: Run → Analyze → Learn → Plan → Halt."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from exo.eval.base import (  # pyright: ignore[reportMissingImports]
 )
 from exo.eval.ralph.config import (  # pyright: ignore[reportMissingImports]
     LoopState,
-    RalphConfig,
+    RefinementConfig,
     StopType,
 )
 from exo.eval.ralph.detectors import (  # pyright: ignore[reportMissingImports]
@@ -30,8 +30,8 @@ from exo.eval.reflection import (  # pyright: ignore[reportMissingImports]
     Reflector,
 )
 from exo.types import (  # pyright: ignore[reportMissingImports]
-    RalphIterationEvent,
-    RalphStopEvent,
+    RefinementIterationEvent,
+    RefinementStopEvent,
     StreamEvent,
     TextEvent,
 )
@@ -55,8 +55,8 @@ RePlanFn = Callable[..., Any]
 
 
 @dataclass(frozen=True, slots=True)
-class RalphResult:
-    """Final outcome of a Ralph loop execution."""
+class RefinementResult:
+    """Final outcome of a refinement loop execution."""
 
     output: str
     stop_type: StopType
@@ -67,13 +67,17 @@ class RalphResult:
     reflections: list[dict[str, Any]] = field(default_factory=list)
 
 
+# Deprecated alias: use RefinementResult
+RalphResult = RefinementResult
+
+
 # ---------------------------------------------------------------------------
-# RalphRunner
+# RefinementLoop
 # ---------------------------------------------------------------------------
 
 
-class RalphRunner:
-    """Implements the 5-phase Ralph iterative refinement loop.
+class RefinementLoop:
+    """Implements the 5-phase iterative refinement loop.
 
     Phases per iteration:
         1. **Run** — execute the agent/task via *execute_fn*
@@ -99,21 +103,21 @@ class RalphRunner:
         scorers: list[Scorer],
         *,
         stream_execute_fn: StreamExecuteFn | None = None,
-        config: RalphConfig | None = None,
+        config: RefinementConfig | None = None,
         reflector: Reflector | None = None,
         replan_fn: RePlanFn | None = None,
     ) -> None:
         self._execute_fn = execute_fn
         self._stream_execute_fn = stream_execute_fn
         self._scorers = list(scorers)
-        self._config = config or RalphConfig()
+        self._config = config or RefinementConfig()
         self._reflector = reflector
         self._replan_fn = replan_fn
         self._detector = self._build_detector()
 
     @classmethod
-    def from_agent(cls, agent: Any, scorers: list[Scorer], **kwargs: Any) -> RalphRunner:
-        """Create a RalphRunner wired to an Agent's run() and stream().
+    def from_agent(cls, agent: Any, scorers: list[Scorer], **kwargs: Any) -> RefinementLoop:
+        """Create a RefinementLoop wired to an Agent's run() and stream().
 
         Convenience factory that creates both ``execute_fn`` (for ``.run()``)
         and ``stream_execute_fn`` (for ``.stream()``) from the same agent.
@@ -121,10 +125,10 @@ class RalphRunner:
         Args:
             agent: An ``Agent`` instance.
             scorers: List of scorers for the analyze phase.
-            **kwargs: Additional arguments forwarded to ``RalphRunner.__init__``.
+            **kwargs: Additional arguments forwarded to ``RefinementLoop.__init__``.
 
         Returns:
-            A configured ``RalphRunner``.
+            A configured ``RefinementLoop``.
         """
         from exo.runner import run  # pyright: ignore[reportMissingImports]
 
@@ -145,9 +149,11 @@ class RalphRunner:
 
     # ---- public API -------------------------------------------------------
 
-    async def run(self, input: str) -> RalphResult:
-        """Execute the full Ralph loop on *input* and return the result."""
-        logger.info("RalphRunner starting: input_len=%d scorers=%d", len(input), len(self._scorers))
+    async def run(self, input: str) -> RefinementResult:
+        """Execute the full refinement loop on *input* and return the result."""
+        logger.info(
+            "RefinementLoop starting: input_len=%d scorers=%d", len(input), len(self._scorers)
+        )
         state = LoopState()
         current_input = input
         last_output = ""
@@ -183,7 +189,7 @@ class RalphRunner:
             # --- Phase 5: Halt ---
             decision = await self._halt(state)
             if decision.should_stop:
-                return RalphResult(
+                return RefinementResult(
                     output=last_output,
                     stop_type=decision.stop_type,
                     reason=decision.reason,
@@ -194,18 +200,18 @@ class RalphRunner:
                 )
 
     async def stream(self, input: str, *, name: str = "ralph") -> AsyncIterator[StreamEvent]:
-        """Stream the Ralph loop, yielding inner events and Ralph lifecycle events.
+        """Stream the refinement loop, yielding inner events and lifecycle events.
 
         Requires ``stream_execute_fn`` to have been provided at construction
         (or use ``from_agent()`` which sets it automatically).
 
         Args:
             input: The initial input to the loop.
-            name: Agent name to stamp on Ralph lifecycle events.
+            name: Agent name to stamp on refinement lifecycle events.
 
         Yields:
-            Interleaved inner agent events, ``RalphIterationEvent``,
-            and ``RalphStopEvent``.
+            Interleaved inner agent events, ``RefinementIterationEvent``,
+            and ``RefinementStopEvent``.
 
         Raises:
             ValueError: If ``stream_execute_fn`` was not provided.
@@ -214,7 +220,7 @@ class RalphRunner:
             raise ValueError("stream_execute_fn required for streaming")
 
         logger.info(
-            "RalphRunner.stream starting: input_len=%d scorers=%d",
+            "RefinementLoop.stream starting: input_len=%d scorers=%d",
             len(input),
             len(self._scorers),
         )
@@ -223,7 +229,7 @@ class RalphRunner:
 
         while True:
             state.iteration += 1
-            yield RalphIterationEvent(
+            yield RefinementIterationEvent(
                 iteration=state.iteration,
                 status="started",
                 agent_name=name,
@@ -247,7 +253,7 @@ class RalphRunner:
             # --- Phase 2: Analyze ---
             scores = await self._analyze(output, current_input, state) if success else {}
 
-            yield RalphIterationEvent(
+            yield RefinementIterationEvent(
                 iteration=state.iteration,
                 status="completed" if success else "failed",
                 scores=scores,
@@ -264,7 +270,7 @@ class RalphRunner:
             # --- Phase 5: Halt ---
             decision = await self._halt(state)
             if decision.should_stop:
-                yield RalphStopEvent(
+                yield RefinementStopEvent(
                     stop_type=decision.stop_type.value,
                     reason=decision.reason,
                     iterations=state.iteration,
@@ -370,4 +376,9 @@ class RalphRunner:
 
     def __repr__(self) -> str:
         s = len(self._scorers)
+        # repr keeps the deprecated alias name for backward compatibility
         return f"RalphRunner(scorers={s}, config={self._config!r})"
+
+
+# Deprecated alias: use RefinementLoop
+RalphRunner = RefinementLoop

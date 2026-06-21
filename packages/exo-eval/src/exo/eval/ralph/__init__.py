@@ -1,8 +1,9 @@
-"""Ralph Loop: iterative refinement via Run -> Analyze -> Learn -> Plan -> Halt."""
+"""Refinement Loop: iterative refinement via Run -> Analyze -> Learn -> Plan -> Halt."""
 
 from exo.eval.ralph.config import (  # pyright: ignore[reportMissingImports]
     LoopState,
     RalphConfig,
+    RefinementConfig,
     ReflectionConfig,
     StopConditionConfig,
     StopType,
@@ -21,10 +22,14 @@ from exo.eval.ralph.detectors import (  # pyright: ignore[reportMissingImports]
 from exo.eval.ralph.runner import (  # pyright: ignore[reportMissingImports]
     RalphResult,
     RalphRunner,
+    RefinementLoop,
+    RefinementResult,
 )
 from exo.types import (  # pyright: ignore[reportMissingImports]
     RalphIterationEvent,
     RalphStopEvent,
+    RefinementIterationEvent,
+    RefinementStopEvent,
 )
 
 __all__ = [
@@ -33,11 +38,18 @@ __all__ = [
     "CostLimitDetector",
     "LoopState",
     "MaxIterationDetector",
+    # Deprecated aliases (kept for backward compatibility)
     "RalphConfig",
     "RalphIterationEvent",
     "RalphResult",
     "RalphRunner",
     "RalphStopEvent",
+    # New canonical names
+    "RefinementConfig",
+    "RefinementIterationEvent",
+    "RefinementLoop",
+    "RefinementResult",
+    "RefinementStopEvent",
     "ReflectionConfig",
     "ScoreThresholdDetector",
     "StopConditionConfig",

@@ -1,13 +1,13 @@
-"""Neuron — modular prompt composition components.
+"""PromptSection — modular prompt composition components.
 
-A Neuron is a composable unit that produces a prompt fragment from context.
-Neurons are prioritised: lower priority numbers execute first and appear
+A PromptSection is a composable unit that produces a prompt fragment from context.
+Sections are prioritised: lower priority numbers execute first and appear
 earlier in the assembled prompt.
 
-Core neurons:
-- SystemNeuron    (priority 100) — date, time, platform info
-- TaskNeuron      (priority 1)   — task ID, input, plan
-- HistoryNeuron   (priority 10)  — conversation history with windowing
+Core sections:
+- SystemSection   (priority 100) — date, time, platform info
+- TaskSection     (priority 1)   — task ID, input, plan
+- HistorySection  (priority 10)  — conversation history with windowing
 """
 
 from __future__ import annotations
@@ -25,17 +25,17 @@ from exo.registry import Registry  # pyright: ignore[reportMissingImports]
 
 # ── Registry ─────────────────────────────────────────────────────────
 
-neuron_registry: Registry[Neuron] = Registry("neuron_registry")
+section_registry: Registry[PromptSection] = Registry("section_registry")
 
 # ── ABC ──────────────────────────────────────────────────────────────
 
 
-class Neuron(ABC):
-    """Abstract base for prompt neurons.
+class PromptSection(ABC):
+    """Abstract base for prompt sections.
 
     Subclasses implement :meth:`format` to produce a prompt fragment
     from the given context.  The :attr:`priority` controls ordering
-    when multiple neurons are composed: lower values appear first.
+    when multiple sections are composed: lower values appear first.
 
     Parameters
     ----------
@@ -70,10 +70,14 @@ class Neuron(ABC):
         return f"{type(self).__name__}(name={self._name!r}, priority={self._priority})"
 
 
-# ── Built-in neurons ────────────────────────────────────────────────
+# Deprecated alias — use PromptSection
+Neuron = PromptSection  # type: ignore[misc]
 
 
-class SystemNeuron(Neuron):
+# ── Built-in sections ────────────────────────────────────────────────
+
+
+class SystemSection(PromptSection):
     """Provides dynamic system variables: date, time, platform.
 
     Priority 100 (low) — appended near the end of system prompts.
@@ -94,7 +98,11 @@ class SystemNeuron(Neuron):
         return "\n".join(lines)
 
 
-class TaskNeuron(Neuron):
+# Deprecated alias — use SystemSection
+SystemNeuron = SystemSection
+
+
+class TaskSection(PromptSection):
     """Provides task context: task ID, input, output, subtask plan.
 
     Reads from ``ctx.state``:
@@ -129,7 +137,11 @@ class TaskNeuron(Neuron):
         return "\n".join(parts)
 
 
-class HistoryNeuron(Neuron):
+# Deprecated alias — use TaskSection
+TaskNeuron = TaskSection
+
+
+class HistorySection(PromptSection):
     """Provides windowed conversation history.
 
     Reads ``history`` from ``ctx.state`` — expected to be a list of
@@ -151,7 +163,9 @@ class HistoryNeuron(Neuron):
 
         # Window to last N rounds (each round = user + assistant = 2 messages)
         _cfg = ctx.config
-        _hr = getattr(_cfg, "_history_rounds", getattr(_cfg, "history_rounds", getattr(_cfg, "limit", 20)))
+        _hr = getattr(
+            _cfg, "_history_rounds", getattr(_cfg, "history_rounds", getattr(_cfg, "limit", 20))
+        )
         max_messages = _hr * 2
         windowed = history[-max_messages:]
 
@@ -164,8 +178,15 @@ class HistoryNeuron(Neuron):
         return "\n".join(lines)
 
 
+# Deprecated alias — use HistorySection
+HistoryNeuron = HistorySection
+
+
 # ── Register built-ins ──────────────────────────────────────────────
 
-neuron_registry.register("system", SystemNeuron())
-neuron_registry.register("task", TaskNeuron())
-neuron_registry.register("history", HistoryNeuron())
+section_registry.register("system", SystemSection())
+section_registry.register("task", TaskSection())
+section_registry.register("history", HistorySection())
+
+# Deprecated alias — use section_registry
+neuron_registry = section_registry

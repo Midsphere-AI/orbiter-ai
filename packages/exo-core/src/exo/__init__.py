@@ -6,7 +6,7 @@ __path__ = extend_path(__path__, __name__)
 __version__ = "0.1.0"
 
 from exo._internal.agent_group import ParallelGroup
-from exo._internal.nested import RalphNode, SwarmNode
+from exo._internal.nested import RalphNode, RefinementNode, SwarmNode
 from exo._internal.workflow_checkpoint import WorkflowCheckpoint, WorkflowCheckpointStore
 from exo.agent import Agent, AgentError
 from exo.hooks import HookManager, HookPoint
@@ -99,6 +99,7 @@ __all__: list[str] = [
     "ParallelGroup",
     "RalphNode",
     "ReasoningEvent",
+    "RefinementNode",
     "RunResult",
     "StatusEvent",
     "StepEvent",

@@ -60,20 +60,24 @@ class ToolCallInputs(BaseModel):
     metadata: Any | None = None
 
 
-class RailContext(BaseModel):
-    """Context object passed to rail handlers.
+class GuardContext(BaseModel):
+    """Context object passed to guard handlers.
 
     Bundles the agent reference, the lifecycle event, the typed inputs
-    for that event, and an open-ended extra dict for cross-rail state.
+    for that event, and an open-ended extra dict for cross-guard state.
 
     Args:
         agent: Reference to the agent instance.
-        event: The lifecycle hook point that triggered this rail.
+        event: The lifecycle hook point that triggered this guard.
         inputs: Typed inputs specific to the event kind.
-        extra: Open-ended dict for cross-rail state sharing.
+        extra: Open-ended dict for cross-guard state sharing.
     """
 
     agent: Any
     event: HookPoint
     inputs: InvokeInputs | ModelCallInputs | ToolCallInputs
     extra: dict[str, Any] = Field(default_factory=dict)
+
+
+# Deprecated alias: use GuardContext
+RailContext = GuardContext

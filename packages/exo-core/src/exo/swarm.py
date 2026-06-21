@@ -71,6 +71,7 @@ class Swarm:
         context_limit: int | None = None,
         overflow: str | None = None,
         cache: bool | None = None,
+        batch_tools: bool | None = None,
         ptc: bool | None = None,
     ) -> None:
         if not agents:
@@ -161,15 +162,31 @@ class Swarm:
                 agent.context = ctx
                 agent._context_is_auto = False
 
-        # Propagate PTC to all member agents when explicitly provided.
-        # Use ``_apply_ptc_setting`` so the synthetic ``__exo_ptc__`` tool is
-        # registered (or removed) and each agent's schema cache is
-        # invalidated — a bare ``agent.ptc = ptc`` assignment would leave
-        # stale schemas and no PTC tool, causing PTC-eligible tools to
-        # leak as direct schemas on the next ``get_tool_schemas()`` call.
-        if ptc is not None:
+        # Propagate batch-tools (PTC) to all member agents when explicitly
+        # provided. ``batch_tools=`` is the canonical knob; ``ptc=`` is a
+        # deprecated alias. Use ``_apply_ptc_setting`` so the synthetic
+        # ``__exo_ptc__`` tool is registered (or removed) and each agent's
+        # schema cache is invalidated — a bare ``agent.ptc = ptc`` assignment
+        # would leave stale schemas and no PTC tool, causing PTC-eligible
+        # tools to leak as direct schemas on the next ``get_tool_schemas()``.
+        if batch_tools is not None and ptc is not None:
+            raise SwarmError(
+                "Cannot combine batch_tools= and ptc= — they are the same "
+                "setting. Use batch_tools= (it replaces ptc=)."
+            )
+        _batch_tools = batch_tools
+        if _batch_tools is None and ptc is not None:
+            import warnings
+
+            warnings.warn(
+                "Swarm(ptc=...) is deprecated; use batch_tools= instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            _batch_tools = ptc
+        if _batch_tools is not None:
             for agent in self.agents.values():
-                agent._apply_ptc_setting(ptc)
+                agent._apply_ptc_setting(_batch_tools)
 
         # Set name from the first agent for compatibility with runner
         self.name = f"swarm({self.flow_order[0]}...)"

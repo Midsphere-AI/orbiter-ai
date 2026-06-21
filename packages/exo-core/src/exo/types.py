@@ -533,8 +533,8 @@ class MessageInjectedEvent(BaseModel):
     agent_name: str = ""
 
 
-class RalphIterationEvent(BaseModel):
-    """Emitted at the start/end of each Ralph loop iteration."""
+class RefinementIterationEvent(BaseModel):
+    """Emitted at the start/end of each refinement loop iteration."""
 
     model_config = {"frozen": True}
 
@@ -545,8 +545,12 @@ class RalphIterationEvent(BaseModel):
     agent_name: str = ""
 
 
-class RalphStopEvent(BaseModel):
-    """Emitted when the Ralph loop terminates."""
+# Deprecated alias: use RefinementIterationEvent
+RalphIterationEvent = RefinementIterationEvent
+
+
+class RefinementStopEvent(BaseModel):
+    """Emitted when the refinement loop terminates."""
 
     model_config = {"frozen": True}
 
@@ -556,6 +560,10 @@ class RalphStopEvent(BaseModel):
     iterations: int
     final_scores: dict[str, float] = Field(default_factory=dict)
     agent_name: str = ""
+
+
+# Deprecated alias: use RefinementStopEvent
+RalphStopEvent = RefinementStopEvent
 
 
 class HITLApprovalEvent(BaseModel):
@@ -596,8 +604,8 @@ StreamEvent = (
     | MCPProgressEvent
     | ContextEvent
     | MessageInjectedEvent
-    | RalphIterationEvent
-    | RalphStopEvent
+    | RefinementIterationEvent
+    | RefinementStopEvent
     | HITLApprovalEvent
 )
 
@@ -627,9 +635,12 @@ class EventType(StrEnum):
     MCP_PROGRESS = "mcp_progress"
     CONTEXT = "context"
     MESSAGE_INJECTED = "message_injected"
+    REFINEMENT_ITERATION = "ralph_iteration"
+    REFINEMENT_STOP = "ralph_stop"
+    HITL_APPROVAL = "hitl_approval"
+    # Deprecated aliases: use REFINEMENT_ITERATION / REFINEMENT_STOP
     RALPH_ITERATION = "ralph_iteration"
     RALPH_STOP = "ralph_stop"
-    HITL_APPROVAL = "hitl_approval"
 
 
 #: The set of all valid ``event_types`` filter values (string form).

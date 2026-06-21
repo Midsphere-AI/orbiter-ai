@@ -68,7 +68,7 @@ class SynthesisResult:
         return len(self.test_items)
 
     def to_json(self) -> str:
-        """Serialise to JSON string."""
+        """Serialize to JSON string."""
         return json.dumps(
             {
                 "items": list(self.items),
@@ -170,8 +170,8 @@ def augment_add_noise(
 # ---------------------------------------------------------------------------
 
 
-class DataSynthesiser(ABC):
-    """Abstract base for custom data synthesisers."""
+class DataSynthesizer(ABC):
+    """Abstract base for custom data synthesizers."""
 
     __slots__ = ()
 
@@ -181,10 +181,21 @@ class DataSynthesiser(ABC):
         source: Sequence[dict[str, Any]],
         config: SynthesisConfig,
     ) -> list[dict[str, Any]]:
+        """Generate synthetic items from *source* data. (Deprecated spelling — override synthesize instead.)"""
+
+    async def synthesize(
+        self,
+        source: Sequence[dict[str, Any]],
+        config: SynthesisConfig,
+    ) -> list[dict[str, Any]]:
         """Generate synthetic items from *source* data."""
+        return await self.synthesise(source, config)
 
 
-class TemplateSynthesiser(DataSynthesiser):
+DataSynthesiser = DataSynthesizer  # Deprecated alias — use DataSynthesizer
+
+
+class TemplateSynthesizer(DataSynthesizer):
     """Generate items from trajectory items via template transforms."""
 
     __slots__ = ("_transforms",)
@@ -213,34 +224,43 @@ class TemplateSynthesiser(DataSynthesiser):
         return result[: config.num_samples]
 
 
+TemplateSynthesiser = TemplateSynthesizer  # Deprecated alias — use TemplateSynthesizer
+
+
 class SynthesisPipeline:
     """Orchestrates data synthesis from trajectory items.
 
     Pipeline phases:
     1. Filter source items (optional score threshold)
     2. Deduplicate
-    3. Synthesise via a DataSynthesiser
+    3. Synthesize via a DataSynthesizer
     4. Split into train/test sets
     """
 
-    __slots__ = ("_config", "_synthesiser")
+    __slots__ = ("_config", "_synthesizer")
 
     def __init__(
         self,
         config: SynthesisConfig | None = None,
         *,
-        synthesiser: DataSynthesiser | None = None,
+        synthesizer: DataSynthesizer | None = None,
+        synthesiser: DataSynthesizer | None = None,
     ) -> None:
         self._config = config or SynthesisConfig()
-        self._synthesiser = synthesiser or TemplateSynthesiser()
+        self._synthesizer = synthesizer or synthesiser or TemplateSynthesizer()
 
     @property
     def config(self) -> SynthesisConfig:
         return self._config
 
     @property
-    def synthesiser(self) -> DataSynthesiser:
-        return self._synthesiser
+    def synthesizer(self) -> DataSynthesizer:
+        return self._synthesizer
+
+    @property
+    def synthesiser(self) -> DataSynthesizer:
+        """Deprecated alias — use synthesizer."""
+        return self._synthesizer
 
     async def run(
         self,
@@ -260,8 +280,8 @@ class SynthesisPipeline:
         if not deduped:
             return SynthesisResult(metadata={"source_count": len(source), "filtered": True})
 
-        # Phase 3: Synthesise
-        items = await self._synthesiser.synthesise(deduped, cfg)
+        # Phase 3: Synthesize
+        items = await self._synthesizer.synthesize(deduped, cfg)
 
         # Phase 4: Split
         train, test = split_dataset(items, cfg.train_ratio, seed=cfg.seed)

@@ -1,4 +1,4 @@
-"""Programmatic Tool Calling (PTC) for Exo agents.
+"""Programmatic Tool Calling (PTC) / ToolBatch for Exo agents.
 
 When ``ptc=True`` on an Agent, the LLM writes Python code that calls
 tools as async functions inside a single ``__exo_ptc__`` tool call,
@@ -6,9 +6,9 @@ instead of requiring separate LLM round-trips per tool.  This reduces
 latency and token consumption — especially for batch operations,
 filtering, and multi-step workflows.
 
-The PTC tool is fully transparent to the event stream: consumers see
+The ToolBatch tool is fully transparent to the event stream: consumers see
 individual ``ToolCallEvent``/``ToolResultEvent`` per inner tool call,
-as if PTC were not enabled.
+as if ToolBatch were not enabled.
 
 Provider-agnostic: works with any LLM that supports tool calling.
 """
@@ -55,6 +55,9 @@ _POST_TOOL_CALL = HookPoint.POST_TOOL_CALL
 
 PTC_TOOL_NAME = "__exo_ptc__"
 
+# Convenience alias — same wire-level value, new canonical name.
+BATCH_TOOLS_TOOL_NAME = PTC_TOOL_NAME
+
 # Default limits — overridable via Agent parameters.
 DEFAULT_PTC_TIMEOUT = 60
 DEFAULT_PTC_MAX_OUTPUT_BYTES = 200_000
@@ -62,7 +65,7 @@ DEFAULT_PTC_MAX_TOOL_CALLS = 200
 DEFAULT_PTC_MAX_CODE_BYTES = 100_000
 
 # ---------------------------------------------------------------------------
-# Internal tool names that should NOT be wrapped by PTC.
+# Internal tool names that should NOT be wrapped by ToolBatch.
 # These remain as direct tool schemas sent to the LLM.
 # ---------------------------------------------------------------------------
 
@@ -95,7 +98,7 @@ _excluded_name_warnings: set[str] = set()
 
 
 class MaxToolCallsExceeded(RuntimeError):  # noqa: N818  -- intentional name
-    """Raised when PTC code exceeds the configured ``max_tool_calls``."""
+    """Raised when ToolBatch code exceeds the configured ``max_tool_calls``."""
 
 
 class _PTCBaseExceptionTrap(Exception):  # noqa: N818  -- internal trap funnel
@@ -114,8 +117,8 @@ class _PTCBaseExceptionTrap(Exception):  # noqa: N818  -- internal trap funnel
         super().__init__(f"{kind}: {detail}" if detail else kind)
 
 
-class PTCSandboxError(ExoError):
-    """Raised when user code hits a PTC sandbox restriction.
+class ToolBatchSandboxError(ExoError):
+    """Raised when user code hits a ToolBatch sandbox restriction.
 
     Inherits ``ExoError`` (which inherits ``Exception``) so user code
     can still ``try/except`` and continue; the agent sees a clean error
@@ -123,18 +126,22 @@ class PTCSandboxError(ExoError):
     """
 
 
+# Deprecated alias: use ToolBatchSandboxError
+PTCSandboxError = ToolBatchSandboxError
+
+
 # ---------------------------------------------------------------------------
 # Sandbox: restricted builtins, blocked imports, blocked attributes
 # ---------------------------------------------------------------------------
 #
-# PTC code runs in a locked-down namespace so agents cannot lazily escape
+# ToolBatch code runs in a locked-down namespace so agents cannot lazily escape
 # via ``import os`` / ``open(...)`` / ``eval(...)`` / ``().__class__.__bases__``.
 # Defense layers:
 #
 #   1. ``__builtins__`` is a curated whitelist — dangerous names like
 #      ``open``/``eval``/``exec``/``compile``/``__import__``/``globals``/
 #      ``locals``/``vars``/``dir``/``breakpoint`` are replaced with a stub
-#      that raises ``PTCSandboxError`` pointing at ``default_api``.
+#      that raises ``ToolBatchSandboxError`` pointing at ``default_api``.
 #   2. ``__import__`` is replaced with ``_ptc_import`` which rejects any
 #      module outside the pre-loaded stdlib allowlist with a clear error.
 #   3. ``getattr`` is replaced with ``RestrictedPython.Guards.safer_getattr``
@@ -146,11 +153,11 @@ class PTCSandboxError(ExoError):
 #      ``import`` / ``from`` statements naming blocked modules.
 #
 # This closes the lazy escape paths. A determined attacker with deep Python
-# introspection can still find edge-case bypasses — for those, route PTC
+# introspection can still find edge-case bypasses — for those, route ToolBatch
 # through a subprocess sandbox (future ``exo-sandbox`` backend work).
 # ---------------------------------------------------------------------------
 
-# Curated safe builtins — anything NOT in this dict is unavailable in PTC code.
+# Curated safe builtins — anything NOT in this dict is unavailable in ToolBatch code.
 _PTC_SAFE_BUILTINS: dict[str, Any] = {
     # Constants
     "None": None,
@@ -242,7 +249,7 @@ _PTC_SAFE_BUILTINS: dict[str, Any] = {
     "id": id,
 }
 
-# Explicitly blocked builtins — replaced by a stub that raises PTCSandboxError
+# Explicitly blocked builtins — replaced by a stub that raises ToolBatchSandboxError
 # with a helpful message pointing at default_api.
 _PTC_BLOCKED_BUILTINS: frozenset[str] = frozenset(
     {
@@ -359,8 +366,8 @@ _PTC_BLOCKED_ATTRS: frozenset[str] = frozenset(
 # ---------------------------------------------------------------------------
 
 
-def get_ptc_eligible_tools(agent: Agent) -> dict[str, Tool]:
-    """Return tools that should be available as functions inside PTC code.
+def get_batch_tools_eligible_tools(agent: Agent) -> dict[str, Tool]:
+    """Return tools that should be available as functions inside ToolBatch code.
 
     Excludes framework-internal tools, HITL tools, handoff targets, tools
     with ``_ptc_exclude=True``, and tools whose name is not a valid Python
@@ -387,7 +394,7 @@ def get_ptc_eligible_tools(agent: Agent) -> dict[str, Tool]:
         if not name.isidentifier():
             if name not in _excluded_name_warnings:
                 _ptc_log.warning(
-                    "Tool %r excluded from PTC: name is not a valid Python "
+                    "Tool %r excluded from ToolBatch: name is not a valid Python "
                     "identifier. It remains available as a direct tool schema.",
                     name,
                 )
@@ -397,10 +404,14 @@ def get_ptc_eligible_tools(agent: Agent) -> dict[str, Tool]:
     return eligible
 
 
+# Deprecated alias: use get_batch_tools_eligible_tools
+get_ptc_eligible_tools = get_batch_tools_eligible_tools
+
+
 def normalize_default_api_tool_calls(tool_calls: list[Any], agent: Agent) -> list[Any]:
     """Strip the ``default_api.`` prefix from LLM-emitted tool call names.
 
-    Some models misread the PTC tool description (which shows tool
+    Some models misread the ToolBatch tool description (which shows tool
     signatures alongside a reference to the ``default_api`` Python
     namespace) and generate a *direct* tool call with a dotted name like
     ``default_api.shell`` instead of wrapping the call in ``__exo_ptc__``.
@@ -415,7 +426,7 @@ def normalize_default_api_tool_calls(tool_calls: list[Any], agent: Agent) -> lis
     - If the name starts with ``default_api.`` AND the stripped suffix is
       a registered tool on *agent*, replace the entry with a new
       ``ToolCall`` carrying the stripped name.  Dispatch then succeeds
-      via the tool's direct schema (the model effectively bypassed PTC
+      via the tool's direct schema (the model effectively bypassed ToolBatch
       but the tool still runs) and the event stream stays clean.
     - Otherwise leave the entry alone so the normal "unknown tool" error
       path still works for genuinely malformed calls.
@@ -431,7 +442,7 @@ def normalize_default_api_tool_calls(tool_calls: list[Any], agent: Agent) -> lis
         if not (stripped and stripped in agent.tools):
             continue
         _ptc_log.warning(
-            "PTC: rewrote LLM tool call %r → %r on agent %s "
+            "ToolBatch: rewrote LLM tool call %r → %r on agent %s "
             "(model emitted default_api-prefixed name directly; "
             "it should have wrapped this in __exo_ptc__)",
             name,
@@ -463,7 +474,7 @@ def _ast_scan_user_code(code: str) -> list[str]:
     stubs respectively.  This keeps those errors *catchable* by user code
     (the agent can ``try/except`` and fall back to ``default_api``), while
     dunder attribute escapes remain hard-blocked because they are a pure
-    escape attempt with no legitimate use case in PTC.
+    escape attempt with no legitimate use case in ToolBatch.
 
     Line numbers in the returned errors match the agent's own view of the
     code (before the async-def wrapper is added).
@@ -479,7 +490,7 @@ def _ast_scan_user_code(code: str) -> list[str]:
         if isinstance(node, ast.Attribute) and node.attr in _PTC_BLOCKED_ATTRS:
             errors.append(
                 f"line {node.lineno}: access to `.{node.attr}` is blocked in "
-                f"PTC (dunder escape hatch). Use `default_api.*` tools instead."
+                f"ToolBatch (dunder escape hatch). Use `default_api.*` tools instead."
             )
     return errors
 
@@ -580,7 +591,7 @@ def schema_to_python_sig(
         parts.append(_format_param(pname, properties[pname], required=pname in required))
 
     # Append injected args as optional trailing params so the LLM can
-    # pass them from inside PTC code.  Matches non-PTC ``_augment_schema``
+    # pass them from inside ToolBatch code.  Matches non-ToolBatch ``_augment_schema``
     # semantics where injected args are always optional string fields.
     if injected_args:
         for arg_name in sorted(injected_args):
@@ -612,7 +623,7 @@ def _full_tool_docstring(tool: Tool) -> str:
 
     ``tool.description`` (from ``_extract_description``) stops at the
     first Google-style section header (``Args:``, ``Returns:``, …) and
-    therefore drops content that appears after it.  For PTC we want as
+    therefore drops content that appears after it.  For ToolBatch we want as
     much guidance as possible — the model should see everything the
     author wrote: the prologue, any XML blocks, any ``Returns:`` /
     ``Raises:`` / ``Examples:`` / ``Notes:`` sections.
@@ -787,7 +798,7 @@ def build_tool_signatures(
     tools: dict[str, Tool],
     injected_args: dict[str, str] | None = None,
 ) -> str:
-    """Build a description block listing all PTC-eligible tools.
+    """Build a description block listing all ToolBatch-eligible tools.
 
     Each tool is rendered as a Python ``async def`` with full type hints
     (including ``Literal[...]`` for enums and ``list[str]`` for typed
@@ -798,7 +809,7 @@ def build_tool_signatures(
 
     Injected tool args (``agent.injected_tool_args``) appear as optional
     trailing parameters in the signature AND in the ``Args:`` section
-    with a ``[injected]`` marker, matching the non-PTC schema
+    with a ``[injected]`` marker, matching the non-ToolBatch schema
     augmentation behaviour.
 
     The signatures intentionally do NOT show ``default_api.<name>``
@@ -813,7 +824,7 @@ def build_tool_signatures(
     for tool in tools.values():
         sig = schema_to_python_sig(tool, injected_args)
         # Re-indent the (possibly multi-line) signature by 2 spaces for
-        # readability inside the PTC preamble listing.
+        # readability inside the ToolBatch preamble listing.
         sig_lines = [f"  {line}" if line else "" for line in sig.split("\n")]
 
         body: list[str] = []
@@ -829,7 +840,7 @@ def build_tool_signatures(
 
 
 # ---------------------------------------------------------------------------
-# PTCTool — the synthetic tool sent to the LLM
+# ToolBatchTool — the synthetic tool sent to the LLM
 # ---------------------------------------------------------------------------
 
 _PTC_PREAMBLE = """\
@@ -871,7 +882,7 @@ Available tool functions (call via `default_api`):
 
 
 def _build_extra_args_note(extra_args: dict[str, str]) -> str:
-    """Render a small block describing ``extra_args`` available on this PTC call.
+    """Render a small block describing ``extra_args`` available on this ToolBatch call.
 
     Appears between the ``<recommended_usage>`` section and the tool
     function listing so the LLM sees it before the signatures.  Returns
@@ -922,18 +933,18 @@ _CODE_PARAM_DESCRIPTION = (
 )
 
 
-class PTCTool(Tool):
+class ToolBatchTool(Tool):
     """Synthetic ``__exo_ptc__`` tool injected when ``ptc=True``.
 
     Its description is built dynamically from the agent's current tools
     so that dynamic tool mutations (``add_tool`` / ``remove_tool``) are
     reflected automatically.  The computed description is cached and
-    invalidated when the set of PTC-eligible tools changes.
+    invalidated when the set of ToolBatch-eligible tools changes.
 
     The tool is fully transparent to the event stream: individual
     ``ToolCallEvent``/``ToolResultEvent`` are emitted per inner tool
     call via the agent's event queue, and the runner suppresses events
-    for the outer PTC tool itself.
+    for the outer ToolBatch tool itself.
     """
 
     _is_ptc_tool: bool = True
@@ -979,7 +990,7 @@ class PTCTool(Tool):
 
     @property
     def description(self) -> str:  # type: ignore[override]
-        """Dynamically build description from current PTC-eligible tools.
+        """Dynamically build description from current ToolBatch-eligible tools.
 
         The result is cached and keyed on a tuple that includes each
         tool's name, full description, parameter-schema JSON hash, and
@@ -991,9 +1002,9 @@ class PTCTool(Tool):
         rebuild so the tool still works.
         """
         try:
-            eligible = get_ptc_eligible_tools(self._agent)
+            eligible = get_batch_tools_eligible_tools(self._agent)
         except Exception:
-            _ptc_log.exception("PTC description: get_ptc_eligible_tools failed")
+            _ptc_log.exception("ToolBatch description: get_batch_tools_eligible_tools failed")
             return _PTC_PREAMBLE + "(tool list unavailable)"
 
         injected_args: dict[str, str] = dict(getattr(self._agent, "injected_tool_args", {}) or {})
@@ -1017,8 +1028,8 @@ class PTCTool(Tool):
             # Include injected_args in the key so changes to the agent's
             # injected_tool_args dict invalidate the cached description.
             injected_key = tuple(sorted(injected_args.items()))
-            # Include extra_args on this PTCTool too so that changing
-            # the outer-PTC extra args rebuilds the description (which
+            # Include extra_args on this ToolBatchTool too so that changing
+            # the outer-ToolBatch extra args rebuilds the description (which
             # mentions ``ptc_args`` availability).
             extra_key = tuple(sorted(self._extra_args.items()))
             current_key: tuple[Any, ...] = (tools_key, injected_key, extra_key)
@@ -1040,7 +1051,7 @@ class PTCTool(Tool):
                 + build_tool_signatures(eligible, injected_args or None)
             )
         except Exception:
-            _ptc_log.exception("PTC description: build_tool_signatures failed")
+            _ptc_log.exception("ToolBatch description: build_tool_signatures failed")
             return _PTC_PREAMBLE + "(signature rendering failed)"
 
         if current_key is not None:
@@ -1065,7 +1076,7 @@ class PTCTool(Tool):
         }
 
     async def execute(self, **kwargs: Any) -> str:
-        """Run user code via PTCExecutor.
+        """Run user code via ToolBatchExecutor.
 
         ``code`` is pulled out of ``kwargs`` and executed.  Any other
         keys matching declared ``extra_args`` are collected into a
@@ -1082,7 +1093,7 @@ class PTCTool(Tool):
             if key in kwargs:
                 ptc_args[key] = kwargs[key]
 
-        executor = PTCExecutor(
+        executor = ToolBatchExecutor(
             self._agent,
             timeout=self._timeout,
             max_output_bytes=self._max_output_bytes,
@@ -1093,13 +1104,17 @@ class PTCTool(Tool):
         return await executor.run(code)
 
 
+# Deprecated alias: use ToolBatchTool
+PTCTool = ToolBatchTool
+
+
 # ---------------------------------------------------------------------------
 # Tool namespace — isolates tool functions from Python builtins/keywords
 # ---------------------------------------------------------------------------
 
 
 class _ToolNamespace:
-    """Simple attribute-based namespace for PTC tool functions.
+    """Simple attribute-based namespace for ToolBatch tool functions.
 
     Tools are set as attributes so the LLM writes
     ``await default_api.search(...)`` instead of bare ``await search(...)``.
@@ -1112,10 +1127,10 @@ class _ToolNamespace:
 
 
 # ---------------------------------------------------------------------------
-# PTCExecutor — runs user code with tool functions in the namespace
+# ToolBatchExecutor — runs user code with tool functions in the namespace
 # ---------------------------------------------------------------------------
 
-# Stdlib modules available in the PTC namespace
+# Stdlib modules available in the ToolBatch namespace
 _PTC_STDLIB = {
     "json": json,
     "math": math,
@@ -1127,7 +1142,7 @@ _PTC_STDLIB = {
 }
 
 
-class PTCExecutor:
+class ToolBatchExecutor:
     """Execute user-written Python code with agent tools as async functions.
 
     Each :meth:`run` call creates a fresh namespace so tool mutations
@@ -1182,17 +1197,17 @@ class PTCExecutor:
         if scan_errors:
             agent_name = getattr(self._agent, "name", "<unknown>")
             _ptc_log.warning(
-                "PTC: sandbox pre-scan rejected code from agent %s (%d errors)",
+                "ToolBatch: sandbox pre-scan rejected code from agent %s (%d errors)",
                 agent_name,
                 len(scan_errors),
             )
-            return self._truncate("PTC sandbox error:\n" + "\n".join(scan_errors))
+            return self._truncate("ToolBatch sandbox error:\n" + "\n".join(scan_errors))
 
         try:
             namespace = self._build_namespace()
         except Exception as exc:
-            _ptc_log.exception("PTC namespace build failed")
-            return f"Error: failed to build PTC namespace: {exc}"
+            _ptc_log.exception("ToolBatch namespace build failed")
+            return f"Error: failed to build ToolBatch namespace: {exc}"
 
         # Wrap user code inside an async function with an inner try/except
         # that traps SystemExit / KeyboardInterrupt. asyncio.Task re-raises
@@ -1257,7 +1272,7 @@ class PTCExecutor:
         await self._cleanup_orphan_tasks(tasks_before)
         captured = output_buf.getvalue()
         if result is not None:
-            # Defensive repr — a badly-written __repr__ should not break PTC.
+            # Defensive repr — a badly-written __repr__ should not break ToolBatch.
             try:
                 result_repr = repr(result)
             except Exception as exc:
@@ -1331,11 +1346,11 @@ class PTCExecutor:
             )
         except TimeoutError:
             _ptc_log.warning(
-                "PTC cleanup: %d orphan task(s) did not cancel within 1s",
+                "ToolBatch cleanup: %d orphan task(s) did not cancel within 1s",
                 len(orphans),
             )
         else:
-            _ptc_log.debug("PTC cleanup: cancelled %d orphan task(s)", len(orphans))
+            _ptc_log.debug("ToolBatch cleanup: cancelled %d orphan task(s)", len(orphans))
 
     # -- namespace construction --
 
@@ -1343,7 +1358,7 @@ class PTCExecutor:
         """Create the sandboxed execution namespace with tool wrappers.
 
         The namespace uses a curated ``__builtins__`` whitelist — dangerous
-        builtins are replaced with stubs that raise :class:`PTCSandboxError`,
+        builtins are replaced with stubs that raise :class:`ToolBatchSandboxError`,
         ``__import__`` is hooked to reject non-allowlisted modules, and
         ``getattr``/``hasattr`` go through ``safer_getattr`` which blocks
         dynamic dunder lookup.  Tools are exposed via a ``default_api``
@@ -1356,16 +1371,16 @@ class PTCExecutor:
         safe_builtins: dict[str, Any] = dict(_PTC_SAFE_BUILTINS)
 
         # 2. Install stubs for every explicitly blocked builtin so user code
-        #    gets a helpful PTCSandboxError rather than a bare NameError.
+        #    gets a helpful ToolBatchSandboxError rather than a bare NameError.
         def _make_blocked_stub(name: str) -> Callable[..., Any]:
             def _blocked(*_args: Any, **_kwargs: Any) -> Any:
                 _ptc_log.warning(
-                    "PTC: blocked builtin %r called by agent %s",
+                    "ToolBatch: blocked builtin %r called by agent %s",
                     name,
                     agent_name,
                 )
-                raise PTCSandboxError(
-                    f"PTC: `{name}()` is blocked for security. "
+                raise ToolBatchSandboxError(
+                    f"ToolBatch: `{name}()` is blocked for security. "
                     f"Use `default_api.*` tools registered on the agent instead."
                 )
 
@@ -1387,9 +1402,9 @@ class PTCExecutor:
         ) -> Any:
             top = name.split(".", 1)[0]
             if top in _PTC_BLOCKED_IMPORTS:
-                _ptc_log.warning("PTC: blocked import of %r by agent %s", name, agent_name)
+                _ptc_log.warning("ToolBatch: blocked import of %r by agent %s", name, agent_name)
                 raise ImportError(
-                    f"PTC: import of {name!r} is blocked for security. "
+                    f"ToolBatch: import of {name!r} is blocked for security. "
                     f"Use `default_api.*` tools registered on the agent instead "
                     f"(e.g. `await default_api.read_file(...)`). "
                     f"If you need this capability, ask the user to register "
@@ -1397,7 +1412,7 @@ class PTCExecutor:
                 )
             if top not in preloaded:
                 raise ImportError(
-                    f"PTC: import of {name!r} is not allowed. "
+                    f"ToolBatch: import of {name!r} is not allowed. "
                     f"Available modules: {sorted(preloaded)}. "
                     f"Use `default_api.*` for anything else."
                 )
@@ -1413,7 +1428,9 @@ class PTCExecutor:
         #    by the AST pre-scan.
         def _ptc_getattr(obj: Any, name: str, *default: Any) -> Any:
             if name in _PTC_BLOCKED_ATTRS:
-                raise PTCSandboxError(f"PTC: access to `.{name}` is blocked (dunder escape hatch).")
+                raise ToolBatchSandboxError(
+                    f"ToolBatch: access to `.{name}` is blocked (dunder escape hatch)."
+                )
             if default:
                 return safer_getattr(obj, name, default[0])
             return safer_getattr(obj, name)
@@ -1422,7 +1439,7 @@ class PTCExecutor:
             try:
                 _ptc_getattr(obj, name)
                 return True
-            except (AttributeError, PTCSandboxError):
+            except (AttributeError, ToolBatchSandboxError):
                 return False
 
         safe_builtins["getattr"] = _ptc_getattr
@@ -1432,18 +1449,18 @@ class PTCExecutor:
         ns: dict[str, Any] = {"__builtins__": safe_builtins}
         ns.update(_PTC_STDLIB)
         ns["__PTC_TRAP__"] = _PTCBaseExceptionTrap
-        # Expose any ``extra_args`` the LLM filled on the outer PTC call
+        # Expose any ``extra_args`` the LLM filled on the outer ToolBatch call
         # as a frozen-ish dict the user code can read.  We copy the dict
         # so user mutations don't affect the executor's own state.
         ns["ptc_args"] = dict(self._ptc_args)
 
-        eligible = get_ptc_eligible_tools(self._agent)
+        eligible = get_batch_tools_eligible_tools(self._agent)
         api = _ToolNamespace()
         for tool in eligible.values():
             try:
                 setattr(api, tool.name, self._make_tool_fn(tool))
             except Exception:
-                _ptc_log.exception("PTC: failed to wrap tool %r — skipping", tool.name)
+                _ptc_log.exception("ToolBatch: failed to wrap tool %r — skipping", tool.name)
         ns["default_api"] = api
 
         return ns
@@ -1453,7 +1470,7 @@ class PTCExecutor:
 
         The wrapper emits ``ToolCallEvent`` / ``ToolResultEvent`` to the
         agent's event queue so the stream is transparent — consumers see
-        individual tool events instead of the opaque PTC tool.
+        individual tool events instead of the opaque ToolBatch tool.
         """
         executor = self
         agent = self._agent
@@ -1463,14 +1480,14 @@ class PTCExecutor:
             executor._tool_call_count += 1
             if executor._tool_call_count > executor._max_tool_calls:
                 raise MaxToolCallsExceeded(
-                    f"PTC code exceeded max_tool_calls={executor._max_tool_calls}"
+                    f"ToolBatch code exceeded max_tool_calls={executor._max_tool_calls}"
                 )
 
             tool_call_id = f"ptc_{uuid.uuid4().hex}"
 
             # Emit ToolCallEvent BEFORE execution (transparent to stream)
             _ptc_log.debug(
-                "PTC enqueue ToolCallEvent: tool=%s id=%s agent=%s queue_size=%d",
+                "ToolBatch enqueue ToolCallEvent: tool=%s id=%s agent=%s queue_size=%d",
                 tool_obj.name,
                 tool_call_id,
                 agent.name,
@@ -1494,9 +1511,9 @@ class PTCExecutor:
             )
 
             # Strip ``injected_tool_args`` — these are schema-only fields
-            # the LLM fills in (visible in the PTC signature), but the
+            # the LLM fills in (visible in the ToolBatch signature), but the
             # underlying tool function must never receive them.  This
-            # matches the non-PTC dispatch path in ``agent.py``.
+            # matches the non-ToolBatch dispatch path in ``agent.py``.
             injected = getattr(agent, "injected_tool_args", None)
             if injected:
                 for key in injected:
@@ -1597,3 +1614,7 @@ class PTCExecutor:
         wrapper.__name__ = tool_obj.name
         wrapper.__doc__ = tool_obj.description
         return wrapper
+
+
+# Deprecated alias: use ToolBatchExecutor
+PTCExecutor = ToolBatchExecutor

@@ -130,8 +130,8 @@ def _build_planner_agent(agent: Any, planner_model: str, planner_instructions: s
         max_steps=getattr(agent, "max_steps", 10),
         temperature=getattr(agent, "temperature", 1.0),
         max_tokens=getattr(agent, "max_tokens", None),
-        budget_awareness=getattr(agent, "budget_awareness", None),
-        hitl_tools=list(getattr(agent, "hitl_tools", [])),
+        context_pressure=getattr(agent, "budget_awareness", None),
+        approval_tools=list(getattr(agent, "hitl_tools", [])),
         human_input_handler=getattr(agent, "_human_input_handler", None),
         emit_mcp_progress=getattr(agent, "emit_mcp_progress", True),
         injected_tool_args=dict(getattr(agent, "injected_tool_args", {})),
@@ -140,14 +140,14 @@ def _build_planner_agent(agent: Any, planner_model: str, planner_instructions: s
         subagents=allow_self_spawn,
         max_spawn_depth=getattr(agent, "max_spawn_depth", 3),
         max_spawn_children=getattr(agent, "max_spawn_children", 4),
-        # Propagate PTC settings so the planner sees the same filtered
-        # schema view as the executor (PTC-eligible tools absorbed into
-        # ``__exo_ptc__``, not leaked as direct schemas).
-        ptc=bool(getattr(agent, "ptc", False)),
-        ptc_timeout=int(getattr(agent, "ptc_timeout", 60)),
-        ptc_max_output_bytes=int(getattr(agent, "ptc_max_output_bytes", 200_000)),
-        ptc_max_tool_calls=int(getattr(agent, "ptc_max_tool_calls", 200)),
-        ptc_extra_args=dict(getattr(agent, "ptc_extra_args", {}) or {}) or None,
+        # Propagate batch-tools (PTC) settings so the planner sees the same
+        # filtered schema view as the executor (batch-eligible tools absorbed
+        # into ``__exo_ptc__``, not leaked as direct schemas).
+        batch_tools=bool(getattr(agent, "ptc", False)),
+        batch_tools_timeout=int(getattr(agent, "ptc_timeout", 60)),
+        batch_tools_max_output_bytes=int(getattr(agent, "ptc_max_output_bytes", 200_000)),
+        batch_tools_max_tool_calls=int(getattr(agent, "ptc_max_tool_calls", 200)),
+        batch_tools_extra_args=dict(getattr(agent, "ptc_extra_args", {}) or {}) or None,
     )
 
 

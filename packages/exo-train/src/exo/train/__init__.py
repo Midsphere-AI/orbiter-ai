@@ -35,12 +35,14 @@ from exo.train.optimizer import (  # pyright: ignore[reportMissingImports]
 )
 from exo.train.synthesis import (  # pyright: ignore[reportMissingImports]
     DataSynthesiser,
+    DataSynthesizer,
     SynthesisConfig,
     SynthesisError,
     SynthesisPipeline,
     SynthesisResult,
     SynthesisStrategy,
     TemplateSynthesiser,
+    TemplateSynthesizer,
     augment_add_noise,
     augment_swap_io,
     deduplicate,
@@ -71,6 +73,7 @@ from exo.train.verl import (  # pyright: ignore[reportMissingImports]
 
 __all__: list[str] = [
     "DataSynthesiser",
+    "DataSynthesizer",
     "DefaultStrategy",
     "EpochResult",
     "EvolutionConfig",
@@ -97,6 +100,7 @@ __all__: list[str] = [
     "SynthesisResult",
     "SynthesisStrategy",
     "TemplateSynthesiser",
+    "TemplateSynthesizer",
     "ToolCallOperator",
     "ToolCallTrace",
     "ToolOptimizer",

@@ -99,9 +99,7 @@ class SwarmNode:
                 max_retries=max_retries,
             )
         except Exception as exc:
-            raise NestedSwarmError(
-                f"SwarmNode '{self.name}' failed: {exc}"
-            ) from exc
+            raise NestedSwarmError(f"SwarmNode '{self.name}' failed: {exc}") from exc
 
     async def stream(
         self,
@@ -140,9 +138,7 @@ class SwarmNode:
             ):
                 yield event
         except Exception as exc:
-            raise NestedSwarmError(
-                f"SwarmNode '{self.name}' stream failed: {exc}"
-            ) from exc
+            raise NestedSwarmError(f"SwarmNode '{self.name}' stream failed: {exc}") from exc
 
     def describe(self) -> dict[str, Any]:
         """Return a summary including the inner swarm's description."""
@@ -156,15 +152,15 @@ class SwarmNode:
         return f"SwarmNode(name={self.name!r}, inner={self._swarm!r})"
 
 
-class RalphNode:
-    """Wraps a RalphRunner so it can be used as a node in a Swarm.
+class RefinementNode:
+    """Wraps a RefinementLoop so it can be used as a node in a Swarm.
 
     The ``is_group = True`` marker makes the Swarm's duck-typing check
     (``getattr(agent, "is_group", False)``) route to ``.stream()``
     during streaming and ``.run()`` during non-streaming execution.
 
     Args:
-        runner: The RalphRunner to wrap.
+        runner: The RefinementLoop to wrap.
         name: Node name for the outer Swarm's flow DSL.
     """
 
@@ -181,27 +177,25 @@ class RalphNode:
         provider: Any = None,
         max_retries: int = 3,
     ) -> RunResult:
-        """Execute the Ralph loop and return the final result.
+        """Execute the refinement loop and return the final result.
 
         Args:
             input: User query string.
-            messages: Ignored (Ralph manages its own context).
-            provider: Ignored (Ralph uses its own execute_fn).
-            max_retries: Ignored (Ralph has its own retry logic).
+            messages: Ignored (RefinementLoop manages its own context).
+            provider: Ignored (RefinementLoop uses its own execute_fn).
+            max_retries: Ignored (RefinementLoop has its own retry logic).
 
         Returns:
-            ``RunResult`` with the Ralph loop's final output.
+            ``RunResult`` with the refinement loop's final output.
 
         Raises:
-            NestedSwarmError: If the Ralph loop fails.
+            NestedSwarmError: If the refinement loop fails.
         """
         try:
             result = await self._runner.run(input)
             return RunResult(output=result.output)
         except Exception as exc:
-            raise NestedSwarmError(
-                f"RalphNode '{self.name}' failed: {exc}"
-            ) from exc
+            raise NestedSwarmError(f"RefinementNode '{self.name}' failed: {exc}") from exc
 
     async def stream(
         self,
@@ -212,28 +206,31 @@ class RalphNode:
         detailed: bool = False,
         max_steps: int | None = None,
     ) -> AsyncIterator[StreamEvent]:
-        """Stream Ralph loop events including inner agent events.
+        """Stream refinement loop events including inner agent events.
 
         Args:
             input: User query string.
-            messages: Ignored (Ralph manages its own context).
-            provider: Ignored (Ralph uses its own execute_fn).
-            detailed: Passed through for compatibility but not used by Ralph.
-            max_steps: Ignored (Ralph has its own stop conditions).
+            messages: Ignored (RefinementLoop manages its own context).
+            provider: Ignored (RefinementLoop uses its own execute_fn).
+            detailed: Passed through for compatibility but not used by RefinementLoop.
+            max_steps: Ignored (RefinementLoop has its own stop conditions).
 
         Yields:
-            ``StreamEvent`` instances from the Ralph loop execution.
+            ``StreamEvent`` instances from the refinement loop execution.
 
         Raises:
-            NestedSwarmError: If the Ralph loop fails.
+            NestedSwarmError: If the refinement loop fails.
         """
         try:
             async for event in self._runner.stream(input, name=self.name):
                 yield event
         except Exception as exc:
-            raise NestedSwarmError(
-                f"RalphNode '{self.name}' stream failed: {exc}"
-            ) from exc
+            raise NestedSwarmError(f"RefinementNode '{self.name}' stream failed: {exc}") from exc
 
     def __repr__(self) -> str:
+        # repr keeps the deprecated alias name for backward compatibility
         return f"RalphNode(name={self.name!r})"
+
+
+# Deprecated alias: use RefinementNode
+RalphNode = RefinementNode

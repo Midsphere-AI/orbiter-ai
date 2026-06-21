@@ -71,27 +71,45 @@ class ContextConfig(BaseModel):
         description="Persist processed messages between runs (avoids re-summarizing)",
     )
 
-    # Neuron selection
+    # Section/neuron selection — neuron_names is the stored field (backward-compat);
+    # section_names is a property alias pointing to the same value.
     neuron_names: tuple[str, ...] = Field(
         default=(),
-        description="Names of neurons to include in prompt building",
+        description="Names of prompt sections to include in prompt building "
+        "(also accessible as section_names)",
     )
 
     # Extensible metadata
     extra: dict[str, Any] = Field(
         default_factory=dict,
-        description="Additional configuration for custom processors or neurons",
+        description="Additional configuration for custom processors or sections",
     )
 
     @model_validator(mode="before")
     @classmethod
-    def _coerce_neuron_names(cls, data: Any) -> Any:
-        """Accept list or tuple for neuron_names, normalise to tuple."""
-        if isinstance(data, dict) and "neuron_names" in data:
-            val = data["neuron_names"]
-            if isinstance(val, list):
-                data["neuron_names"] = tuple(val)
+    def _coerce_section_names(cls, data: Any) -> Any:
+        """Accept list or tuple for neuron_names/section_names, normalise to tuple.
+
+        ``section_names`` is a new alias for ``neuron_names`` accepted at construction.
+        """
+        if isinstance(data, dict):
+            # New alias: section_names → neuron_names (if only section_names given)
+            if "section_names" in data and "neuron_names" not in data:
+                data["neuron_names"] = data.pop("section_names")
+            elif "section_names" in data:
+                # Both provided — prefer section_names, discard duplicate
+                data["neuron_names"] = data.pop("section_names")
+            # Coerce list → tuple
+            if "neuron_names" in data:
+                val = data["neuron_names"]
+                if isinstance(val, list):
+                    data["neuron_names"] = tuple(val)
         return data
+
+    @property
+    def section_names(self) -> tuple[str, ...]:
+        """Canonical alias for :attr:`neuron_names` — preferred new name."""
+        return self.neuron_names
 
     # ── Internal derived windowing thresholds (read-only properties) ─────
 

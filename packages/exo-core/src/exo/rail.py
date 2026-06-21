@@ -1,7 +1,7 @@
-"""Rail ABC with priority ordering and retry capability.
+"""Guard ABC with priority ordering and retry capability.
 
-Rails are structured lifecycle guards that attach to agent hook points.
-Each rail has a priority (lower runs first) and returns a ``RailAction``
+Guards are structured lifecycle guards that attach to agent hook points.
+Each guard has a priority (lower runs first) and returns a ``GuardAction``
 to control execution flow: continue, skip, retry, or abort.
 """
 
@@ -16,14 +16,14 @@ from exo.hooks import Hook, HookPoint
 from exo.types import ExoError
 
 if TYPE_CHECKING:
-    from exo.rail_types import InvokeInputs, ModelCallInputs, RailContext, ToolCallInputs
+    from exo.rail_types import GuardContext, InvokeInputs, ModelCallInputs, ToolCallInputs
 
 
-class RailAction(enum.StrEnum):
-    """Action returned by a rail to control execution flow.
+class GuardAction(enum.StrEnum):
+    """Action returned by a guard to control execution flow.
 
     Attributes:
-        CONTINUE: Proceed to the next rail (or the guarded operation).
+        CONTINUE: Proceed to the next guard (or the guarded operation).
         SKIP: Skip the guarded operation entirely.
         RETRY: Retry the guarded operation (see ``RetryRequest``).
         ABORT: Abort the agent run immediately.
@@ -35,12 +35,16 @@ class RailAction(enum.StrEnum):
     ABORT = "abort"
 
 
+# Deprecated alias: use GuardAction
+RailAction = GuardAction
+
+
 @dataclass(frozen=True)
 class RetryRequest:
     """Parameters for a RETRY action.
 
-    Attach an instance to the rail's return context when returning
-    ``RailAction.RETRY`` so the caller knows how to retry.
+    Attach an instance to the guard's return context when returning
+    ``GuardAction.RETRY`` so the caller knows how to retry.
 
     Args:
         delay: Seconds to wait before retrying.
@@ -53,40 +57,55 @@ class RetryRequest:
     reason: str = ""
 
 
-class RailAbortError(ExoError):
-    """Raised when a rail returns ``RailAction.ABORT``.
+class GuardAbortError(ExoError):
+    """Raised when a guard returns ``GuardAction.ABORT``.
 
     Args:
-        rail_name: Name of the rail that triggered the abort.
+        guard_name: Name of the guard that triggered the abort.
         reason: Human-readable reason for the abort.
     """
 
-    def __init__(self, rail_name: str, reason: str = "") -> None:
-        self.rail_name = rail_name
+    _label: str = "Guard"
+
+    def __init__(self, guard_name: str, reason: str = "") -> None:
+        self.guard_name = guard_name
+        # Keep rail_name as an alias attribute for backward compat
+        self.rail_name = guard_name
         self.reason = reason
-        msg = f"Rail '{rail_name}' aborted"
+        msg = f"{self._label} '{guard_name}' aborted"
         if reason:
             msg += f": {reason}"
         super().__init__(msg)
 
 
-class Rail(abc.ABC):
-    """Abstract base class for agent rails.
+class RailAbortError(GuardAbortError):
+    """Deprecated: use GuardAbortError instead.
 
-    A rail is a lifecycle guard that inspects and optionally alters
-    agent execution at specific hook points.  Rails are run in
+    Subclass of GuardAbortError that preserves the ``Rail '...' aborted``
+    message format for backward compatibility with existing code that
+    catches or stringifies ``RailAbortError`` instances.
+    """
+
+    _label: str = "Rail"
+
+
+class Guard(abc.ABC):
+    """Abstract base class for agent guards.
+
+    A guard is a lifecycle guard that inspects and optionally alters
+    agent execution at specific hook points.  Guards are run in
     ascending ``priority`` order (lower numbers run first).
 
     Args:
-        name: Unique identifier for this rail.
+        name: Unique identifier for this guard.
         priority: Execution order (lower = earlier). Defaults to 50.
 
     Example:
-        >>> class BlockDangerousTool(Rail):
+        >>> class BlockDangerousTool(Guard):
         ...     async def handle(self, ctx):
         ...         if ctx.inputs.tool_name == "rm_rf":
-        ...             return RailAction.ABORT
-        ...         return RailAction.CONTINUE
+        ...             return GuardAction.ABORT
+        ...         return GuardAction.CONTINUE
     """
 
     def __init__(self, name: str, *, priority: int = 50) -> None:
@@ -94,21 +113,25 @@ class Rail(abc.ABC):
         self.priority = priority
 
     @abc.abstractmethod
-    async def handle(self, ctx: RailContext) -> RailAction | None:
+    async def handle(self, ctx: GuardContext) -> GuardAction | None:
         """Inspect and optionally act on a lifecycle event.
 
         Args:
-            ctx: The rail context containing agent, event, typed
-                inputs, and cross-rail extra dict.
+            ctx: The guard context containing agent, event, typed
+                inputs, and cross-guard extra dict.
 
         Returns:
-            A ``RailAction`` indicating what should happen next,
+            A ``GuardAction`` indicating what should happen next,
             or ``None`` (treated as ``CONTINUE``).
         """
         ...
 
     def __repr__(self) -> str:
         return f"{type(self).__name__}(name={self.name!r}, priority={self.priority})"
+
+
+# Deprecated alias: use Guard
+Rail = Guard
 
 
 def _build_inputs(
@@ -146,85 +169,90 @@ def _build_inputs(
     )
 
 
-class RailManager:
-    """Manages rails with priority ordering and cross-rail state.
+class GuardManager:
+    """Manages guards with priority ordering and cross-guard state.
 
-    Rails are run in ascending priority order (lower numbers first).
-    A shared ``extra`` dict is passed through all rails within a single
-    invocation, enabling cross-rail coordination.
+    Guards are run in ascending priority order (lower numbers first).
+    A shared ``extra`` dict is passed through all guards within a single
+    invocation, enabling cross-guard coordination.
 
     The manager can be registered as a single hook on
     :class:`~exo.hooks.HookManager` via :meth:`hook_for`.
 
     Example:
-        >>> manager = RailManager()
-        >>> manager.add(my_safety_rail)
+        >>> manager = GuardManager()
+        >>> manager.add(my_safety_guard)
         >>> action = await manager.run(HookPoint.PRE_LLM_CALL, agent=agent, messages=msgs)
     """
 
     def __init__(self) -> None:
-        self._rails: list[Rail] = []
+        self._guards: list[Guard] = []
 
-    def add(self, rail: Rail) -> None:
-        """Add a rail to the manager.
+    @property
+    def _rails(self) -> list[Guard]:
+        """Deprecated: internal alias for ``_guards`` for backward compatibility."""
+        return self._guards
+
+    def add(self, guard: Guard) -> None:
+        """Add a guard to the manager.
 
         Args:
-            rail: The rail instance to add.
+            guard: The guard instance to add.
         """
-        self._rails.append(rail)
+        self._guards.append(guard)
 
-    def remove(self, rail: Rail) -> None:
-        """Remove a rail from the manager.
+    def remove(self, guard: Guard) -> None:
+        """Remove a guard from the manager.
 
         Args:
-            rail: The rail instance to remove.
+            guard: The guard instance to remove.
 
         Raises:
-            ValueError: If the rail is not in the manager.
+            ValueError: If the guard is not in the manager.
         """
-        self._rails.remove(rail)
+        self._guards.remove(guard)
 
     def clear(self) -> None:
-        """Remove all rails."""
-        self._rails.clear()
+        """Remove all guards."""
+        self._guards.clear()
 
-    async def run(self, event: HookPoint, **data: Any) -> RailAction:
-        """Run all rails for an event in priority order.
+    async def run(self, event: HookPoint, **data: Any) -> GuardAction:
+        """Run all guards for an event in priority order.
 
-        Builds a :class:`~exo.rail_types.RailContext` from the keyword
-        arguments, then executes each rail sorted by ascending priority.
-        Returns the first non-CONTINUE action, or CONTINUE if all rails pass.
+        Builds a :class:`~exo.rail_types.GuardContext` from the keyword
+        arguments, then executes each guard sorted by ascending priority.
+        Returns the first non-CONTINUE action, or CONTINUE if all guards pass.
 
-        The ``extra`` dict on the context is shared across all rails in
-        the same invocation, allowing cross-rail state sharing.
+        The ``extra`` dict on the context is shared across all guards in
+        the same invocation, allowing cross-guard state sharing.
 
         Args:
             event: The lifecycle hook point.
             **data: Keyword arguments (``agent`` plus event-specific data).
 
         Returns:
-            The resulting :class:`RailAction`.
+            The resulting :class:`GuardAction`.
         """
-        from exo.rail_types import RailContext
+        from exo.rail_types import GuardContext
 
         agent = data.get("agent")
         inputs = _build_inputs(event, data)
         extra: dict[str, Any] = {}
-        ctx = RailContext(agent=agent, event=event, inputs=inputs, extra=extra)
+        ctx = GuardContext(agent=agent, event=event, inputs=inputs, extra=extra)
 
-        for rail in sorted(self._rails, key=lambda r: r.priority):
-            action = await rail.handle(ctx)
-            if action is not None and action != RailAction.CONTINUE:
+        for guard in sorted(self._guards, key=lambda r: r.priority):
+            action = await guard.handle(ctx)
+            if action is not None and action != GuardAction.CONTINUE:
                 return action
 
-        return RailAction.CONTINUE
+        return GuardAction.CONTINUE
 
     def hook_for(self, event: HookPoint) -> Hook:
         """Create a hook callable for a specific lifecycle event.
 
         The returned async callable can be registered on a
-        :class:`~exo.hooks.HookManager`.  If any rail returns
-        :attr:`RailAction.ABORT`, a :class:`RailAbortError` is raised
+        :class:`~exo.hooks.HookManager`.  If any guard returns
+        :attr:`GuardAction.ABORT`, a :class:`GuardAbortError` is raised
         so that the agent run is halted.
 
         Args:
@@ -236,7 +264,11 @@ class RailManager:
 
         async def _hook(**hook_data: Any) -> None:
             action = await self.run(event, **hook_data)
-            if action == RailAction.ABORT:
+            if action == GuardAction.ABORT:
                 raise RailAbortError("RailManager", reason=f"Rail aborted at {event.value}")
 
         return _hook
+
+
+# Deprecated alias: use GuardManager
+RailManager = GuardManager
