@@ -18,7 +18,7 @@ Use this skill when the developer needs to:
 
 ## Decision Guide
 
-1. **Does the agent need to delegate parallel work to itself?** → Set `allow_self_spawn=True`
+1. **Does the agent need to delegate parallel work to itself?** → Sub-agents are ON by default. No change needed. Set `allow_self_spawn=False` to opt out.
 2. **How deep should recursive spawning go?** → Set `max_spawn_depth` (default 3; root agent at depth 0)
 3. **How many children per single spawn_self call?** → Set `max_spawn_children` (default 4). The LLM receives an error if it passes more tasks than this limit.
 4. **Does the child need to share long-term knowledge?** → Automatic: shared long-term memory, fresh short-term
@@ -40,14 +40,14 @@ agent = Agent(
         "After all spawn_self calls return, synthesize the results."
     ),
     tools=[search, summarize],
-    allow_self_spawn=True,       # Registers spawn_self(tasks) tool automatically
+    # allow_self_spawn=True by default — spawn_self(tasks) tool auto-registered
     max_spawn_depth=2,           # Root (depth 0) + 1 level of children (depth 1)
     max_spawn_children=4,        # Up to 4 children per spawn_self call (default)
 )
 ```
 
 **Agent parameters:**
-- `allow_self_spawn: bool = False` — When `True`, registers the `spawn_self(tasks: list[str]) -> str` tool
+- `allow_self_spawn: bool = True` — When `True` (default), registers the `spawn_self(tasks: list[str]) -> str` tool. Set `allow_self_spawn=False` to disable sub-agent spawning.
 - `max_spawn_depth: int = 3` — Maximum recursive depth. Default allows root + 2 levels.
 - `max_spawn_children: int = 4` — Maximum number of tasks the LLM can pass in a single `spawn_self` call. If exceeded, the tool returns an error string instead of spawning.
 
@@ -84,7 +84,7 @@ Auto-registered tool that the LLM calls to spawn child agents in parallel:
 | `temperature` | Yes | Same value |
 | `max_tokens` | Yes | Same value |
 | `max_steps` | Yes | Same value |
-| `allow_self_spawn` | No | Always `False` |
+| `allow_self_spawn` | No | Always `False` on spawned children (prevents recursive spawning unless depth allows) |
 | `_spawn_depth` | Incremented | `parent._spawn_depth + 1` |
 | Short-term memory | No | Fresh `ShortTermMemory()` instance |
 | Long-term memory | Yes | Shared instance (same reference) |
@@ -216,10 +216,10 @@ agent = Agent(
 ```python
 from exo.memory.base import AgentMemory
 from exo.memory.short_term import ShortTermMemory
-from exo.memory.backends.vector import ChromaVectorMemoryStore, OpenAIEmbeddingProvider
+from exo.memory.backends.sqlite import SQLiteMemoryStore
 
-# Shared long-term store for knowledge accumulation
-shared_lt = ChromaVectorMemoryStore(OpenAIEmbeddingProvider())
+# Shared long-term store for knowledge accumulation (SQLite is the default backend)
+shared_lt = SQLiteMemoryStore()
 
 agent = Agent(
     name="coordinator",
@@ -227,7 +227,6 @@ agent = Agent(
         short_term=ShortTermMemory(),
         long_term=shared_lt,
     ),
-    allow_self_spawn=True,
     max_spawn_children=4,
 )
 # Children will share shared_lt but get fresh ShortTermMemory

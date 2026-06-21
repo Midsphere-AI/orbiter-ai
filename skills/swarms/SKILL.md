@@ -1,6 +1,6 @@
 ---
 name: exo:swarms
-description: "Use when building multi-agent systems with Exo — Swarm orchestration, flow DSL, workflow/handoff/team modes, ParallelGroup, SerialGroup, BranchNode, LoopNode, SwarmNode, RalphNode, agent delegation. Triggers on: swarm, multi-agent, workflow, handoff, team mode, flow DSL, ParallelGroup, SerialGroup, SwarmNode, RalphNode, agent pipeline, delegation, nested swarm."
+description: "Use when building multi-agent systems with Exo — Swarm orchestration, flow DSL, workflow/handoff/team modes, ParallelGroup, BranchNode, LoopNode, SwarmNode, RalphNode, agent delegation. Triggers on: swarm, multi-agent, workflow, handoff, team mode, flow DSL, ParallelGroup, SwarmNode, RalphNode, agent pipeline, delegation, nested swarm."
 ---
 
 > **Branch:** These skills are written for the `rename/orbiter-to-exo` branch. The Exo APIs referenced here may differ on other branches.
@@ -13,7 +13,7 @@ Use this skill when the developer needs to:
 - Orchestrate multiple agents in a pipeline, delegation chain, or team
 - Use the flow DSL to define execution order
 - Choose between workflow, handoff, and team modes
-- Use ParallelGroup or SerialGroup for concurrent/sequential execution
+- Use ParallelGroup for concurrent agent execution within a workflow
 - Add conditional branching (BranchNode) or iteration (LoopNode)
 - Nest swarms inside swarms via `SwarmNode` (with streaming support)
 - Plug a `RalphRunner` into a swarm via `RalphNode`
@@ -24,7 +24,7 @@ Use this skill when the developer needs to:
 1. **Fixed pipeline where output chains to next agent?** → `mode="workflow"` with flow DSL `"a >> b >> c"`
 2. **Agents decide dynamically who runs next?** → `mode="handoff"` — agents have `handoffs=[...]` and delegate via tool calls
 3. **One lead agent coordinating specialist workers?** → `mode="team"` — first agent = lead, gets auto-generated `delegate_to_{name}` tools for each worker
-4. **Need agents to run in parallel within a workflow?** → `ParallelGroup(agents=[a, b])` as a node
+4. **Need agents to run in parallel within a workflow?** → `ParallelGroup(agents=[a, b])` as a node (for sequential chaining within a group, use `Swarm(mode="workflow")` directly)
 5. **Need conditional routing?** → `BranchNode` evaluates state and jumps to a target agent
 6. **Need iteration?** → `LoopNode` repeats body agents until condition or max_iterations
 7. **Need a swarm as a node in another swarm?** → `SwarmNode(swarm=inner)` — supports `run()` and `stream()` with context isolation
@@ -146,12 +146,12 @@ swarm = Swarm(agents=[a, b, c])  # same as "a >> b >> c"
 - Cyclic flows are rejected (topological sort)
 - Unknown agent names raise `SwarmError`
 
-### ParallelGroup and SerialGroup
+### ParallelGroup
 
 Groups act as composite nodes in a workflow:
 
 ```python
-from exo import ParallelGroup, SerialGroup, Agent, Swarm
+from exo import ParallelGroup, Agent, Swarm
 
 analyst_a = Agent(name="analyst_a", instructions="Analyze market data.")
 analyst_b = Agent(name="analyst_b", instructions="Analyze competitor data.")
@@ -169,10 +169,9 @@ swarm = Swarm(
 result = await swarm.run("Analyze the AI market", provider=provider)
 ```
 
-**ParallelGroup:** Runs all agents concurrently, combines outputs.
-**SerialGroup:** Runs agents sequentially within the group, chains output.
+**ParallelGroup:** Runs all agents concurrently, combines outputs with a separator (default `"\n\n"`) or a custom `aggregate_fn`.
 
-Both have `is_group = True` and their own `run()` / `stream()` methods.
+Has `is_group = True` and its own `run()` / `stream()` methods.
 
 ### Swarm.run()
 

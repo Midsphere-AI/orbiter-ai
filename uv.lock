@@ -30,7 +30,6 @@ members = [
     "exo-distributed",
     "exo-eval",
     "exo-guardrail",
-    "exo-harness",
     "exo-mcp",
     "exo-mcp-cli",
     "exo-memory",
@@ -42,7 +41,6 @@ members = [
     "exo-server",
     "exo-skills",
     "exo-train",
-    "exo-web",
     "exo-workspace",
 ]
 
@@ -688,19 +686,6 @@ wheels = [
 ]
 
 [[package]]
-name = "croniter"
-version = "6.0.0"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "python-dateutil" },
-    { name = "pytz" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/ad/2f/44d1ae153a0e27be56be43465e5cb39b9650c781e001e7864389deb25090/croniter-6.0.0.tar.gz", hash = "sha256:37c504b313956114a983ece2c2b07790b1f1094fe9d81cc94739214748255577", size = 64481, upload-time = "2024-12-17T17:17:47.32Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/07/4b/290b4c3efd6417a8b0c284896de19b1d5855e6dbdb97d2a35e68fa42de85/croniter-6.0.0-py2.py3-none-any.whl", hash = "sha256:2f878c3856f17896979b2a4379ba1f09c83e374931ea15cc835c5dd2eee9b368", size = 25468, upload-time = "2024-12-17T17:17:45.359Z" },
-]
-
-[[package]]
 name = "cryptography"
 version = "46.0.5"
 source = { registry = "https://pypi.org/simple" }
@@ -918,27 +903,50 @@ name = "exo-ai"
 version = "0.1.0"
 source = { editable = "packages/exo" }
 dependencies = [
-    { name = "exo-a2a" },
     { name = "exo-core" },
     { name = "exo-eval" },
     { name = "exo-mcp" },
     { name = "exo-memory" },
     { name = "exo-models" },
     { name = "exo-observability" },
+    { name = "exo-retrieval" },
     { name = "exo-sandbox" },
+]
+
+[package.optional-dependencies]
+a2a = [
+    { name = "exo-a2a" },
+]
+all = [
+    { name = "exo-a2a" },
+    { name = "exo-distributed" },
+    { name = "exo-search" },
+]
+distributed = [
+    { name = "exo-distributed" },
+]
+search = [
+    { name = "exo-search" },
 ]
 
 [package.metadata]
 requires-dist = [
-    { name = "exo-a2a", editable = "packages/exo-a2a" },
+    { name = "exo-a2a", marker = "extra == 'a2a'", editable = "packages/exo-a2a" },
+    { name = "exo-a2a", marker = "extra == 'all'", editable = "packages/exo-a2a" },
     { name = "exo-core", editable = "packages/exo-core" },
+    { name = "exo-distributed", marker = "extra == 'all'", editable = "packages/exo-distributed" },
+    { name = "exo-distributed", marker = "extra == 'distributed'", editable = "packages/exo-distributed" },
     { name = "exo-eval", editable = "packages/exo-eval" },
     { name = "exo-mcp", editable = "packages/exo-mcp" },
     { name = "exo-memory", editable = "packages/exo-memory" },
     { name = "exo-models", editable = "packages/exo-models" },
     { name = "exo-observability", editable = "packages/exo-observability" },
+    { name = "exo-retrieval", editable = "packages/exo-retrieval" },
     { name = "exo-sandbox", editable = "packages/exo-sandbox" },
+    { name = "exo-search", marker = "extra == 'all'", editable = "packages/exo-search" },
+    { name = "exo-search", marker = "extra == 'search'", editable = "packages/exo-search" },
 ]
+provides-extras = ["a2a", "distributed", "search", "all"]
 
 [[package]]
 name = "exo-cli"
@@ -1054,27 +1062,18 @@ requires-dist = [
 ]
 
 [[package]]
-name = "exo-harness"
-version = "0.1.0"
-source = { editable = "packages/exo-harness" }
-dependencies = [
-    { name = "exo-core" },
-]
-
-[package.metadata]
-requires-dist = [{ name = "exo-core", editable = "packages/exo-core" }]
-
-[[package]]
 name = "exo-mcp"
 version = "0.1.0"
 source = { editable = "packages/exo-mcp" }
 dependencies = [
+    { name = "cryptography" },
     { name = "exo-core" },
     { name = "mcp" },
 ]
 
 [package.metadata]
 requires-dist = [
+    { name = "cryptography", specifier = ">=42.0" },
     { name = "exo-core", editable = "packages/exo-core" },
     { name = "mcp", specifier = ">=1.0" },
 ]
@@ -1084,7 +1083,7 @@ name = "exo-mcp-cli"
 version = "0.1.0"
 source = { editable = "packages/exo-mcp-cli" }
 dependencies = [
-    { name = "cryptography" },
+    { name = "exo-mcp" },
     { name = "mcp" },
     { name = "rich" },
     { name = "typer" },
@@ -1092,7 +1091,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "cryptography", specifier = ">=42.0" },
+    { name = "exo-mcp", editable = "packages/exo-mcp" },
     { name = "mcp", specifier = ">=1.0" },
     { name = "rich", specifier = ">=13.0" },
     { name = "typer", specifier = ">=0.12" },
@@ -1103,34 +1102,32 @@ name = "exo-memory"
 version = "0.1.0"
 source = { editable = "packages/exo-memory" }
 dependencies = [
+    { name = "aiosqlite" },
     { name = "exo-core" },
+    { name = "exo-models" },
 ]
 
 [package.optional-dependencies]
 postgres = [
     { name = "asyncpg" },
 ]
-sqlite = [
-    { name = "aiosqlite" },
-]
 vector = [
     { name = "chromadb" },
 ]
 vertex = [
-    { name = "google-auth" },
-    { name = "google-genai" },
+    { name = "exo-models" },
 ]
 
 [package.metadata]
 requires-dist = [
-    { name = "aiosqlite", marker = "extra == 'sqlite'", specifier = ">=0.20" },
+    { name = "aiosqlite", specifier = ">=0.20" },
     { name = "asyncpg", marker = "extra == 'postgres'", specifier = ">=0.29" },
     { name = "chromadb", marker = "extra == 'vector'", specifier = ">=0.6" },
     { name = "exo-core", editable = "packages/exo-core" },
-    { name = "google-auth", marker = "extra == 'vertex'", specifier = ">=2.0" },
-    { name = "google-genai", marker = "extra == 'vertex'", specifier = ">=1.0" },
+    { name = "exo-models", editable = "packages/exo-models" },
+    { name = "exo-models", marker = "extra == 'vertex'", editable = "packages/exo-models" },
 ]
-provides-extras = ["sqlite", "postgres", "vector", "vertex"]
+provides-extras = ["postgres", "vector", "vertex"]
 
 [[package]]
 name = "exo-models"
@@ -1141,6 +1138,7 @@ dependencies = [
     { name = "exo-core" },
     { name = "google-auth" },
     { name = "google-genai" },
+    { name = "httpx" },
     { name = "openai" },
 ]
 
@@ -1150,6 +1148,7 @@ requires-dist = [
     { name = "exo-core", editable = "packages/exo-core" },
     { name = "google-auth", specifier = ">=2.0" },
     { name = "google-genai", specifier = ">=1.0" },
+    { name = "httpx", specifier = ">=0.27" },
     { name = "openai", specifier = ">=1.0" },
 ]
 
@@ -1185,6 +1184,7 @@ version = "0.1.0"
 source = { editable = "packages/exo-retrieval" }
 dependencies = [
     { name = "exo-core" },
+    { name = "exo-models" },
     { name = "httpx" },
     { name = "pydantic" },
 ]
@@ -1205,6 +1205,7 @@ requires-dist = [
     { name = "asyncpg", marker = "extra == 'pgvector'", specifier = ">=0.29" },
     { name = "chromadb", marker = "extra == 'chroma'", specifier = ">=0.4" },
     { name = "exo-core", editable = "packages/exo-core" },
+    { name = "exo-models", editable = "packages/exo-models" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "pydantic", specifier = ">=2.0" },
     { name = "pymupdf", marker = "extra == 'pdf'", specifier = ">=1.24" },
@@ -1309,6 +1310,7 @@ version = "0.1.0"
 source = { editable = "packages/exo-train" }
 dependencies = [
     { name = "exo-core" },
+    { name = "exo-eval" },
     { name = "exo-models" },
 ]
 
@@ -1320,39 +1322,11 @@ verl = [
 [package.metadata]
 requires-dist = [
     { name = "exo-core", editable = "packages/exo-core" },
+    { name = "exo-eval", editable = "packages/exo-eval" },
     { name = "exo-models", editable = "packages/exo-models" },
     { name = "verl", marker = "extra == 'verl'", specifier = ">=0.2" },
 ]
 provides-extras = ["verl"]
-
-[[package]]
-name = "exo-web"
-version = "0.1.0"
-source = { editable = "packages/exo-web" }
-dependencies = [
-    { name = "aiosqlite" },
-    { name = "bcrypt" },
-    { name = "croniter" },
-    { name = "cryptography" },
-    { name = "exo-core" },
-    { name = "exo-models" },
-    { name = "fastapi" },
-    { name = "httpx" },
-    { name = "uvicorn", extra = ["standard"] },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "aiosqlite", specifier = ">=0.20" },
-    { name = "bcrypt", specifier = ">=4.0" },
-    { name = "croniter", specifier = ">=2.0" },
-    { name = "cryptography", specifier = ">=42.0" },
-    { name = "exo-core", editable = "packages/exo-core" },
-    { name = "exo-models", editable = "packages/exo-models" },
-    { name = "fastapi", specifier = ">=0.115" },
-    { name = "httpx", specifier = ">=0.27" },
-    { name = "uvicorn", extras = ["standard"], specifier = ">=0.30" },
-]
 
 [[package]]
 name = "exo-workspace"
@@ -1374,7 +1348,6 @@ dev = [
     { name = "exo-distributed" },
     { name = "exo-eval" },
     { name = "exo-guardrail" },
-    { name = "exo-harness" },
     { name = "exo-mcp" },
     { name = "exo-mcp-cli" },
     { name = "exo-memory" },
@@ -1386,7 +1359,6 @@ dev = [
     { name = "exo-server" },
     { name = "exo-skills" },
     { name = "exo-train" },
-    { name = "exo-web" },
     { name = "fakeredis", extra = ["lua"] },
     { name = "httpx" },
     { name = "opentelemetry-api" },
@@ -1417,7 +1389,6 @@ dev = [
     { name = "exo-distributed", editable = "packages/exo-distributed" },
     { name = "exo-eval", editable = "packages/exo-eval" },
     { name = "exo-guardrail", editable = "packages/exo-guardrail" },
-    { name = "exo-harness", editable = "packages/exo-harness" },
     { name = "exo-mcp", editable = "packages/exo-mcp" },
     { name = "exo-mcp-cli", editable = "packages/exo-mcp-cli" },
     { name = "exo-memory", editable = "packages/exo-memory" },
@@ -1429,7 +1400,6 @@ dev = [
     { name = "exo-server", editable = "packages/exo-server" },
     { name = "exo-skills", editable = "packages/exo-skills" },
     { name = "exo-train", editable = "packages/exo-train" },
-    { name = "exo-web", editable = "packages/exo-web" },
     { name = "fakeredis", extras = ["lua"] },
     { name = "httpx", specifier = ">=0.27" },
     { name = "opentelemetry-api", specifier = ">=1.20" },

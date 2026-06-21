@@ -22,7 +22,7 @@ Most frameworks hand you a blank agent and a long to-do list: wire up memory, ma
 - **Cognitive architecture out of the box.** Every agent ships with dynamic prompt assembly (neurons), automatic context compression, memory, workspace indexing, and budget awareness — none of it requires configuration.
 - **Opt-in, not opt-out.** Don't need memory? Pass `memory=None`. Don't need the context engine? Pass `context=None`. Defaults are rich; stripping back is trivial.
 - **Async-first, provider-agnostic.** OpenAI, Anthropic, Gemini, Vertex AI — swap with a string. Core APIs are async with a `run.sync()` escape hatch for scripts.
-- **Modular monorepo.** 21 focused packages. Install the full stack with `exo-ai` or pull in only what you need (`exo-core`, `exo-models`, …).
+- **Modular monorepo.** 20 focused packages. Install the full stack with `exo-ai` or pull in only what you need (`exo-core`, `exo-models`, …).
 - **Production-ready primitives.** Multi-agent swarms, MCP tool integration, sandboxed code execution, RAG pipelines, A2A communication, evaluation, observability — all first-class packages.
 
 ---
@@ -99,7 +99,6 @@ asyncio.run(main())
 
 | Package | Purpose |
 |---|---|
-| `exo-web` | Full platform UI — Astro 5 frontend + FastAPI backend |
 | `exo-server` | Lightweight web UI and API server for agents |
 | `exo-cli` | CLI agent runner |
 | `exo-mcp-cli` | Standalone CLI for interacting with MCP servers |

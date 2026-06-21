@@ -22,8 +22,6 @@ members = [
     "packages/exo-cli",
     "packages/exo-server",
     "packages/exo-train",
-    "packages/exo-web",
-    "packages/exo-harness",
     "packages/exo-guardrail",
     "packages/exo-retrieval",
     "packages/exo-search",
@@ -47,8 +45,6 @@ dev = [
     "exo-cli",
     "exo-server",
     "exo-train",
-    "exo-web",
-    "exo-harness",
     "exo-guardrail",
     "exo-retrieval",
     "exo-search",
@@ -86,8 +82,6 @@ exo-a2a = { workspace = true }
 exo-cli = { workspace = true }
 exo-server = { workspace = true }
 exo-train = { workspace = true }
-exo-web = { workspace = true }
-exo-harness = { workspace = true }
 exo-guardrail = { workspace = true }
 exo-retrieval = { workspace = true }
 exo-search = { workspace = true }
@@ -104,7 +98,7 @@ select = ["E", "F", "I", "N", "W", "UP", "B", "SIM", "RUF"]
 ignore = ["E501"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["exo", "exo_cli", "exo_mcp_cli", "exo_server", "exo_skills", "exo_web"]
+known-first-party = ["exo", "exo_cli", "exo_mcp_cli", "exo_server", "exo_skills"]
 
 [tool.pyright]
 pythonVersion = "3.11"

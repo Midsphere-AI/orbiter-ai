@@ -1,6 +1,6 @@
 ---
 name: exo:memory
-description: "Use when configuring Exo agent memory — AgentMemory, ShortTermMemory, LongTermMemory, memory backends (SQLiteMemoryStore, ChromaVectorMemoryStore), MemoryPersistence, conversation_id scoping, embeddings, memory search, summarization. Triggers on: agent memory, ShortTermMemory, LongTermMemory, memory store, SQLite memory, ChromaDB, vector memory, conversation_id, memory persistence, memory search, embeddings."
+description: "Use when configuring Exo agent memory — AgentMemory, ShortTermMemory, LongTermMemory, memory backends (SQLiteMemoryStore, VectorMemoryStore, ChromaVectorMemoryStore), MemoryPersistence, conversation_id scoping, embeddings (from exo.models), memory search, summarization. Triggers on: agent memory, ShortTermMemory, LongTermMemory, memory store, SQLite memory, ChromaDB, vector memory, conversation_id, memory persistence, memory search, embeddings."
 ---
 
 > **Branch:** These skills are written for the `rename/orbiter-to-exo` branch. The Exo APIs referenced here may differ on other branches.
@@ -20,12 +20,13 @@ Use this skill when the developer needs to:
 
 ## Decision Guide
 
-1. **Want default memory (auto)?** → Just create an `Agent(name="bot")` — auto-creates `AgentMemory(ShortTermMemory(), ChromaVectorMemoryStore())` if exo-memory is installed
+1. **Want default memory (auto)?** → Just create an `Agent(name="bot")` — auto-creates `AgentMemory(ShortTermMemory(), SQLiteMemoryStore())` if exo-memory is installed
 2. **Want no memory?** → `Agent(name="bot", memory=None)`
 3. **Want keyword search instead of vector?** → `Agent(memory=AgentMemory(short_term=ShortTermMemory(), long_term=SQLiteMemoryStore()))`
-4. **Want persistent vector search?** → `ChromaVectorMemoryStore(embedding_provider, path="/path/to/db")`
-5. **Need multi-conversation support?** → Use `conversation_id` parameter on `agent.run()`
-6. **Need custom scoping?** → Configure `ShortTermMemory(scope="session")` or `scope="user"`
+4. **Want in-process semantic search?** → `VectorMemoryStore(OpenAIEmbeddings(api_key=..., dimension=1536))`
+5. **Want persistent vector search?** → `ChromaVectorMemoryStore(OpenAIEmbeddingProvider(), path="/path/to/db")`
+6. **Need multi-conversation support?** → Use `conversation_id` parameter on `agent.run()`
+7. **Need custom scoping?** → Configure `ShortTermMemory(scope="session")` or `scope="user"`
 
 ## Reference
 
@@ -37,18 +38,25 @@ Composite memory bundling short-term and long-term stores:
 from exo.memory.base import AgentMemory
 from exo.memory.short_term import ShortTermMemory
 from exo.memory.backends.sqlite import SQLiteMemoryStore
-from exo.memory.backends.vector import ChromaVectorMemoryStore, OpenAIEmbeddingProvider
+from exo.memory.backends.vector import VectorMemoryStore, ChromaVectorMemoryStore, OpenAIEmbeddingProvider
+from exo.models import OpenAIEmbeddings
 
-# Default-like setup
-memory = AgentMemory(
-    short_term=ShortTermMemory(),                              # In-memory conversation
-    long_term=ChromaVectorMemoryStore(OpenAIEmbeddingProvider()),  # Persistent semantic search
-)
-
-# SQLite fallback (no embeddings needed)
+# Default setup (SQLite keyword search)
 memory = AgentMemory(
     short_term=ShortTermMemory(),
     long_term=SQLiteMemoryStore(db_path="~/.exo/memory.db"),
+)
+
+# Semantic search (in-process, no external DB)
+memory = AgentMemory(
+    short_term=ShortTermMemory(),
+    long_term=VectorMemoryStore(OpenAIEmbeddings(api_key="...", dimension=1536)),
+)
+
+# Persistent semantic search via ChromaDB
+memory = AgentMemory(
+    short_term=ShortTermMemory(),
+    long_term=ChromaVectorMemoryStore(OpenAIEmbeddingProvider()),  # requires chromadb
 )
 
 agent = Agent(name="bot", memory=memory)
@@ -58,13 +66,12 @@ agent = Agent(name="bot", memory=memory)
 
 When `memory` is not passed to Agent (or is `_MEMORY_UNSET`):
 
-1. Tries `ChromaVectorMemoryStore(OpenAIEmbeddingProvider())` — requires `chromadb` installed
-2. Falls back to `SQLiteMemoryStore()` with a warning if `chromadb` is missing
-3. Returns `None` if `exo-memory` is not installed at all
+1. Creates `AgentMemory(ShortTermMemory(), SQLiteMemoryStore())` — SQLite is the default long-term store
+2. Returns `None` if `exo-memory` is not installed at all
 
 ```python
 # These are equivalent:
-agent = Agent(name="bot")  # auto-creates memory
+agent = Agent(name="bot")  # auto-creates memory with SQLiteMemoryStore
 agent = Agent(name="bot", memory=None)  # explicitly disables
 ```
 
@@ -212,45 +219,52 @@ results = await store.search(query="What did we discuss about AI safety?", limit
 
 ### Backend: VectorMemoryStore (In-Memory)
 
-Lightweight in-memory vector store (no persistence):
+Lightweight in-memory vector store (no persistence) backed by the canonical
+:class:`exo.models.Embeddings` interface.  Uses ``httpx`` — no SDK required:
 
 ```python
-from exo.memory.backends.vector import VectorMemoryStore, OpenAIEmbeddings
+from exo.memory.backends.vector import VectorMemoryStore
+from exo.models import OpenAIEmbeddings, VertexEmbeddings
 
+# OpenAI
 embeddings = OpenAIEmbeddings(
+    api_key="sk-...",              # required
     model="text-embedding-3-small",
     dimension=1536,
-    api_key=None,
-    base_url=None,
 )
+store = VectorMemoryStore(embeddings)
 
-store = VectorMemoryStore(embeddings=embeddings)
+# Vertex AI
+embeddings = VertexEmbeddings(
+    api_key="<bearer-token>",      # required
+    project="my-gcp-project",
+    model="text-embedding-005",
+    dimension=768,
+    location="us-central1",
+)
+store = VectorMemoryStore(embeddings)
 ```
 
 ### Embedding Providers
 
-| Provider | Class | Default Model | Dimension |
-|----------|-------|---------------|-----------|
-| OpenAI | `OpenAIEmbeddingProvider` | `text-embedding-3-small` | 1536 |
-| OpenAI (full) | `OpenAIEmbeddings` | `text-embedding-3-small` | 1536 |
-| Vertex AI | `VertexEmbeddings` | `text-embedding-005` | 768 |
+Canonical embedding types come from ``exo.models``.  They are also
+re-exported from ``exo.memory.backends.vector`` for convenience.
+
+| Provider | Import | Default Model | Dimension |
+|----------|--------|---------------|-----------|
+| OpenAI (canonical) | `from exo.models import OpenAIEmbeddings` | `text-embedding-3-small` | 1536 |
+| Vertex AI (canonical) | `from exo.models import VertexEmbeddings` | `text-embedding-005` | 768 |
+| HTTP (generic) | `from exo.models import HTTPEmbeddings` | — | configurable |
+| OpenAI legacy protocol | `from exo.memory.backends.vector import OpenAIEmbeddingProvider` | `text-embedding-3-small` | — |
 
 ```python
-# OpenAI (simple — for ChromaVectorMemoryStore)
+# Canonical (for VectorMemoryStore) — uses httpx, no SDK dep
+from exo.models import OpenAIEmbeddings, VertexEmbeddings
+embeddings = OpenAIEmbeddings(api_key="sk-...")
+
+# Legacy protocol (for ChromaVectorMemoryStore) — uses openai SDK
 from exo.memory.backends.vector import OpenAIEmbeddingProvider
 provider = OpenAIEmbeddingProvider(model="text-embedding-3-small")
-
-# OpenAI (full — for VectorMemoryStore)
-from exo.memory.backends.vector import OpenAIEmbeddings
-embeddings = OpenAIEmbeddings(model="text-embedding-3-small", dimension=1536)
-
-# Vertex AI
-from exo.memory.backends.vector import VertexEmbeddings
-embeddings = VertexEmbeddings(
-    model="text-embedding-005",
-    project="my-gcp-project",
-    location="us-central1",
-)
 ```
 
 ### Conversation ID Scoping
@@ -387,8 +401,23 @@ agent = Agent(
 ```python
 from exo.memory.base import AgentMemory
 from exo.memory.short_term import ShortTermMemory
-from exo.memory.backends.vector import ChromaVectorMemoryStore, OpenAIEmbeddingProvider
+from exo.memory.backends.sqlite import SQLiteMemoryStore
+from exo.memory.backends.vector import VectorMemoryStore, ChromaVectorMemoryStore, OpenAIEmbeddingProvider
+from exo.models import OpenAIEmbeddings
 
+# Option A: SQLite (keyword search, persistent, no external deps)
+memory = AgentMemory(
+    short_term=ShortTermMemory(scope="session", max_rounds=50),
+    long_term=SQLiteMemoryStore(db_path="./data/memory.db"),
+)
+
+# Option B: In-process semantic search (no persistence)
+memory = AgentMemory(
+    short_term=ShortTermMemory(scope="session", max_rounds=50),
+    long_term=VectorMemoryStore(OpenAIEmbeddings(api_key="sk-...")),
+)
+
+# Option C: ChromaDB persistent semantic search (requires chromadb)
 memory = AgentMemory(
     short_term=ShortTermMemory(scope="session", max_rounds=50),
     long_term=ChromaVectorMemoryStore(

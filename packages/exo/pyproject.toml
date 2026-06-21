@@ -24,7 +24,17 @@ dependencies = [
     "exo-sandbox>=0.1.0",
     "exo-observability>=0.1.0",
     "exo-eval>=0.1.0",
+    "exo-retrieval>=0.1.0",
+]
+
+[project.optional-dependencies]
+a2a = ["exo-a2a>=0.1.0"]
+distributed = ["exo-distributed>=0.1.0"]
+search = ["exo-search>=0.1.0"]
+all = [
     "exo-a2a>=0.1.0",
+    "exo-distributed>=0.1.0",
+    "exo-search>=0.1.0",
 ]
 
 [project.urls]
@@ -41,7 +51,10 @@ exo-mcp = { workspace = true }
 exo-sandbox = { workspace = true }
 exo-observability = { workspace = true }
 exo-eval = { workspace = true }
+exo-retrieval = { workspace = true }
 exo-a2a = { workspace = true }
+exo-distributed = { workspace = true }
+exo-search = { workspace = true }
 
 [build-system]
 requires = ["hatchling"]

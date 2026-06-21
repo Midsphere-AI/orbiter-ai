@@ -4,7 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What is Exo
 
-Exo is a modular multi-agent framework for building LLM-powered applications in Python. It's a UV workspace monorepo with 21 packages. Requires Python 3.11+.
+Exo is a modular multi-agent framework for building LLM-powered applications in Python. It's a UV workspace monorepo with 19 packages. Requires Python 3.11+.
+
+A bare `Agent(...)` is batteries-included by default — memory, context management, checkpoints, message injections, and sub-agent orchestration are all on by default with no extra configuration required.
 
 ## Common Commands
 
@@ -37,24 +39,6 @@ uv run pyright packages/exo-core/
 uv run python -c "from exo import Agent, run, tool; print('OK')"
 ```
 
-### exo-web (dual Node+Python package)
-
-```bash
-cd packages/exo-web
-
-# Install frontend deps
-npm install
-
-# Dev server (runs Astro + FastAPI concurrently)
-npm run dev
-
-# Astro typecheck
-npx astro check
-
-# Run backend only
-uv run uvicorn exo_web.app:app --reload
-```
-
 ## Architecture
 
 UV workspace monorepo. Packages live in `packages/`. The dependency graph flows upward from `exo-core`:
@@ -62,14 +46,16 @@ UV workspace monorepo. Packages live in `packages/`. The dependency graph flows 
 ```
 exo-core (foundation, only depends on pydantic)
     ↑
-exo-models (OpenAI, Anthropic, Gemini, Vertex AI providers)
+exo-models (OpenAI, Anthropic, Gemini/Vertex AI providers; canonical embeddings/vector layer)
     ↑
 exo-context, exo-memory, exo-mcp, exo-sandbox, exo-observability, exo-guardrail
     ↑
-exo-retrieval, exo-search, exo-cli, exo-server, exo-eval, exo-a2a, exo-train, exo-web,
-exo-harness, exo-skills, exo-mcp-cli
+exo-retrieval, exo-search, exo-cli, exo-distributed, exo-eval, exo-a2a,
+exo-skills, exo-mcp-cli
     ↑
-exo (meta-package, re-exports everything)
+exo-server [experimental], exo-train [experimental]
+    ↑
+exo (meta-package, re-exports everyday framework; extras for distributed/a2a/search)
 ```
 
 There are no `orbiter-*` mirror packages present in `packages/` at this time. (They were planned as thin re-export wrappers for a public `orbiter` distribution but have not been created yet — do not assume they exist.)
@@ -77,14 +63,27 @@ There are no `orbiter-*` mirror packages present in `packages/` at this time. (T
 ### Key Packages
 
 - **exo-core** (`packages/exo-core/src/exo/`): `Agent`, `Tool`, `@tool` decorator, `run`/`run.sync`/`run.stream`, `Swarm`, hooks, events, config, registry. The `_internal/` subpackage has the agent runtime internals (see below).
-- **exo-models** (`packages/exo-models/`): LLM provider implementations. Provider SDKs are isolated here — core has zero heavy deps.
+- **exo-models** (`packages/exo-models/`): LLM provider implementations. Provider SDKs are isolated here — core has zero heavy deps. Includes `GoogleProvider` (unified Gemini + Vertex AI), and the canonical `exo.models.embeddings` / `exo.models.vector` layer for embeddings and vector store abstractions.
 - **exo-guardrail** (`packages/exo-guardrail/`): Security guardrails — pattern-based and LLM-based prompt injection/jailbreak detection with pluggable backends.
 - **exo-retrieval** (`packages/exo-retrieval/`): RAG pipeline — embeddings (OpenAI, Vertex, HTTP), vector stores (pgvector, ChromaDB), hybrid search, reranking, knowledge graph, agentic retrieval.
+- **exo-distributed** (`packages/exo-distributed/`): Production-ready distributed execution — Redis Streams task queue, `Worker`, `TaskBroker`, `TaskStore`, event streaming, health monitoring, cancellation, and optional Temporal workflow integration. Use `exo-ai[distributed]` to pull in.
 - **exo-search** (`packages/exo-search/`): AI search engine with query classification, parallel research agents, result reranking, citation generation, and 3 quality modes (speed/balanced/quality).
-- **exo-harness** (`packages/exo-harness/`): Composable orchestration harness — `Harness` ABC, `HarnessContext`, middleware (timeout, cost tracking), `SessionState` for multi-step agent workflows. Supports parallel sub-agents via `run_agents_parallel()`/`stream_agents_parallel()` with event multiplexing, per-agent log files (`/tmp/`), and `AssistantMessage` output injection.
 - **exo-skills** (`packages/exo-skills/`): Dynamic capability packages — `SkillRegistry`, skill markdown files with front-matter, hot-reload, GitHub skill sources.
 - **exo-mcp-cli** (`packages/exo-mcp-cli/`): Standalone CLI for MCP server interaction — `mcp.json` config, encrypted vault, credential management, server add/remove/test, tool list/call.
-- **exo-web** (`packages/exo-web/`): Full platform UI. Hybrid package — Astro 5.x frontend (`src/pages/`, `src/islands/`) + FastAPI backend (`src/exo_web/`). Has its own `package.json` AND `pyproject.toml`.
+- **exo-server** (`packages/exo-server/`): **Experimental.** Minimal FastAPI embed helper for serving Exo agents over HTTP. Not included in the meta-package.
+- **exo-train** (`packages/exo-train/`): **Experimental/pre-release.** Training framework — data synthesis, evolution, VeRL integration (heavy GPU deps behind `[verl]` optional extra). Not included in the meta-package.
+
+### Meta-package extras (`exo-ai`)
+
+Install the meta-package with extras for optional capabilities:
+
+```
+pip install exo-ai                  # core + models + memory + mcp + sandbox + observability + eval + retrieval
+pip install "exo-ai[distributed]"   # + exo-distributed (Redis task queue / workers)
+pip install "exo-ai[a2a]"           # + exo-a2a (agent-to-agent protocol, drops httpx for base users)
+pip install "exo-ai[search]"        # + exo-search (AI search engine)
+pip install "exo-ai[all]"           # everything above combined
+```
 
 ### exo-core `_internal/` — Agent Runtime Internals
 
@@ -98,32 +97,13 @@ The `_internal/` subpackage is the engine room. Understanding the call chain is 
 | `output_parser.py` | Parses LLM responses into tool calls and text output |
 | `state.py` | `RunNode`/`RunState` state machine — RUNNING/SUCCESS/FAILED/TIMEOUT transitions |
 | `planner.py` | Planning pre-pass (isolated context, plan injection) |
-| `agent_group.py` | `ParallelGroup`/`SerialGroup` execution for Swarm workflows |
+| `agent_group.py` | `ParallelGroup` execution for Swarm workflows |
 | `graph.py` | DAG algorithms for Swarm flow resolution |
 | `branch_node.py` / `loop_node.py` | Conditional routing and iteration nodes for workflow mode |
 | `nested.py` | `SwarmNode`/`RalphNode` — nested orchestration primitives |
 | `background.py` | Background task submission, result/error lifecycle |
-| `task_controller/` | Sub-package: event bus, intent recognizer, manager, scheduler, task loop queue |
 
 **Execution flow:** `run()` → `runner.py` → `call_runner()` → `message_builder.build_messages()` → LLM call → `output_parser` → `handlers` (tool dispatch) → loop back to LLM or return result.
-
-### exo-web Backend Structure
-
-- `app.py` — FastAPI app entry point, middleware, route registration
-- `config.py` — Settings dataclass (env vars: `EXO_DATABASE_URL`, `EXO_SECRET_KEY`, `EXO_DEBUG`)
-- `database.py` — `get_db()` async context manager, WAL mode, foreign keys
-- `engine.py` — Workflow execution engine (topological sort, node execution, retry)
-- `migrations/` — Sequential SQL files, run automatically on startup via lifespan
-- `routes/` — 50+ APIRouter modules, all under `/api/v1/` prefix
-- `services/` — Business logic layer (agent runtime, sandbox, scheduler, memory)
-- `middleware/` — CSRF, rate limiting, security headers, API version redirect
-
-### exo-web Frontend Structure
-
-- Astro 5.x pages in `src/pages/`, layouts in `src/layouts/`
-- React islands in `src/islands/` (e.g., ReactFlow canvas)
-- Tailwind CSS v4 via `@tailwindcss/vite`
-- `cn()` utility at `src/utils/merge.ts` for class merging
 
 ## Code Conventions
 
@@ -135,7 +115,6 @@ The `_internal/` subpackage is the engine room. Understanding the call chain is 
 - **Tests use MockProvider** — never make real API calls. Integration tests live in `tests/integration/` (marked with `@pytest.mark.integration` or `@pytest.mark.marathon`).
 - **Model strings**: format `"provider:model"` (e.g., `"openai:gpt-4o-mini"`).
 - **FastAPI Depends()**: use `# noqa: B008` for ruff on function defaults.
-- **CSRF**: auto-injected via fetch monkey-patch in PageLayout — no manual header needed in frontend.
 - **API routes**: define static paths (`/search`) before param routes (`/{id}`) to prevent FastAPI mismatching.
 
 ### Logging conventions (two patterns, do NOT mix)
@@ -154,26 +133,12 @@ The `_internal/` subpackage is the engine room. Understanding the call chain is 
 - Root config: `pyproject.toml` (workspace definition, ruff, pyright, pytest config)
 - Public API exports: `packages/exo-core/src/exo/__init__.py`
 - Provider resolution: `packages/exo-models/`
-- Web app entry: `packages/exo-web/src/exo_web/app.py`
-- DB migrations: `packages/exo-web/src/exo_web/migrations/`
-- Handle types (keep in sync): `packages/exo-web/src/islands/Canvas/handleTypes.ts` ↔ `routes/tools.py` (`_NODE_HANDLE_MAP`)
 
 ---
 
 ## Audit & Ongoing Work
 
 An 83-finding audit report lives at `audit.md`. It covers Bugs & Security, Logical Issues, Non-Completeness, Inconsistencies, and Duplications across all packages.
-
-### Audit Fix Priority (exo-web)
-
-| ID | File | Issue |
-|---|---|---|
-| **B-1** | `services/sandbox.py:87-88` | Sandbox escape: `_build_runner_script` uses `.replace()` for escaping — misses `\r`, `\t`, `\0`, Unicode. Fix: use `repr()` or `json.dumps()`. |
-| **B-2** | `config.py:14` | Hardcoded default secret key with no production guard. Fix: startup assertion in lifespan. |
-| **B-4** | `routes/webhooks.py:146-236` | Webhook trigger has no auth — `url_token` stored but never validated. Fix: compare against DB. |
-| **B-8** | — | Token leaked in logs. |
-| **L-2** | — | `stream_agent` bypasses tool loop. |
-| **B-15** | — | Async callable instructions never awaited. |
 
 ### Approach: Parallel Sub-agents
 
