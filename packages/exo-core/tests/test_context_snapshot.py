@@ -9,23 +9,17 @@ from __future__ import annotations
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
-import pytest
-
 from exo.agent import Agent
-from exo.hooks import HookPoint
 from exo.memory.base import HumanMemory, MemoryMetadata
 from exo.memory.persistence import MemoryPersistence
 from exo.memory.short_term import ShortTermMemory
-from exo.memory.snapshot import SnapshotMemory, deserialize_msg_list, snapshot_id
+from exo.memory.snapshot import SnapshotMemory, deserialize_msg_list
 from exo.models.types import ModelResponse  # pyright: ignore[reportMissingImports]
 from exo.types import (
     AssistantMessage,
-    ToolCall,
-    ToolResult,
     Usage,
     UserMessage,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers

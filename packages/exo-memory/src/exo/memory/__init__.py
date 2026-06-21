@@ -6,6 +6,10 @@ __path__ = extend_path(__path__, __name__)
 
 __version__: str = "0.1.0"
 
+# SQLiteMemoryStore: eager import — aiosqlite is a hard dependency.
+from exo.memory.backends.sqlite import (  # pyright: ignore[reportMissingImports]
+    SQLiteMemoryStore,
+)
 from exo.memory.backends.vector import (  # pyright: ignore[reportMissingImports]
     Embeddings,
     OpenAIEmbeddings,
@@ -88,6 +92,27 @@ from exo.memory.summary import (  # pyright: ignore[reportMissingImports]
     generate_summary,
 )
 
+# ChromaVectorMemoryStore (needs chromadb) and PostgresMemoryStore (needs asyncpg)
+# are NOT imported eagerly to avoid breaking environments where those packages
+# are absent.  Access them via this lazy __getattr__, or import directly:
+#   from exo.memory.backends.vector import ChromaVectorMemoryStore
+#   from exo.memory.backends.postgres import PostgresMemoryStore
+_LAZY_BACKENDS: dict[str, tuple[str, str]] = {
+    "ChromaVectorMemoryStore": ("exo.memory.backends.vector", "ChromaVectorMemoryStore"),
+    "PostgresMemoryStore": ("exo.memory.backends.postgres", "PostgresMemoryStore"),
+}
+
+
+def __getattr__(name: str) -> object:
+    if name in _LAZY_BACKENDS:
+        module_path, attr = _LAZY_BACKENDS[name]
+        import importlib
+
+        module = importlib.import_module(module_path)
+        return getattr(module, attr)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
 __all__: list[str] = [
     "MEMORY_ADDED",
     "MEMORY_CLEARED",
@@ -95,6 +120,7 @@ __all__: list[str] = [
     "ACEStrategy",
     "AIMemory",
     "AgentMemory",
+    "ChromaVectorMemoryStore",
     "Embeddings",
     "EncryptedMemoryStore",
     "ExoMemoryError",
@@ -119,8 +145,10 @@ __all__: list[str] = [
     "MigrationRegistry",
     "OpenAIEmbeddings",
     "OrchestratorConfig",
+    "PostgresMemoryStore",
     "ReMeStrategy",
     "ReasoningBankStrategy",
+    "SQLiteMemoryStore",
     "SearchManager",
     "ShortTermMemory",
     "SnapshotMemory",

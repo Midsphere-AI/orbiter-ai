@@ -46,9 +46,9 @@ class TestAgentCreation:
         """Agent with only a name uses sensible defaults."""
         agent = Agent(name="bot")
         assert agent.name == "bot"
-        assert agent.model == "openai:gpt-4o"
+        assert agent.model == "openai:gpt-4o-mini"
         assert agent.provider_name == "openai"
-        assert agent.model_name == "gpt-4o"
+        assert agent.model_name == "gpt-4o-mini"
         assert agent.instructions == ""
         # retrieve_artifact is always auto-registered (needed for threshold-based offloading)
         assert "retrieve_artifact" in agent.tools
@@ -443,7 +443,7 @@ class TestDescribeAndRepr:
         agent = Agent(name="bot")
         desc = agent.describe()
         assert desc["name"] == "bot"
-        assert desc["model"] == "openai:gpt-4o"
+        assert desc["model"] == "openai:gpt-4o-mini"
         # retrieve_artifact is always auto-registered
         assert "retrieve_artifact" in desc["tools"]
         assert desc["handoffs"] == []
@@ -467,7 +467,7 @@ class TestDescribeAndRepr:
         r = repr(agent)
         assert "Agent(" in r
         assert "name='bot'" in r
-        assert "model='openai:gpt-4o'" in r
+        assert "model='openai:gpt-4o-mini'" in r
 
     def test_repr_with_tools(self) -> None:
         agent = Agent(name="bot", tools=[greet])

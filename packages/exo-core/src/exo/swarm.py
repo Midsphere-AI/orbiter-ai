@@ -93,9 +93,16 @@ class Swarm:
                 raise SwarmError(f"Invalid flow DSL: {exc}") from exc
 
             # Validate all flow nodes are known agents
+            available = list(self.agents.keys())
             for node_name in graph.nodes:
                 if node_name not in self.agents:
-                    raise SwarmError(f"Flow references unknown agent '{node_name}'")
+                    hint = ""
+                    if "->" in node_name or "," in node_name:
+                        hint = " (did you mean to use '>>' instead of '->'?)"
+                    raise SwarmError(
+                        f"Flow references unknown agent '{node_name}'{hint}. "
+                        f"Available agents: {available}"
+                    )
 
             try:
                 self.flow_order = topological_sort(graph)

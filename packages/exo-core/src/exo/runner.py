@@ -19,7 +19,12 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import AsyncIterator, Sequence
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from exo.agent import Agent  # pyright: ignore[reportMissingImports]
+    from exo.models.provider import ModelProvider  # pyright: ignore[reportMissingImports]
+    from exo.swarm import Swarm  # pyright: ignore[reportMissingImports]
 
 from exo._internal.call_runner import call_runner
 from exo._internal.message_builder import build_messages
@@ -69,12 +74,87 @@ from exo.types import (
 _log = get_logger(__name__)
 
 
-async def run(
-    agent: Any,
+# ---------------------------------------------------------------------------
+# Typed Protocol so IDEs can discover run.sync / run.stream
+# ---------------------------------------------------------------------------
+
+
+class _RunCallable:
+    """Public ``run`` entry point: ``run(...)``, ``run.sync(...)``, ``run.stream(...)``.
+
+    Implemented as a callable instance (rather than a function with bolted-on
+    attributes) so ``.sync`` and ``.stream`` are real, fully-typed methods —
+    IDE auto-complete works and no ``# type: ignore`` is needed.
+    """
+
+    async def __call__(
+        self,
+        agent: Agent | Swarm,
+        input: MessageContent,
+        *,
+        messages: Sequence[Message] | None = None,
+        provider: ModelProvider | None = None,
+        max_retries: int = 3,
+        loop_threshold: int = 3,
+    ) -> RunResult:
+        return await _run_async(
+            agent,
+            input,
+            messages=messages,
+            provider=provider,
+            max_retries=max_retries,
+            loop_threshold=loop_threshold,
+        )
+
+    def sync(
+        self,
+        agent: Agent | Swarm,
+        input: MessageContent,
+        *,
+        messages: Sequence[Message] | None = None,
+        provider: ModelProvider | None = None,
+        max_retries: int = 3,
+        loop_threshold: int = 3,
+    ) -> RunResult:
+        return _sync(
+            agent,
+            input,
+            messages=messages,
+            provider=provider,
+            max_retries=max_retries,
+            loop_threshold=loop_threshold,
+        )
+
+    def stream(
+        self,
+        agent: Agent | Swarm,
+        input: MessageContent,
+        *,
+        messages: Sequence[Message] | None = None,
+        provider: ModelProvider | None = None,
+        max_steps: int | None = None,
+        detailed: bool = False,
+        event_types: set[str] | None = None,
+        conversation_id: str | None = None,
+    ) -> AsyncIterator[StreamEvent]:
+        return _stream(
+            agent,
+            input,
+            messages=messages,
+            provider=provider,
+            max_steps=max_steps,
+            detailed=detailed,
+            event_types=event_types,
+            conversation_id=conversation_id,
+        )
+
+
+async def _run_async(
+    agent: Agent | Swarm,
     input: MessageContent,
     *,
     messages: Sequence[Message] | None = None,
-    provider: Any = None,
+    provider: ModelProvider | None = None,
     max_retries: int = 3,
     loop_threshold: int = 3,
 ) -> RunResult:
@@ -127,11 +207,11 @@ async def run(
 
 
 def _sync(
-    agent: Any,
+    agent: Agent | Swarm,
     input: MessageContent,
     *,
     messages: Sequence[Message] | None = None,
-    provider: Any = None,
+    provider: ModelProvider | None = None,
     max_retries: int = 3,
     loop_threshold: int = 3,
 ) -> RunResult:
@@ -154,7 +234,7 @@ def _sync(
         usage stats, and step count.
     """
     return asyncio.run(
-        run(
+        _run_async(
             agent,
             input,
             messages=messages,
@@ -166,11 +246,11 @@ def _sync(
 
 
 async def _stream(
-    agent: Any,
+    agent: Agent | Swarm,
     input: MessageContent,
     *,
     messages: Sequence[Message] | None = None,
-    provider: Any = None,
+    provider: ModelProvider | None = None,
     max_steps: int | None = None,
     detailed: bool = False,
     event_types: set[str] | None = None,
@@ -301,7 +381,13 @@ async def _stream(
         # ---- Snapshot load ----
         _agent_ctx = getattr(agent, "context", None)
         _snap_cfg = getattr(_agent_ctx, "config", _agent_ctx) if _agent_ctx else None
-        if _snap_cfg is not None and getattr(_snap_cfg, "_enable_snapshots", getattr(_snap_cfg, "enable_snapshots", False)) and not messages:
+        if (
+            _snap_cfg is not None
+            and getattr(
+                _snap_cfg, "_enable_snapshots", getattr(_snap_cfg, "enable_snapshots", False)
+            )
+            and not messages
+        ):
             try:
                 _snap = await _persistence.load_snapshot(
                     agent_name=agent.name,
@@ -499,7 +585,9 @@ async def _stream(
             tc_acc: dict[int, dict[str, Any]] = {}
             step_usage = Usage()
 
-            await agent.hook_manager.run(HookPoint.PRE_LLM_CALL, agent=agent, messages=_call_messages)
+            await agent.hook_manager.run(
+                HookPoint.PRE_LLM_CALL, agent=agent, messages=_call_messages
+            )
 
             async for chunk in resolved.stream(
                 _call_messages,
@@ -656,9 +744,7 @@ async def _stream(
             try:
                 actions = parse_tool_arguments(tool_calls)
             except OutputParseError as exc:
-                _log.warning(
-                    "Failed to parse tool arguments on '%s': %s", agent.name, exc
-                )
+                _log.warning("Failed to parse tool arguments on '%s': %s", agent.name, exc)
                 actions = []
                 tool_results = [
                     ToolResult(
@@ -895,33 +981,52 @@ async def _save_stream_snapshot(
         _log.warning("stream snapshot save failed", exc_info=True)
 
 
-def _resolve_provider(agent: Any) -> Any:
+def _resolve_provider(agent: Agent | Swarm) -> ModelProvider | None:
     """Attempt to auto-resolve a provider from the agent's model config.
 
     Tries the model registry from ``exo.models`` if available.
     For Swarms (which lack a ``.model`` attribute), resolves from the
     first agent in the flow order.
 
-    Returns ``None`` if auto-resolution fails (call_runner will then
-    let Agent.run() raise its own error for missing provider).
+    Returns ``None`` when the agent has no resolvable model (e.g. a
+    bare Swarm without per-agent models).  Raises ``AgentError`` when
+    a provider name is present but the provider is not registered.
     """
     try:
         from exo.models.provider import get_provider  # pyright: ignore[reportMissingImports]
+    except ImportError:
+        # exo-models not installed — cannot auto-resolve
+        return None
 
-        model = getattr(agent, "model", None)
-        if model is None and hasattr(agent, "agents"):
-            # Swarm: resolve from the first agent's model
-            first = (
-                next(iter(agent.agents.values()), None)
-                if isinstance(agent.agents, dict)
-                else (agent.agents[0] if agent.agents else None)
-            )
-            if first is not None:
-                model = first.model
-        if model is None:
-            return None
+    model = getattr(agent, "model", None)
+    if model is None and hasattr(agent, "agents"):
+        # Swarm: resolve from the first agent's model
+        first = (
+            next(iter(agent.agents.values()), None)
+            if isinstance(agent.agents, dict)
+            else (agent.agents[0] if agent.agents else None)
+        )
+        if first is not None:
+            model = first.model
+
+    if model is None:
+        # No model configured — legitimate "return None" path
+        return None
+
+    try:
         return get_provider(model)
     except Exception as exc:
+        # Distinguish "provider name unknown" (registry lookup failure, raises ModelError
+        # with 'not registered' text) from "provider initialisation failed" (e.g. missing
+        # API key — an OpenAIError raised inside cls(config)).  Only the former should be
+        # surfaced immediately; the latter is a credential issue that the caller's error
+        # path will handle after provider=None is returned.
+        exc_type_name = type(exc).__name__
+        if exc_type_name == "ModelError" or "not registered" in str(exc):
+            from exo.agent import AgentError  # pyright: ignore[reportMissingImports]
+
+            raise AgentError(str(exc)) from exc
+
         _log.warning(
             "Failed to auto-resolve provider for model '%s': %s",
             getattr(agent, "model", "?"),
@@ -930,6 +1035,8 @@ def _resolve_provider(agent: Any) -> Any:
         return None
 
 
-# Attach sync and stream as attributes of the run function
-run.sync = _sync  # type: ignore[attr-defined]
-run.stream = _stream  # type: ignore[attr-defined]
+# The public entry point: a single callable instance exposing run(...),
+# run.sync(...) and run.stream(...) as real, typed methods.
+run: _RunCallable = _RunCallable()
+
+__all__ = ["run"]

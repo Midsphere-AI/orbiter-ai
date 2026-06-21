@@ -109,7 +109,7 @@ class TestAgentConfig:
     def test_defaults(self) -> None:
         ac = AgentConfig(name="test")
         assert ac.name == "test"
-        assert ac.model == "openai:gpt-4o"
+        assert ac.model == "openai:gpt-4o-mini"
         assert ac.instructions == ""
         assert ac.temperature == 1.0
         assert ac.max_tokens is None

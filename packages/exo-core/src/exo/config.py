@@ -14,11 +14,18 @@ def parse_model_string(model: str) -> tuple[str, str]:
     defaults the provider to ``"openai"``.
 
     Args:
-        model: Model string, e.g. ``"openai:gpt-4o"`` or ``"gpt-4o"``.
+        model: Model string, e.g. ``"openai:gpt-4o-mini"`` or ``"gpt-4o-mini"``.
 
     Returns:
         A ``(provider, model_name)`` tuple.
+
+    Raises:
+        ValueError: If *model* is not a string.
     """
+    if not isinstance(model, str):
+        raise ValueError(
+            f"model must be a string like 'openai:gpt-4o-mini', got {type(model).__name__!r}"
+        )
     if ":" in model:
         provider, _, model_name = model.partition(":")
         return provider, model_name
@@ -193,7 +200,7 @@ class AgentConfig(BaseModel):
     model_config = {"frozen": True}
 
     name: str
-    model: str = "openai:gpt-4o"
+    model: str = "openai:gpt-4o-mini"
     instructions: str = ""
     temperature: float = Field(default=1.0, ge=0.0, le=2.0)
     max_tokens: int | None = None

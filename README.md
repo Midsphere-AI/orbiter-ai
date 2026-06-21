@@ -40,30 +40,26 @@ Requires Python 3.11+.
 
 ## Quick start
 
-```python
-import asyncio
-from exo import Agent, run, tool
-
-@tool
-def get_weather(city: str) -> str:
-    """Return the current weather for a city."""
-    return f"Sunny, 24 °C in {city}."
-
-agent = Agent(
-    name="assistant",
-    model="openai:gpt-4o-mini",
-    tools=[get_weather],
-    instructions="You are a helpful travel assistant.",
-)
-
-async def main():
-    result = await run(agent, "What's the weather like in Tokyo?")
-    print(result.output)
-
-asyncio.run(main())
+```bash
+export OPENAI_API_KEY=sk-...
 ```
 
-`run.sync()` is available for synchronous contexts; `run.stream()` yields events as they arrive.
+```python
+from exo import Agent, run
+
+agent = Agent(name="bot", model="openai:gpt-4o-mini")
+print(run.sync(agent, "Hello!").output)
+```
+
+```python
+# Async:
+result = await run(agent, "Hello!")
+print(result.output)
+
+# Streaming:
+async for event in run.stream(agent, "Hello!"):
+    ...
+```
 
 ---
 

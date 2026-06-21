@@ -7,7 +7,13 @@ import importlib
 import json
 import uuid
 from collections.abc import Callable, Sequence
-from typing import Any
+from typing import TYPE_CHECKING, Any, Literal
+
+if TYPE_CHECKING:
+    from exo.context.config import ContextConfig  # pyright: ignore[reportMissingImports]
+    from exo.context.context import Context  # pyright: ignore[reportMissingImports]
+    from exo.mcp.client import MCPServerConfig  # pyright: ignore[reportMissingImports]
+    from exo.memory.base import AgentMemory, MemoryStore  # pyright: ignore[reportMissingImports]
 
 from pydantic import BaseModel
 
@@ -130,7 +136,6 @@ def _drain_task_loop_queue(queue: TaskLoopQueue, messages: list) -> None:  # typ
             messages.append(UserMessage(content=f"[STEER] {evt.content}"))
         elif evt.type == TaskLoopEventType.FOLLOWUP:
             messages.append(UserMessage(content=f"[FOLLOWUP] {evt.content}"))
-
 
 
 def _make_default_long_term(db_path: str | None = None) -> Any:
@@ -392,8 +397,12 @@ async def _apply_context_windowing(
     _cfg = getattr(context, "config", context)
     overflow_strategy: str = getattr(_cfg, "overflow", "summarize")
     history_rounds: int = getattr(_cfg, "_history_rounds", getattr(_cfg, "history_rounds", 20))
-    summary_threshold: int = getattr(_cfg, "_summary_threshold", getattr(_cfg, "summary_threshold", 10))
-    offload_threshold: int = getattr(_cfg, "_offload_threshold", getattr(_cfg, "offload_threshold", 50))
+    summary_threshold: int = getattr(
+        _cfg, "_summary_threshold", getattr(_cfg, "summary_threshold", 10)
+    )
+    offload_threshold: int = getattr(
+        _cfg, "_offload_threshold", getattr(_cfg, "offload_threshold", 50)
+    )
     keep_recent_cfg: int = getattr(_cfg, "keep_recent", 5)
 
     actions: list[_ContextAction] = []
@@ -713,7 +722,7 @@ class Agent:
         self,
         *,
         name: str,
-        model: str = "openai:gpt-4o",
+        model: str = "openai:gpt-4o-mini",
         instructions: str | Callable[..., Any] = "",
         tools: list[Tool] | None = None,
         handoffs: list[Agent] | None = None,
@@ -734,10 +743,10 @@ class Agent:
         injected_tool_args: dict[str, str] | None = None,
         allow_parallel_subagents: bool = False,
         max_parallel_subagents: int = 3,
-        store: Any = _MEMORY_UNSET,
-        memory: Any = _MEMORY_UNSET,
-        context_mode: Any = _CONTEXT_UNSET,
-        context: Any = _CONTEXT_UNSET,
+        store: MemoryStore | str | bool | None = _MEMORY_UNSET,
+        memory: AgentMemory | MemoryStore | None = _MEMORY_UNSET,
+        context_mode: Literal["pilot", "copilot", "navigator"] | None = _CONTEXT_UNSET,
+        context: Context | ContextConfig | None = _CONTEXT_UNSET,
         context_limit: int | None = None,
         overflow: str | None = None,
         cache: bool | None = None,
@@ -854,7 +863,7 @@ class Agent:
         else:
             self._memory_is_auto = False
         # -----------------------------------------------------------------------
-        self.memory: Any = memory
+        self.memory: AgentMemory | None = memory
         self.conversation_id: str | None = None
         # Resolve context: new shorthand params → context_mode → context → default.
         _has_new_ctx = any(x is not None for x in (context_limit, overflow, cache))
@@ -878,7 +887,7 @@ class Agent:
                     Context as _CtxClass,
                 )
             except ImportError:
-                self.context = None
+                self.context: Context | None = None
                 self._context_is_auto: bool = True
             else:
                 _kw: dict[str, Any] = {}
@@ -906,6 +915,23 @@ class Agent:
         # Tools indexed by name for O(1) lookup during execution
         self.tools: dict[str, Tool] = {}
         self._cached_tool_schemas: list[dict[str, Any]] | None = None
+        if tools is not None:
+            if not isinstance(tools, list):
+                raise AgentError(
+                    f"'tools' must be a list of Tool objects, e.g. tools=[my_tool]; "
+                    f"got {type(tools).__name__!r}"
+                )
+            for i, t in enumerate(tools):
+                if isinstance(t, (str, int, bytes)):
+                    raise AgentError(
+                        f"'tools[{i}]' is a {type(t).__name__!r}, not a Tool. "
+                        f"Decorate your function with @tool to make it a Tool."
+                    )
+                if not hasattr(t, "name") and not hasattr(t, "execute"):
+                    raise AgentError(
+                        f"'tools[{i}]' ({t!r}) is not a Tool. "
+                        f"Decorate your function with @tool to make it a Tool."
+                    )
         if tools:
             for t in tools:
                 self._register_tool(t)
@@ -917,10 +943,7 @@ class Agent:
         if not self.bare_tools:
             # Register retrieve_artifact when the context mode supports
             # workspace offloading (disabled for context=None / overflow=hook).
-            if (
-                self._should_enable_artifact_offloading()
-                and "retrieve_artifact" not in self.tools
-            ):
+            if self._should_enable_artifact_offloading() and "retrieve_artifact" not in self.tools:
                 self._register_retrieve_artifact()
 
             # Auto-load context tools (planning, knowledge, file) when context is available
@@ -1668,7 +1691,7 @@ class Agent:
         async with self._tools_lock:
             self._register_handoff(target)
 
-    async def add_mcp_server(self, config: Any) -> None:
+    async def add_mcp_server(self, config: MCPServerConfig) -> None:
         """Connect an MCP server and append its tools to this agent at runtime.
 
         Requires the ``exo-mcp`` package.  Creates a new
@@ -1903,7 +1926,9 @@ class Agent:
             _ctx_cfg = getattr(self.context, "config", self.context) if self.context else None
             if (
                 _ctx_cfg is not None
-                and getattr(_ctx_cfg, "_enable_snapshots", getattr(_ctx_cfg, "enable_snapshots", False))
+                and getattr(
+                    _ctx_cfg, "_enable_snapshots", getattr(_ctx_cfg, "enable_snapshots", False)
+                )
                 and not messages  # external messages invalidate snapshot
             ):
                 try:
@@ -2266,6 +2291,17 @@ class Agent:
                     _log.error("Context length exceeded on '%s'", self.name)
                     raise AgentError(
                         f"Context length exceeded on agent '{self.name}': {exc}"
+                    ) from exc
+
+                # Auth errors (HTTP 401 / AuthenticationError) are non-retryable —
+                # retrying will never fix a bad API key. Surface immediately.
+                _status = getattr(exc, "status_code", None) or getattr(
+                    getattr(exc, "response", None), "status_code", None
+                )
+                if _status == 401 or "Authentication" in type(exc).__name__:
+                    raise AgentError(
+                        f"Authentication failed for agent '{self.name}': {exc}\n"
+                        "Check your API key / environment variable."
                     ) from exc
 
                 last_error = exc
