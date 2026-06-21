@@ -1,4 +1,4 @@
-"""Tests for exo.observability.alerts — alerting hooks system."""
+"""Tests for exo.distributed._alerts — alerting hooks system."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from exo.observability.alerts import (  # pyright: ignore[reportMissingImports]
+from exo.distributed._alerts import (  # pyright: ignore[reportMissingImports]
     Alert,
     AlertManager,
     AlertRule,

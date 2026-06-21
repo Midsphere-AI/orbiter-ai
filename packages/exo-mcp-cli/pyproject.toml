@@ -17,10 +17,10 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 dependencies = [
+    "exo-mcp",
     "mcp>=1.0",
     "typer>=0.12",
     "rich>=13.0",
-    "cryptography>=42.0",
 ]
 
 [project.scripts]
@@ -31,6 +31,9 @@ Homepage = "https://github.com/midsphere-ai/exo"
 Documentation = "https://midsphere-ai.github.io/exo/"
 Repository = "https://github.com/midsphere-ai/exo"
 Issues = "https://github.com/midsphere-ai/exo/issues"
+
+[tool.uv.sources]
+exo-mcp = { workspace = true }
 
 [build-system]
 requires = ["hatchling"]

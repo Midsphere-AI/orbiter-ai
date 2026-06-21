@@ -24,8 +24,9 @@ class BaseGuardrail:
     """A guardrail that registers itself as hooks on an Agent's HookManager.
 
     Args:
-        backend: Optional detection backend. When ``None``, :meth:`detect`
-            always returns :meth:`GuardrailResult.safe`.
+        backend: Detection backend.  Must not be ``None`` — passing ``None``
+            raises ``ValueError`` at construction time to prevent silent
+            no-op guardrails from giving false assurance.
         events: Hook point names (e.g. ``["pre_llm_call"]``) to monitor.
             Only these events will have hooks registered.
 
@@ -43,6 +44,12 @@ class BaseGuardrail:
         backend: GuardrailBackend | None = None,
         events: list[str] | None = None,
     ) -> None:
+        if backend is None:
+            raise ValueError(
+                "BaseGuardrail requires a backend. "
+                "Passing backend=None creates a silent no-op guardrail that gives false "
+                "assurance of protection. Supply a GuardrailBackend instance instead."
+            )
         self.backend = backend
         self.events = events or []
         # Track hooks per agent so detach can remove exactly the right ones.
@@ -113,8 +120,6 @@ class BaseGuardrail:
     async def detect(self, event: str, **data: Any) -> GuardrailResult:
         """Run the backend analysis and return a guardrail result.
 
-        If no backend is set, returns :meth:`GuardrailResult.safe`.
-
         Args:
             event: The hook point name that triggered detection.
             **data: Keyword arguments from the hook invocation.
@@ -122,9 +127,6 @@ class BaseGuardrail:
         Returns:
             A :class:`GuardrailResult` indicating whether the data is safe.
         """
-        if self.backend is None:
-            return GuardrailResult.safe()
-
         assessment = await self.backend.analyze({"event": event, **data})
 
         if not assessment.has_risk:

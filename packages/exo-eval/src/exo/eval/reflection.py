@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-import json
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
+
+from exo.eval.llm_scorer import extract_json  # pyright: ignore[reportMissingImports]
 
 # ---------------------------------------------------------------------------
 # Enums
@@ -205,19 +206,12 @@ class GeneralReflector(Reflector):
 
     @staticmethod
     def _parse_response(text: str) -> dict[str, Any]:
-        """Extract JSON from the LLM response with fallback."""
-        start = text.find("{")
-        while start != -1:
-            depth = 0
-            for i in range(start, len(text)):
-                if text[i] == "{":
-                    depth += 1
-                elif text[i] == "}":
-                    depth -= 1
-                    if depth == 0:
-                        try:
-                            return json.loads(text[start : i + 1])  # type: ignore[no-any-return]
-                        except (json.JSONDecodeError, ValueError):
-                            break
-            start = text.find("{", start + 1)
+        """Extract JSON from the LLM response with fallback.
+
+        Delegates to :func:`exo.eval.llm_scorer.extract_json` — the canonical
+        brace-depth JSON extractor shared across this package.
+        """
+        data = extract_json(text)
+        if data:
+            return data
         return {"summary": text[:200] if text else "", "parse_error": True}

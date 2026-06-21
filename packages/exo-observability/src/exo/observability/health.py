@@ -6,11 +6,9 @@ aggregate, producing a JSON-serializable health summary.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import resource
 import threading
-import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -92,55 +90,6 @@ class MemoryUsageCheck:
         return HealthResult(
             status=HealthStatus.HEALTHY,
             message=f"RSS {rss_mb:.1f}MB within threshold {self._threshold_mb:.1f}MB",
-            metadata=metadata,
-        )
-
-
-class EventLoopCheck:
-    """Check asyncio event loop lag against a threshold (in seconds)."""
-
-    def __init__(self, threshold_seconds: float = 0.1) -> None:
-        self._threshold_seconds = threshold_seconds
-
-    @property
-    def name(self) -> str:
-        return "event_loop"
-
-    def check(self) -> HealthResult:
-        metadata: dict[str, Any] = {"threshold_seconds": self._threshold_seconds}
-
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            return HealthResult(
-                status=HealthStatus.HEALTHY,
-                message="No running event loop",
-                metadata=metadata,
-            )
-
-        # Measure scheduling lag
-        start = time.monotonic()
-        # We can't await in a sync check, so we measure how long get_running_loop took
-        # as a proxy. For real lag measurement, use the async variant.
-        lag = time.monotonic() - start
-        metadata["lag_seconds"] = round(lag, 6)
-        metadata["loop_running"] = loop.is_running()
-
-        if lag >= self._threshold_seconds:
-            return HealthResult(
-                status=HealthStatus.UNHEALTHY,
-                message=f"Event loop lag {lag:.4f}s exceeds threshold {self._threshold_seconds:.4f}s",
-                metadata=metadata,
-            )
-        if lag >= self._threshold_seconds * 0.8:
-            return HealthResult(
-                status=HealthStatus.DEGRADED,
-                message=f"Event loop lag {lag:.4f}s approaching threshold {self._threshold_seconds:.4f}s",
-                metadata=metadata,
-            )
-        return HealthResult(
-            status=HealthStatus.HEALTHY,
-            message=f"Event loop lag {lag:.4f}s within threshold {self._threshold_seconds:.4f}s",
             metadata=metadata,
         )
 

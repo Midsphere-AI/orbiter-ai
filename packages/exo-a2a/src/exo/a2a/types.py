@@ -13,11 +13,13 @@ from pydantic import BaseModel, Field, model_validator
 
 
 class TransportMode(StrEnum):
-    """Supported A2A transport protocols."""
+    """Supported A2A transport protocols.
+
+    Only ``JSONRPC`` is implemented; the enum exists to allow future transports
+    to be added without a breaking API change.
+    """
 
     JSONRPC = "jsonrpc"
-    GRPC = "grpc"
-    WEBSOCKET = "websocket"
 
 
 class TaskState(StrEnum):
@@ -59,7 +61,6 @@ class AgentCapabilities(BaseModel):
     model_config = {"frozen": True}
 
     streaming: bool = Field(default=False, description="Supports streaming responses")
-    push_notifications: bool = Field(default=False, description="Supports push notifications")
     state_transition_history: bool = Field(default=False, description="Tracks state transitions")
 
 
@@ -109,12 +110,21 @@ class AgentCard(BaseModel):
 
 
 class ServingConfig(BaseModel):
-    """Server-side configuration for publishing an agent via A2A."""
+    """Server-side configuration for publishing an agent via A2A.
+
+    .. warning:: Ephemeral ports (``port=0``)
+
+        When ``port=0`` the OS chooses a port at bind time, but the agent card
+        URL is built *before* binding using ``http://{host}:{port}/``, which
+        yields ``http://localhost:0/``.  Pass an explicit, non-zero ``port``
+        (or override ``AgentCard.url`` after binding) so that remote callers
+        receive a reachable advertised URL.
+    """
 
     model_config = {"frozen": True}
 
     host: str = Field(default="localhost", description="Bind host")
-    port: int = Field(default=0, description="Bind port (0 = auto)")
+    port: int = Field(default=0, description="Bind port (0 = auto; see class docstring)")
     endpoint: str = Field(default="/", description="Base URL path")
     streaming: bool = Field(default=False, description="Enable streaming")
     version: str = Field(default="0.0.1", description="Advertised version")

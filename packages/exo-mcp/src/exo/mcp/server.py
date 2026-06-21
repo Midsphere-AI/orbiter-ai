@@ -81,10 +81,6 @@ class MCPServerRegistry:
         return f"MCPServerRegistry(servers={sorted(self._classes)})"
 
 
-# Module-level global registry
-server_registry = MCPServerRegistry()
-
-
 # ---------------------------------------------------------------------------
 # @mcp_server() decorator
 # ---------------------------------------------------------------------------
@@ -141,8 +137,6 @@ def mcp_server(
     * ``_tool_names`` -- list of registered tool names
     * ``run(**kwargs)`` -- start the server (``transport`` kwarg overrides default)
     * ``stop()`` -- placeholder for graceful shutdown
-
-    The class is also registered in the module-level ``server_registry``.
 
     Args:
         name: Server name. Defaults to the class name.
@@ -278,7 +272,6 @@ def mcp_server(
         cls.run_async = run_async  # type: ignore[attr-defined]
         cls.stop = stop  # type: ignore[attr-defined]
 
-        server_registry.register(server_name, cls)
         return cls
 
     return decorator

@@ -218,7 +218,8 @@ class TestStop:
 
         await sb.stop()
 
-        assert sb.status == SandboxStatus.IDLE
+        # stop() is terminal — transitions to CLOSED (E2B sandboxes cannot be restarted)
+        assert sb.status == SandboxStatus.CLOSED
         assert sb.e2b_sandbox_id is None
         mock_sb.kill.assert_called_once()
 
@@ -232,7 +233,8 @@ class TestStop:
 
         sb._e2b_sandbox = None
         await sb.stop()
-        assert sb.status == SandboxStatus.IDLE
+        # stop() is terminal even when no remote sandbox object exists
+        assert sb.status == SandboxStatus.CLOSED
 
 
 # ---------------------------------------------------------------------------

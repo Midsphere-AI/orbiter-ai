@@ -37,9 +37,9 @@ class E2BSandbox(Sandbox):
     Lifecycle: ``start`` creates (or connects to) an E2B sandbox,
     ``stop`` and ``cleanup`` kill it and release resources.
 
-    Unlike :class:`LocalSandbox` or :class:`KubernetesSandbox`,
-    :meth:`run_tool` dispatches to real E2B operations (shell commands,
-    file read/write/list) rather than returning stub metadata.
+    Unlike :class:`KubernetesSandbox`, :meth:`run_tool` dispatches to real
+    E2B operations (shell commands, file read/write/list) rather than
+    returning stub metadata.
     """
 
     __slots__ = (
@@ -162,8 +162,15 @@ class E2BSandbox(Sandbox):
             raise SandboxError(msg) from exc
 
     async def stop(self) -> None:
-        """Kill the E2B sandbox (can be recreated with a new ``start``)."""
-        self._transition(SandboxStatus.IDLE)
+        """Kill the E2B sandbox permanently.
+
+        E2B sandboxes cannot be restarted after being killed — the remote
+        process is destroyed and its state is lost.  This method transitions
+        the sandbox to ``CLOSED`` to make the terminal semantics explicit.
+        Use the async context manager (``async with E2BSandbox(...) as sb``)
+        or ``cleanup()`` for the same effect with cleaner intent.
+        """
+        self._transition(SandboxStatus.CLOSED)
         await self._kill_sandbox()
 
     async def cleanup(self) -> None:

@@ -31,8 +31,12 @@ class A2AServerError(ExoError):
 
 
 @runtime_checkable
-class TaskStore(Protocol):
-    """Minimal storage interface for A2A task state."""
+class A2ATaskStore(Protocol):
+    """Minimal storage interface for A2A task state.
+
+    Named ``A2ATaskStore`` to avoid collision with
+    ``exo.distributed.store.TaskStore`` (a concrete Redis-backed class).
+    """
 
     async def get(self, task_id: str) -> dict[str, Any] | None: ...
     async def save(self, task_id: str, data: dict[str, Any]) -> None: ...
@@ -137,12 +141,12 @@ class A2AServer:
         executor: AgentExecutor,
         config: ServingConfig | None = None,
         *,
-        task_store: TaskStore | None = None,
+        task_store: A2ATaskStore | None = None,
         provider: Any = None,
     ) -> None:
         self._executor = executor
         self._config = config or ServingConfig()
-        self._task_store: TaskStore = task_store or InMemoryTaskStore()
+        self._task_store: A2ATaskStore = task_store or InMemoryTaskStore()
         self._provider = provider
         self._agent_card = self._build_agent_card()
         self._app: Any = None
@@ -167,7 +171,7 @@ class A2AServer:
         return self._agent_card
 
     @property
-    def task_store(self) -> TaskStore:
+    def task_store(self) -> A2ATaskStore:
         return self._task_store
 
     def build_app(self) -> Any:

@@ -14,6 +14,8 @@ Usage::
     exo run --config agents.yaml "What is 2+2?"
     exo run -m openai:gpt-4o "Hello"
     exo --verbose run "Explain Python decorators"
+    exo chat --config agents.yaml
+    exo batch --config agents.yaml inputs.jsonl
     exo start worker --redis-url redis://localhost:6379
     exo task list --status running
     exo task status <task_id>
@@ -157,12 +159,6 @@ def run(
     if verbose and cfg:
         console.print(f"[dim]Loaded config with keys: {list(cfg.keys())}[/dim]")
 
-    # Store parsed state in context for downstream use (loader, console, etc.)
-    ctx.obj["config"] = cfg
-    ctx.obj["model"] = model
-    ctx.obj["stream"] = stream
-    ctx.obj["input"] = input_text
-
     if not cfg:
         console.print("[yellow]No config file found. Use --config or create .exo.yaml[/yellow]")
         raise typer.Exit(code=1)
@@ -172,6 +168,205 @@ def run(
         console.print(f"[dim]Streaming: {stream}[/dim]")
 
     console.print(f"[green]Running with input:[/green] {input_text}")
+
+    # Load agents from config
+    from exo_cli.loader import AgentLoadError, load_yaml_agents  # lazy import
+
+    config_path = config or str(find_config() or "")
+    if not config_path:
+        console.print("[red]Error: cannot determine config path.[/red]")
+        raise typer.Exit(code=1)
+
+    try:
+        agents = load_yaml_agents(Path(config_path))
+    except AgentLoadError as exc:
+        console.print(f"[red]Error loading agents: {exc}[/red]")
+        raise typer.Exit(code=1) from exc
+
+    if not agents:
+        console.print("[red]Error: no agents defined in config.[/red]")
+        raise typer.Exit(code=1)
+
+    # Pick the first agent (config determines which agent to run)
+    agent = next(iter(agents.values()))
+
+    # Override model if --model flag provided
+    if model:
+        agent.model = model
+
+    from exo_cli.executor import ExecutionResult, ExecutorError, LocalExecutor  # lazy import
+
+    executor = LocalExecutor(agent=agent, verbose=verbose)
+
+    async def _run() -> None:
+        if stream:
+            async for chunk in executor.stream(input_text):
+                console.print(chunk, end="")
+            console.print()  # final newline
+        else:
+            result: ExecutionResult = await executor.execute(input_text)
+            executor.print_result(result)
+
+    try:
+        asyncio.run(_run())
+    except ExecutorError as exc:
+        executor.print_error(exc)
+        raise typer.Exit(code=1) from exc
+
+
+# ---------------------------------------------------------------------------
+# chat command
+# ---------------------------------------------------------------------------
+
+
+@app.command()
+def chat(
+    ctx: typer.Context,
+    config: Annotated[
+        str | None,
+        typer.Option("--config", "-c", help="Path to YAML config file."),
+    ] = None,
+    model: Annotated[
+        str | None,
+        typer.Option("--model", "-m", help="Model string (e.g. openai:gpt-4o)."),
+    ] = None,
+    stream: Annotated[
+        bool,
+        typer.Option("--stream", "-s", help="Enable streaming output."),
+    ] = False,
+) -> None:
+    """Start an interactive chat session with an agent."""
+    verbose: bool = ctx.obj.get("verbose", False)
+
+    cfg = resolve_config(config)
+    if verbose and cfg:
+        console.print(f"[dim]Loaded config with keys: {list(cfg.keys())}[/dim]")
+
+    if not cfg:
+        console.print("[yellow]No config file found. Use --config or create .exo.yaml[/yellow]")
+        raise typer.Exit(code=1)
+
+    from exo_cli.loader import AgentLoadError, load_yaml_agents  # lazy import
+
+    config_path = config or str(find_config() or "")
+    try:
+        agents = load_yaml_agents(Path(config_path))
+    except AgentLoadError as exc:
+        console.print(f"[red]Error loading agents: {exc}[/red]")
+        raise typer.Exit(code=1) from exc
+
+    if not agents:
+        console.print("[red]Error: no agents defined in config.[/red]")
+        raise typer.Exit(code=1)
+
+    if model:
+        for agent in agents.values():
+            agent.model = model
+
+    from exo.runner import run as run_fn  # pyright: ignore[reportMissingImports]
+    from exo_cli.console import InteractiveConsole  # lazy import
+
+    stream_fn = getattr(run_fn, "stream", None) if stream else None
+    repl = InteractiveConsole(
+        agents=agents,
+        run_fn=run_fn,
+        stream_fn=stream_fn,
+        streaming=stream,
+    )
+
+    asyncio.run(repl.start())
+
+
+# ---------------------------------------------------------------------------
+# batch command
+# ---------------------------------------------------------------------------
+
+
+@app.command()
+def batch(
+    ctx: typer.Context,
+    inputs_file: Annotated[
+        str,
+        typer.Argument(help="Path to inputs file (.json, .jsonl, or .csv)."),
+    ],
+    config: Annotated[
+        str | None,
+        typer.Option("--config", "-c", help="Path to YAML config file."),
+    ] = None,
+    model: Annotated[
+        str | None,
+        typer.Option("--model", "-m", help="Model string (e.g. openai:gpt-4o)."),
+    ] = None,
+    concurrency: Annotated[
+        int,
+        typer.Option("--concurrency", "-n", help="Maximum concurrent executions."),
+    ] = 4,
+    output_format: Annotated[
+        str,
+        typer.Option("--output-format", "-f", help="Output format: jsonl or csv."),
+    ] = "jsonl",
+    timeout: Annotated[
+        float,
+        typer.Option("--timeout", "-t", help="Per-item timeout in seconds (0 = no timeout)."),
+    ] = 0.0,
+) -> None:
+    """Run an agent against a batch of inputs from a file."""
+    verbose: bool = ctx.obj.get("verbose", False)
+
+    cfg = resolve_config(config)
+    if verbose and cfg:
+        console.print(f"[dim]Loaded config with keys: {list(cfg.keys())}[/dim]")
+
+    if not cfg:
+        console.print("[yellow]No config file found. Use --config or create .exo.yaml[/yellow]")
+        raise typer.Exit(code=1)
+
+    from exo_cli.batch import (  # lazy import
+        BatchError,
+        batch_execute,
+        load_batch_items,
+        results_to_csv,
+        results_to_jsonl,
+    )
+    from exo_cli.loader import AgentLoadError, load_yaml_agents  # lazy import
+
+    config_path = config or str(find_config() or "")
+    try:
+        agents = load_yaml_agents(Path(config_path))
+    except AgentLoadError as exc:
+        console.print(f"[red]Error loading agents: {exc}[/red]")
+        raise typer.Exit(code=1) from exc
+
+    if not agents:
+        console.print("[red]Error: no agents defined in config.[/red]")
+        raise typer.Exit(code=1)
+
+    agent = next(iter(agents.values()))
+    if model:
+        agent.model = model
+
+    try:
+        items = load_batch_items(inputs_file)
+    except BatchError as exc:
+        console.print(f"[red]Error loading inputs: {exc}[/red]")
+        raise typer.Exit(code=1) from exc
+
+    console.print(f"[green]Running batch:[/green] {len(items)} items, concurrency={concurrency}")
+
+    async def _run_batch() -> None:
+        result = await batch_execute(
+            agent,
+            items,
+            concurrency=concurrency,
+            timeout=timeout,
+        )
+        console.print(f"[green]Done:[/green] {result.summary()}")
+        if output_format == "csv":
+            console.print(results_to_csv(result))
+        else:
+            console.print(results_to_jsonl(result))
+
+    asyncio.run(_run_batch())
 
 
 # ---------------------------------------------------------------------------

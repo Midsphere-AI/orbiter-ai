@@ -9,14 +9,14 @@ from __future__ import annotations
 import re
 from collections.abc import AsyncIterator
 from contextlib import AsyncExitStack, asynccontextmanager
-from datetime import timedelta
 from typing import Any
 
 from mcp import ClientSession
-from mcp.client.sse import sse_client
-from mcp.client.stdio import StdioServerParameters, stdio_client
-from mcp.client.streamable_http import streamablehttp_client
 
+from exo.mcp.transport import (  # pyright: ignore[reportMissingImports]
+    MCPTransportError,
+    create_transport_streams,
+)
 from exo.types import ExoError  # pyright: ignore[reportMissingImports]
 from exo_mcp_cli.config import ServerEntry, substitute_env_vars
 from exo_mcp_cli.vault import Vault
@@ -67,32 +67,29 @@ def _resolve_entry(entry: ServerEntry, vault: Vault | None) -> ServerEntry:
 
 
 def _create_transport(entry: ServerEntry) -> Any:
-    """Create the appropriate transport streams for *entry*."""
-    if entry.transport == "stdio":
-        params = StdioServerParameters(
+    """Create the appropriate transport streams for *entry*.
+
+    Delegates to :func:`exo.mcp.transport.create_transport_streams`.
+    WebSocket support is enabled via *allow_websocket=True* because the
+    CLI (unlike the framework client) accepts that transport.
+    """
+    try:
+        return create_transport_streams(
+            entry.transport,
             command=entry.command or "",
             args=entry.args,
             env=entry.env,
             cwd=entry.cwd,
-        )
-        return stdio_client(params)
-    if entry.transport == "sse":
-        return sse_client(
             url=entry.url or "",
-            headers=entry.headers or {},
+            headers=entry.headers,
             timeout=entry.timeout,
+            # sse_read_timeout: ServerEntry has no dedicated field; fall back
+            # to the connection timeout so the call signature stays consistent.
+            sse_read_timeout=entry.timeout,
+            allow_websocket=True,
         )
-    if entry.transport == "streamable_http":
-        return streamablehttp_client(
-            url=entry.url or "",
-            headers=entry.headers or {},
-            timeout=timedelta(seconds=entry.timeout),
-        )
-    if entry.transport == "websocket":
-        from mcp.client.websocket import websocket_client
-
-        return websocket_client(url=entry.url or "")
-    raise MCPConnectionError(f"Unsupported transport: {entry.transport}")
+    except MCPTransportError as exc:
+        raise MCPConnectionError(str(exc)) from exc
 
 
 @asynccontextmanager

@@ -19,6 +19,7 @@ classifiers = [
 dependencies = [
     "exo-core",
     "mcp>=1.0",
+    "cryptography>=42.0",
 ]
 
 [project.urls]

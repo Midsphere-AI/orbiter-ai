@@ -196,7 +196,7 @@ class TestVaultEnvKey:
         monkeypatch.delenv("EXO_MCP_VAULT_KEY", raising=False)
         v2 = Vault(vault_path=vault_file)
         with (
-            patch("exo_mcp_cli.vault.getpass.getpass", return_value=""),
+            patch("exo.mcp.vault.getpass.getpass", return_value=""),
             pytest.raises(VaultError, match="cannot be empty"),
         ):
             v2.get("key")

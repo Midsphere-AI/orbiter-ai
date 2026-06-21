@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from typing import Any, ClassVar
 
 from exo.eval.base import Scorer, ScorerResult  # pyright: ignore[reportMissingImports]
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # FormatValidationScorer
@@ -127,13 +130,62 @@ FormatValidationScorer._VALIDATORS = {
 
 
 class SchemaValidationScorer(Scorer):
-    """Validates JSON output against a JSON Schema."""
+    """Validates JSON output against a JSON Schema subset.
+
+    **Supported keywords** (checked and enforced):
+      ``type``, ``required``, ``properties``, ``enum``, ``pattern``,
+      ``minimum``, ``maximum``, ``additionalProperties``.
+
+    **Unsupported keywords** (logged as warnings at construction time so users
+    are not silently misled):
+      ``allOf``, ``anyOf``, ``oneOf``, ``not``, ``if``/``then``/``else``,
+      ``$ref``, ``format``, ``minLength``, ``maxLength``, ``minItems``,
+      ``maxItems``, ``uniqueItems``, ``multipleOf``, and any other keyword not
+      in the supported set.
+    """
 
     __slots__ = ("_name", "_schema")
+
+    # Keywords handled by _validate; anything else triggers a warning.
+    _SUPPORTED: ClassVar[frozenset[str]] = frozenset(
+        {
+            "type",
+            "required",
+            "properties",
+            "enum",
+            "pattern",
+            "minimum",
+            "maximum",
+            "additionalProperties",
+            # meta — not validated but not unknown either
+            "$schema",
+            "title",
+            "description",
+            "default",
+            "examples",
+        }
+    )
 
     def __init__(self, schema: dict[str, Any], *, name: str = "schema") -> None:
         self._schema = schema
         self._name = name
+        self._warn_unsupported(schema, path="<root>")
+
+    def _warn_unsupported(self, schema: dict[str, Any], path: str) -> None:
+        """Recursively warn about keywords that are not validated."""
+        unknown = set(schema) - self._SUPPORTED
+        if unknown:
+            logger.warning(
+                "SchemaValidationScorer (name=%r, path=%s): the following JSON Schema "
+                "keywords are present but NOT validated — results may be false positives: %s",
+                self._name,
+                path,
+                sorted(unknown),
+            )
+        # Recurse into sub-schemas so property-level keywords are also checked.
+        for key, sub in schema.get("properties", {}).items():
+            if isinstance(sub, dict):
+                self._warn_unsupported(sub, path=f"{path}.properties.{key}")
 
     async def score(self, case_id: str, input: Any, output: Any) -> ScorerResult:
         text = str(output) if output is not None else ""
@@ -154,8 +206,10 @@ class SchemaValidationScorer(Scorer):
 
     @staticmethod
     def _validate(data: Any, schema: dict[str, Any]) -> list[str]:
-        """Minimal JSON Schema validation (type + required + properties)."""
+        """Validate *data* against the supported JSON Schema keywords."""
         errors: list[str] = []
+
+        # --- type ---
         expected_type = schema.get("type")
         if expected_type:
             type_map: dict[str, type | tuple[type, ...]] = {
@@ -168,12 +222,31 @@ class SchemaValidationScorer(Scorer):
             }
             if expected_type in type_map and not isinstance(data, type_map[expected_type]):
                 errors.append(f"Expected type {expected_type}, got {type(data).__name__}")
-                return errors
+                return errors  # further checks meaningless if type is wrong
 
+        # --- enum ---
+        if "enum" in schema and data not in schema["enum"]:
+            errors.append(f"Value {data!r} not in enum {schema['enum']}")
+
+        # --- pattern (strings only) ---
+        if "pattern" in schema and isinstance(data, str) and not re.search(schema["pattern"], data):
+            errors.append(f"Value {data!r} does not match pattern {schema['pattern']!r}")
+
+        # --- minimum / maximum (numbers only) ---
+        if isinstance(data, (int, float)) and not isinstance(data, bool):
+            if "minimum" in schema and data < schema["minimum"]:
+                errors.append(f"Value {data} is less than minimum {schema['minimum']}")
+            if "maximum" in schema and data > schema["maximum"]:
+                errors.append(f"Value {data} is greater than maximum {schema['maximum']}")
+
+        # --- object-specific keywords ---
         if isinstance(data, dict):
+            # required
             for req in schema.get("required", []):
                 if req not in data:
                     errors.append(f"Missing required field: {req!r}")
+
+            # properties — recurse
             props = schema.get("properties", {})
             for key, sub_schema in props.items():
                 if key in data:
@@ -181,6 +254,14 @@ class SchemaValidationScorer(Scorer):
                         f"{key}.{e}"
                         for e in SchemaValidationScorer._validate(data[key], sub_schema)
                     )
+
+            # additionalProperties — only when a bool False (block extras)
+            ap = schema.get("additionalProperties")
+            if ap is False:
+                extra = set(data) - set(props)
+                for k in sorted(extra):
+                    errors.append(f"Additional property not allowed: {k!r}")
+
         return errors
 
 
@@ -270,33 +351,6 @@ class OutputLengthScorer(Scorer):
             scorer_name=self._name,
             score=1.0 if ok else 0.0,
             details={"length": length, "min": self._min_length, "max": self._max_length},
-        )
-
-
-# ---------------------------------------------------------------------------
-# OutputRelevanceScorer
-# ---------------------------------------------------------------------------
-
-
-class OutputRelevanceScorer(Scorer):
-    """Keyword-overlap relevance between input and output."""
-
-    __slots__ = ("_name",)
-
-    def __init__(self, *, name: str = "relevance") -> None:
-        self._name = name
-
-    async def score(self, case_id: str, input: Any, output: Any) -> ScorerResult:
-        in_words = set(str(input).lower().split()) if input else set()
-        out_words = set(str(output).lower().split()) if output else set()
-        if not in_words:
-            return ScorerResult(scorer_name=self._name, score=0.0, details={"overlap": 0})
-        overlap = len(in_words & out_words)
-        ratio = overlap / len(in_words)
-        return ScorerResult(
-            scorer_name=self._name,
-            score=min(ratio, 1.0),
-            details={"overlap": overlap, "input_words": len(in_words)},
         )
 
 

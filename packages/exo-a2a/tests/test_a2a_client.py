@@ -1,9 +1,8 @@
-"""Tests for exo.a2a.client — A2A HTTP client, ClientManager, RemoteAgent."""
+"""Tests for exo.a2a.client — A2A HTTP client and RemoteAgent."""
 
 from __future__ import annotations
 
 import json
-import threading
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -14,7 +13,6 @@ import pytest
 from exo.a2a.client import (  # pyright: ignore[reportMissingImports]
     A2AClient,
     A2AClientError,
-    ClientManager,
     RemoteAgent,
     _extract_text,
 )
@@ -199,14 +197,16 @@ class TestA2AClientSendTask:
 # ===========================================================================
 
 
-class TestA2AClientStreaming:
-    async def test_streaming_not_supported(self) -> None:
+class TestA2AClientCollect:
+    """Tests for send_task_collect — buffered NDJSON event collector."""
+
+    async def test_collect_not_supported(self) -> None:
         card = _make_card(streaming=False)
         client = A2AClient(card)
         with pytest.raises(A2AClientError, match="does not support streaming"):
-            await client.send_task_streaming("test")
+            await client.send_task_collect("test")
 
-    async def test_streaming_success(self) -> None:
+    async def test_collect_success(self) -> None:
         card = _make_card(streaming=True)
         client = A2AClient(card)
 
@@ -223,19 +223,19 @@ class TestA2AClientStreaming:
         client._http = AsyncMock()
         client._http.post = AsyncMock(return_value=mock_resp)
 
-        result = await client.send_task_streaming("test")
+        result = await client.send_task_collect("test")
         assert len(result) == 3
         assert result[0]["status"]["state"] == "working"
         assert result[2]["status"]["state"] == "completed"
 
-    async def test_streaming_failure(self) -> None:
+    async def test_collect_failure(self) -> None:
         card = _make_card(streaming=True)
         client = A2AClient(card)
         client._http = AsyncMock()
         client._http.post = AsyncMock(side_effect=httpx.ConnectError("refused"))
 
         with pytest.raises(A2AClientError, match="Stream request failed"):
-            await client.send_task_streaming("test")
+            await client.send_task_collect("test")
 
 
 # ===========================================================================
@@ -263,59 +263,6 @@ class TestA2AClientLifecycle:
         card = _make_card("named")
         client = A2AClient(card)
         assert "named" in repr(client)
-
-
-# ===========================================================================
-# ClientManager
-# ===========================================================================
-
-
-class TestClientManager:
-    def test_get_client_returns_client(self) -> None:
-        mgr = ClientManager(_make_card())
-        client = mgr.get_client()
-        assert isinstance(client, A2AClient)
-
-    def test_same_thread_same_client(self) -> None:
-        mgr = ClientManager(_make_card())
-        c1 = mgr.get_client()
-        c2 = mgr.get_client()
-        assert c1 is c2
-
-    def test_different_threads_different_clients(self) -> None:
-        mgr = ClientManager(_make_card())
-        c1 = mgr.get_client()
-        results: list[A2AClient] = []
-
-        def worker() -> None:
-            results.append(mgr.get_client())
-
-        t = threading.Thread(target=worker)
-        t.start()
-        t.join()
-
-        assert len(results) == 1
-        assert results[0] is not c1
-
-    async def test_shutdown(self) -> None:
-        mgr = ClientManager(_make_card())
-        client = mgr.get_client()
-        client._http = AsyncMock()
-        await mgr.shutdown()
-        client._http.aclose.assert_awaited_once()
-        assert repr(mgr) == "ClientManager(clients=0)"
-
-    def test_repr(self) -> None:
-        mgr = ClientManager(_make_card())
-        assert repr(mgr) == "ClientManager(clients=0)"
-        mgr.get_client()
-        assert repr(mgr) == "ClientManager(clients=1)"
-
-    def test_custom_config(self) -> None:
-        config = ClientConfig(timeout=30.0)
-        mgr = ClientManager(_make_card(), config=config)
-        client = mgr.get_client()
-        assert client._config.timeout == 30.0
 
 
 # ===========================================================================

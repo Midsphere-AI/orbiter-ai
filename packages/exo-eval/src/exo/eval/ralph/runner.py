@@ -177,7 +177,8 @@ class RalphRunner:
                 reflections.append({"iteration": state.iteration, "summary": reflection.summary})
 
             # --- Phase 4: Plan (re-prompt) ---
-            current_input = self._plan(input, reflection)
+            # Pass current_input (not the original) so chained feedback accumulates.
+            current_input = self._plan(current_input, reflection)
 
             # --- Phase 5: Halt ---
             decision = await self._halt(state)
@@ -257,7 +258,8 @@ class RalphRunner:
             reflection = await self._learn(current_input, output, scores, success, state)
 
             # --- Phase 4: Plan ---
-            current_input = self._plan(input, reflection)
+            # Pass current_input (not the original) so chained feedback accumulates.
+            current_input = self._plan(current_input, reflection)
 
             # --- Phase 5: Halt ---
             decision = await self._halt(state)
@@ -335,12 +337,18 @@ class RalphRunner:
         state.record_reflection({"summary": result.summary, "suggestions": result.suggestions})
         return result
 
-    def _plan(self, original_input: str, reflection: ReflectionResult | None) -> str:
-        """Phase 4: Re-prompt by appending reflection suggestions."""
+    def _plan(self, current_input: str, reflection: ReflectionResult | None) -> str:
+        """Phase 4: Re-prompt by appending reflection suggestions.
+
+        *current_input* is the input from the **previous** iteration (which may
+        already contain chained feedback from earlier iterations).  New
+        suggestions are appended to it so that feedback accumulates across
+        iterations rather than resetting to the original prompt each time.
+        """
         if reflection is None or not reflection.suggestions:
-            return original_input
+            return current_input
         suggestions = "\n".join(f"- {s}" for s in reflection.suggestions)
-        return f"{original_input}\n\n[Previous feedback]\n{suggestions}"
+        return f"{current_input}\n\n[Previous feedback]\n{suggestions}"
 
     async def _halt(self, state: LoopState) -> StopDecision:
         """Phase 5: Check all stop conditions."""

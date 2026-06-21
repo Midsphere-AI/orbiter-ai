@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from exo.eval.base import Scorer, ScorerResult  # pyright: ignore[reportMissingImports]
 from exo.eval.trajectory_scorers import (  # pyright: ignore[reportMissingImports]
     AnswerAccuracyLLMScorer,
@@ -156,14 +158,16 @@ class TestTimeCostScorer:
         assert result.score == 0.0
 
     async def test_no_time_key(self) -> None:
+        """Missing _time_cost_ms raises KeyError — no silent perfect score."""
         scorer = TimeCostScorer()
-        result = await scorer.score("c1", {}, {"answer": "hello"})
-        assert result.score == 1.0  # 0ms elapsed
+        with pytest.raises(KeyError, match="_time_cost_ms"):
+            await scorer.score("c1", {}, {"answer": "hello"})
 
     async def test_non_dict_output(self) -> None:
+        """Non-dict output raises KeyError — no silent perfect score."""
         scorer = TimeCostScorer()
-        result = await scorer.score("c1", {}, "string output")
-        assert result.score == 1.0  # falls back to 0ms
+        with pytest.raises(KeyError, match="_time_cost_ms"):
+            await scorer.score("c1", {}, "string output")
 
     async def test_details(self) -> None:
         scorer = TimeCostScorer(max_ms=5_000)
@@ -173,7 +177,7 @@ class TestTimeCostScorer:
 
     async def test_custom_name(self) -> None:
         scorer = TimeCostScorer(name="latency")
-        result = await scorer.score("c1", {}, {})
+        result = await scorer.score("c1", {}, {"_time_cost_ms": 0})
         assert result.scorer_name == "latency"
 
 
@@ -185,9 +189,8 @@ class TestTimeCostScorer:
 class TestAnswerAccuracyLLMScorer:
     async def test_no_judge(self) -> None:
         scorer = AnswerAccuracyLLMScorer()
-        result = await scorer.score("c1", {"question": "Q", "answer": "A"}, "response")
-        assert result.score == 0.0
-        assert "error" in result.details
+        with pytest.raises(ValueError, match="judge callable"):
+            await scorer.score("c1", {"question": "Q", "answer": "A"}, "response")
 
     async def test_with_judge(self) -> None:
         async def mock_judge(prompt: str) -> str:
@@ -215,10 +218,9 @@ class TestAnswerAccuracyLLMScorer:
         prompt = scorer.build_prompt("c1", "raw question", "output")
         assert "raw question" in prompt
 
-    async def test_custom_name(self) -> None:
+    def test_custom_name(self) -> None:
         scorer = AnswerAccuracyLLMScorer(name="accuracy_v2")
-        result = await scorer.score("c1", {}, "out")
-        assert result.scorer_name == "accuracy_v2"
+        assert scorer._name == "accuracy_v2"
 
 
 # ---------------------------------------------------------------------------

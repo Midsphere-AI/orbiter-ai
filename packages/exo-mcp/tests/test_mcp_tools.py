@@ -16,7 +16,6 @@ from exo.mcp.tools import (  # pyright: ignore[reportMissingImports]
     MCPToolWrapper,
     convert_mcp_tools,
     extract_schema,
-    load_tools_from_client,
     load_tools_from_connection,
     namespace_tool_name,
     parse_namespaced_name,
@@ -384,68 +383,6 @@ class TestLoadToolsFromConnection:
         result = await tools[0].execute(query="hello")
         assert result == "ok"
         conn.call_tool.assert_awaited_once_with("search", {"query": "hello"}, progress_callback=ANY)
-
-
-# ---------------------------------------------------------------------------
-# load_tools_from_client tests
-# ---------------------------------------------------------------------------
-
-
-class TestLoadToolsFromClient:
-    async def test_single_server(self) -> None:
-        conn = MagicMock()
-        conn.name = "srv1"
-        conn.list_tools = AsyncMock(return_value=[_make_mcp_tool("a")])
-        conn.call_tool = AsyncMock()
-
-        client = MagicMock()
-        client.server_names = ["srv1"]
-        client.connect = AsyncMock(return_value=conn)
-
-        tools = await load_tools_from_client(client)
-        assert len(tools) == 1
-        assert tools[0].server_name == "srv1"
-
-    async def test_multiple_servers(self) -> None:
-        def make_conn(name: str, tool_names: list[str]) -> MagicMock:
-            c = MagicMock()
-            c.name = name
-            c.list_tools = AsyncMock(return_value=[_make_mcp_tool(t) for t in tool_names])
-            c.call_tool = AsyncMock()
-            return c
-
-        conn1 = make_conn("srv1", ["a", "b"])
-        conn2 = make_conn("srv2", ["c"])
-
-        client = MagicMock()
-        client.server_names = ["srv1", "srv2"]
-        client.connect = AsyncMock(side_effect=[conn1, conn2])
-
-        tools = await load_tools_from_client(client)
-        assert len(tools) == 3
-        assert tools[0].server_name == "srv1"
-        assert tools[2].server_name == "srv2"
-
-    async def test_with_filter(self) -> None:
-        conn = MagicMock()
-        conn.name = "srv"
-        conn.list_tools = AsyncMock(return_value=[_make_mcp_tool("a"), _make_mcp_tool("b")])
-        conn.call_tool = AsyncMock()
-
-        client = MagicMock()
-        client.server_names = ["srv"]
-        client.connect = AsyncMock(return_value=conn)
-
-        tools = await load_tools_from_client(client, tool_filter=MCPToolFilter(exclude=["b"]))
-        assert len(tools) == 1
-        assert tools[0].original_name == "a"
-
-    async def test_empty_client(self) -> None:
-        client = MagicMock()
-        client.server_names = []
-
-        tools = await load_tools_from_client(client)
-        assert tools == []
 
 
 # ---------------------------------------------------------------------------

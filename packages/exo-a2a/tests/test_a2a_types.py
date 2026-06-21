@@ -21,13 +21,16 @@ from exo.a2a.types import (  # pyright: ignore[reportMissingImports]
 
 
 class TestTransportMode:
-    def test_values(self) -> None:
+    def test_jsonrpc_value(self) -> None:
         assert TransportMode.JSONRPC == "jsonrpc"
-        assert TransportMode.GRPC == "grpc"
-        assert TransportMode.WEBSOCKET == "websocket"
 
     def test_is_str_enum(self) -> None:
         assert isinstance(TransportMode.JSONRPC, str)
+
+    def test_only_jsonrpc_implemented(self) -> None:
+        """Only JSONRPC is implemented; GRPC and WEBSOCKET are not present."""
+        assert not hasattr(TransportMode, "GRPC")
+        assert not hasattr(TransportMode, "WEBSOCKET")
 
 
 # ---------------------------------------------------------------------------
@@ -95,13 +98,15 @@ class TestAgentCapabilities:
     def test_defaults(self) -> None:
         caps = AgentCapabilities()
         assert caps.streaming is False
-        assert caps.push_notifications is False
         assert caps.state_transition_history is False
 
+    def test_no_push_notifications(self) -> None:
+        """push_notifications was removed — no code path backs it."""
+        assert not hasattr(AgentCapabilities(), "push_notifications")
+
     def test_custom(self) -> None:
-        caps = AgentCapabilities(streaming=True, push_notifications=True)
+        caps = AgentCapabilities(streaming=True)
         assert caps.streaming is True
-        assert caps.push_notifications is True
 
     def test_frozen(self) -> None:
         caps = AgentCapabilities()
@@ -141,11 +146,11 @@ class TestAgentCard:
             skills=[skill],
             default_input_modes=["text", "json"],
             default_output_modes=["text"],
-            supported_transports=["jsonrpc", "grpc"],
+            supported_transports=["jsonrpc"],
         )
         assert card.skills == (skill,)
         assert card.default_input_modes == ("text", "json")
-        assert card.supported_transports == (TransportMode.JSONRPC, TransportMode.GRPC)
+        assert card.supported_transports == (TransportMode.JSONRPC,)
 
     def test_frozen(self) -> None:
         card = AgentCard(name="a")
@@ -201,12 +206,12 @@ class TestServingConfig:
             port=8080,
             streaming=True,
             skills=[skill],
-            transports=["jsonrpc", "websocket"],
+            transports=["jsonrpc"],
         )
         assert cfg.port == 8080
         assert cfg.streaming is True
         assert cfg.skills == (skill,)
-        assert cfg.transports == (TransportMode.JSONRPC, TransportMode.WEBSOCKET)
+        assert cfg.transports == (TransportMode.JSONRPC,)
 
     def test_frozen(self) -> None:
         cfg = ServingConfig()
@@ -242,12 +247,12 @@ class TestClientConfig:
         cfg = ClientConfig(
             streaming=True,
             timeout=30.0,
-            transports=["grpc"],
+            transports=["jsonrpc"],
             accepted_output_modes=["text", "json"],
         )
         assert cfg.streaming is True
         assert cfg.timeout == 30.0
-        assert cfg.transports == (TransportMode.GRPC,)
+        assert cfg.transports == (TransportMode.JSONRPC,)
         assert cfg.accepted_output_modes == ("text", "json")
 
     def test_frozen(self) -> None:

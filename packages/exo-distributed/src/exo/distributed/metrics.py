@@ -9,12 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from exo.observability.metrics import (  # pyright: ignore[reportMissingImports]
-    HAS_OTEL,
-    _collector,
-    _get_meter,
-)
-from exo.observability.semconv import (  # pyright: ignore[reportMissingImports]
+from exo.distributed._semconv import (  # pyright: ignore[reportMissingImports]
     DIST_QUEUE_NAME,
     DIST_TASK_ID,
     DIST_TASK_STATUS,
@@ -26,6 +21,11 @@ from exo.observability.semconv import (  # pyright: ignore[reportMissingImports]
     METRIC_DIST_TASKS_COMPLETED,
     METRIC_DIST_TASKS_FAILED,
     METRIC_DIST_TASKS_SUBMITTED,
+)
+from exo.observability.metrics import (  # pyright: ignore[reportMissingImports]
+    HAS_OTEL,
+    _collector,
+    _get_meter,
 )
 
 

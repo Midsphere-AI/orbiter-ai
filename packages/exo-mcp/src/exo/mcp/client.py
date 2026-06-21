@@ -9,11 +9,9 @@ from datetime import timedelta
 from enum import StrEnum
 from typing import Any
 
+from exo.mcp.transport import create_transport_streams  # pyright: ignore[reportMissingImports]
 from exo.types import ExoError  # pyright: ignore[reportMissingImports]
 from mcp import ClientSession
-from mcp.client.sse import sse_client
-from mcp.client.stdio import StdioServerParameters, stdio_client
-from mcp.client.streamable_http import streamablehttp_client
 from mcp.types import CallToolResult, InitializeResult
 from mcp.types import Tool as MCPTool
 
@@ -234,30 +232,16 @@ class MCPServerConnection:
     def _create_streams(self) -> Any:
         """Create the appropriate transport streams based on config."""
         cfg = self._config
-        if cfg.transport == MCPTransport.STDIO:
-            params = StdioServerParameters(
-                command=cfg.command or "",
-                args=cfg.args,
-                env=cfg.env,
-                cwd=cfg.cwd,
-                encoding="utf-8",
-                encoding_error_handler="strict",
-            )
-            return stdio_client(params)
-        if cfg.transport == MCPTransport.SSE:
-            return sse_client(
-                url=cfg.url or "",
-                headers=cfg.headers,
-                timeout=cfg.timeout,
-                sse_read_timeout=cfg.sse_read_timeout,
-            )
-        # STREAMABLE_HTTP
-        return streamablehttp_client(
+        return create_transport_streams(
+            str(cfg.transport),
+            command=cfg.command or "",
+            args=cfg.args,
+            env=cfg.env,
+            cwd=cfg.cwd,
             url=cfg.url or "",
-            headers=cfg.headers or {},
-            timeout=timedelta(seconds=cfg.timeout),
-            sse_read_timeout=timedelta(seconds=cfg.sse_read_timeout),
-            terminate_on_close=True,
+            headers=cfg.headers,
+            timeout=cfg.timeout,
+            sse_read_timeout=cfg.sse_read_timeout,
         )
 
     async def list_tools(self) -> list[MCPTool]:

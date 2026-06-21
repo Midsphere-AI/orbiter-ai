@@ -16,6 +16,10 @@ def extract_json(text: str) -> dict[str, Any]:
     """Extract the first JSON object from *text* (supports nested braces).
 
     Falls back to an empty dict if no valid JSON is found.
+
+    This is the canonical implementation shared by :mod:`exo.eval.llm_scorer`
+    and :mod:`exo.eval.reflection`.  Both modules import from here rather than
+    duplicating the brace-depth logic.
     """
     start = text.find("{")
     while start != -1:
@@ -86,11 +90,11 @@ class LLMAsJudgeScorer(Scorer):
 
     async def score(self, case_id: str, input: Any, output: Any) -> ScorerResult:
         if self._judge is None:
-            return ScorerResult(
-                scorer_name=self._name,
-                score=0.0,
-                details={"error": "No judge callable provided"},
+            msg = (
+                f"{type(self).__name__}(name={self._name!r}) cannot score without a judge callable. "
+                "Pass a judge=(async callable) at construction time."
             )
+            raise ValueError(msg)
         prompt = self.build_prompt(case_id, input, output)
         response = await self._judge(prompt)
         score, details = self.parse_response(str(response))

@@ -12,12 +12,14 @@ from typing import Any
 from exo.distributed._redis_mixin import (  # pyright: ignore[reportMissingImports]
     RedisConnectionMixin,
 )
+from exo.distributed._semconv import (  # pyright: ignore[reportMissingImports]
+    METRIC_STREAM_EVENT_PUBLISH_DURATION,
+)
 from exo.distributed.metrics import (  # pyright: ignore[reportMissingImports]
     increment_counter,
     record_histogram_value,
 )
 from exo.observability.semconv import (  # pyright: ignore[reportMissingImports]
-    METRIC_STREAM_EVENT_PUBLISH_DURATION,
     METRIC_STREAM_EVENTS_EMITTED,
     STREAM_EVENT_TYPE,
 )

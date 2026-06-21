@@ -1,7 +1,7 @@
 [project]
 name = "exo-server"
 version = "0.1.0"
-description = "Web UI and API server for Exo agents"
+description = "Minimal embed helper: FastAPI server for Exo agents (experimental)"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"

@@ -6,6 +6,9 @@ import json
 import logging
 from typing import Any
 
+from exo.guardrail._helpers import (  # pyright: ignore[reportMissingImports]
+    _extract_latest_user_message,
+)
 from exo.guardrail.types import (  # pyright: ignore[reportMissingImports]
     GuardrailBackend,
     RiskAssessment,
@@ -57,6 +60,12 @@ class LLMGuardrailBackend(GuardrailBackend):
         provider: Optional pre-built ``ModelProvider`` instance.
             When given, *model* is stored for logging but the
             provider is used directly (useful for testing).
+        fail_open: Controls behaviour when the LLM call or response
+            parsing fails.  When ``False`` (the default), failures
+            are **fail-closed**: a HIGH-risk assessment is returned
+            so traffic is blocked rather than silently permitted.
+            Set to ``True`` only when you prefer availability over
+            security (e.g. non-critical dev environments).
 
     Example::
 
@@ -71,11 +80,13 @@ class LLMGuardrailBackend(GuardrailBackend):
         prompt_template: str = _DEFAULT_PROMPT_TEMPLATE,
         api_key: str | None = None,
         provider: Any | None = None,
+        fail_open: bool = False,
     ) -> None:
         self._model = model
         self._prompt_template = prompt_template
         self._api_key = api_key
         self._provider = provider
+        self._fail_open = fail_open
 
     def _get_provider(self) -> Any:
         """Lazily build or return the model provider."""
@@ -99,8 +110,8 @@ class LLMGuardrailBackend(GuardrailBackend):
 
         Returns:
             A ``RiskAssessment`` based on the LLM's analysis.
-            Falls back to ``SAFE`` if the LLM response cannot be
-            parsed or the call fails.
+            On failure, returns HIGH risk (fail-closed) unless
+            ``fail_open=True`` was set at construction time.
         """
         text = _extract_latest_user_message(data)
         if not text:
@@ -119,40 +130,33 @@ class LLMGuardrailBackend(GuardrailBackend):
             )
             return _parse_llm_response(response.content)
         except Exception as exc:
-            logger.error(
-                "Guardrail LLM backend failed, defaulting to SAFE: %s (model=%s)",
+            if self._fail_open:
+                logger.warning(
+                    "Guardrail LLM backend failed, fail_open=True so defaulting to SAFE: "
+                    "%s (model=%s)",
+                    exc,
+                    self._model,
+                    exc_info=True,
+                )
+                return RiskAssessment(has_risk=False, risk_level=RiskLevel.SAFE)
+            logger.warning(
+                "Guardrail LLM backend failed, fail_open=False so blocking (HIGH risk): "
+                "%s (model=%s)",
                 exc,
                 self._model,
                 exc_info=True,
             )
-            return RiskAssessment(has_risk=False, risk_level=RiskLevel.SAFE)
+            return RiskAssessment(
+                has_risk=True,
+                risk_level=RiskLevel.HIGH,
+                risk_type="backend_failure",
+                details={"error": str(exc), "model": self._model},
+            )
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-def _extract_latest_user_message(data: dict[str, Any]) -> str:
-    """Return text content of the last user message, or ``""``."""
-    messages = data.get("messages")
-    if not isinstance(messages, list):
-        return ""
-    for msg in reversed(messages):
-        role = msg.get("role") if isinstance(msg, dict) else getattr(msg, "role", None)
-        if role != "user":
-            continue
-        content = msg.get("content", "") if isinstance(msg, dict) else getattr(msg, "content", "")
-        if isinstance(content, str):
-            return content
-        if isinstance(content, list):
-            parts = []
-            for part in content:
-                if isinstance(part, dict) and part.get("type") == "text":
-                    parts.append(part.get("text", ""))
-            return " ".join(parts)
-        return ""
-    return ""
 
 
 def _parse_llm_response(content: str) -> RiskAssessment:

@@ -6,6 +6,18 @@ from unittest.mock import patch
 
 import pytest
 
+from exo.distributed._semconv import (  # pyright: ignore[reportMissingImports]
+    DIST_QUEUE_NAME,
+    DIST_TASK_ID,
+    DIST_WORKER_ID,
+    METRIC_DIST_QUEUE_DEPTH,
+    METRIC_DIST_TASK_DURATION,
+    METRIC_DIST_TASK_WAIT_TIME,
+    METRIC_DIST_TASKS_CANCELLED,
+    METRIC_DIST_TASKS_COMPLETED,
+    METRIC_DIST_TASKS_FAILED,
+    METRIC_DIST_TASKS_SUBMITTED,
+)
 from exo.distributed.metrics import (  # pyright: ignore[reportMissingImports]
     _build_attributes,
     record_queue_depth,
@@ -17,18 +29,6 @@ from exo.distributed.metrics import (  # pyright: ignore[reportMissingImports]
 from exo.observability.metrics import (  # pyright: ignore[reportMissingImports]
     get_metrics_snapshot,
     reset_metrics,
-)
-from exo.observability.semconv import (  # pyright: ignore[reportMissingImports]
-    DIST_QUEUE_NAME,
-    DIST_TASK_ID,
-    DIST_WORKER_ID,
-    METRIC_DIST_QUEUE_DEPTH,
-    METRIC_DIST_TASK_DURATION,
-    METRIC_DIST_TASK_WAIT_TIME,
-    METRIC_DIST_TASKS_CANCELLED,
-    METRIC_DIST_TASKS_COMPLETED,
-    METRIC_DIST_TASKS_FAILED,
-    METRIC_DIST_TASKS_SUBMITTED,
 )
 
 # Patch HAS_OTEL to False so all recording helpers use the in-memory collector.

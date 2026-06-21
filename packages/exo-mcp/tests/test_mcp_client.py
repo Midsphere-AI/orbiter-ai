@@ -364,18 +364,17 @@ class TestMCPServerConnectionTransports:
     def test_create_streams_stdio(self) -> None:
         cfg = _make_stdio_config()
         conn = MCPServerConnection(cfg)
-        with patch("exo.mcp.client.stdio_client") as mock_stdio:
+        with patch("exo.mcp.transport.stdio_client") as mock_stdio:
             mock_stdio.return_value = _mock_transport()
             conn._create_streams()
             mock_stdio.assert_called_once()
-            args = mock_stdio.call_args
-            params = args[0][0]
+            params = mock_stdio.call_args[0][0]
             assert params.command == "python"
 
     def test_create_streams_sse(self) -> None:
         cfg = _make_sse_config()
         conn = MCPServerConnection(cfg)
-        with patch("exo.mcp.client.sse_client") as mock_sse:
+        with patch("exo.mcp.transport.sse_client") as mock_sse:
             mock_sse.return_value = _mock_transport()
             conn._create_streams()
             mock_sse.assert_called_once_with(
@@ -388,7 +387,7 @@ class TestMCPServerConnectionTransports:
     def test_create_streams_streamable_http(self) -> None:
         cfg = _make_http_config()
         conn = MCPServerConnection(cfg)
-        with patch("exo.mcp.client.streamablehttp_client") as mock_http:
+        with patch("exo.mcp.transport.streamablehttp_client") as mock_http:
             mock_http.return_value = _mock_transport_3tuple()
             conn._create_streams()
             mock_http.assert_called_once_with(

@@ -8,7 +8,6 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from exo.observability.health import (  # pyright: ignore[reportMissingImports]
-    EventLoopCheck,
     HealthCheck,
     HealthRegistry,
     HealthResult,
@@ -105,7 +104,6 @@ class TestHealthCheckProtocol:
 
     def test_builtin_checks_satisfy_protocol(self) -> None:
         assert isinstance(MemoryUsageCheck(), HealthCheck)
-        assert isinstance(EventLoopCheck(), HealthCheck)
 
 
 # ---------------------------------------------------------------------------
@@ -143,34 +141,6 @@ class TestMemoryUsageCheck:
             result = check.check()
             assert result.status == HealthStatus.DEGRADED
             assert "approaching" in result.message
-
-
-# ---------------------------------------------------------------------------
-# EventLoopCheck
-# ---------------------------------------------------------------------------
-
-
-class TestEventLoopCheck:
-    def test_name(self) -> None:
-        assert EventLoopCheck().name == "event_loop"
-
-    def test_no_running_loop(self) -> None:
-        # Outside of async context, no running loop
-        check = EventLoopCheck()
-        result = check.check()
-        assert result.status == HealthStatus.HEALTHY
-        assert "No running event loop" in result.message
-
-    async def test_with_running_loop(self) -> None:
-        """When called from async context with a running loop."""
-        check = EventLoopCheck(threshold_seconds=10.0)
-        result = check.check()
-        assert result.status == HealthStatus.HEALTHY
-        assert result.metadata.get("loop_running") is True
-
-    def test_custom_threshold(self) -> None:
-        check = EventLoopCheck(threshold_seconds=0.5)
-        assert check._threshold_seconds == 0.5
 
 
 # ---------------------------------------------------------------------------

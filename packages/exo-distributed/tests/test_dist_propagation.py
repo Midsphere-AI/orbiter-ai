@@ -1,13 +1,12 @@
-"""Tests for exo.observability.propagation — W3C Baggage propagation and span consumer system."""
+"""Tests for exo.distributed._propagation — W3C Baggage propagation."""
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 from typing import Any
 
 import pytest
 
-from exo.observability.propagation import (  # pyright: ignore[reportMissingImports]
+from exo.distributed._propagation import (  # pyright: ignore[reportMissingImports]
     BAGGAGE_HEADER,
     MAX_HEADER_LENGTH,
     MAX_PAIR_LENGTH,
@@ -15,15 +14,9 @@ from exo.observability.propagation import (  # pyright: ignore[reportMissingImpo
     BaggagePropagator,
     Carrier,
     DictCarrier,
-    SpanConsumer,
     clear_baggage,
-    clear_span_consumers,
-    dispatch_spans,
     get_baggage,
     get_baggage_value,
-    get_span_consumer,
-    list_span_consumers,
-    register_span_consumer,
     set_baggage,
 )
 
@@ -34,12 +27,10 @@ from exo.observability.propagation import (  # pyright: ignore[reportMissingImpo
 
 @pytest.fixture(autouse=True)
 def _clean_baggage() -> Any:
-    """Reset baggage and consumer registries before each test."""
+    """Reset baggage before each test."""
     clear_baggage()
-    clear_span_consumers()
     yield
     clear_baggage()
-    clear_span_consumers()
 
 
 # ---------------------------------------------------------------------------
@@ -268,142 +259,6 @@ class TestBaggagePropagatorRoundtrip:
 
     def test_repr(self) -> None:
         assert "BaggagePropagator" in repr(BaggagePropagator())
-
-
-# ---------------------------------------------------------------------------
-# SpanConsumer ABC
-# ---------------------------------------------------------------------------
-
-
-class _TestConsumer(SpanConsumer):
-    """Concrete consumer for testing."""
-
-    def __init__(self, consumer_name: str = "test") -> None:
-        self._name = consumer_name
-        self.received: list[Sequence[Any]] = []
-
-    @property
-    def name(self) -> str:
-        return self._name
-
-    def consume(self, spans: Sequence[Any]) -> None:
-        self.received.append(spans)
-
-
-class TestSpanConsumerABC:
-    def test_concrete_implementation(self) -> None:
-        c = _TestConsumer("my-consumer")
-        assert c.name == "my-consumer"
-
-    def test_consume_receives_spans(self) -> None:
-        c = _TestConsumer()
-        c.consume(["span1", "span2"])
-        assert len(c.received) == 1
-        assert c.received[0] == ["span1", "span2"]
-
-    def test_abstract_enforcement(self) -> None:
-        with pytest.raises(TypeError):
-            SpanConsumer()  # type: ignore[abstract]
-
-
-# ---------------------------------------------------------------------------
-# Consumer registration — direct
-# ---------------------------------------------------------------------------
-
-
-class TestConsumerRegistrationDirect:
-    def test_register_instance(self) -> None:
-        c = _TestConsumer("direct")
-        register_span_consumer(c)
-        assert get_span_consumer("direct") is c
-
-    def test_list_consumers(self) -> None:
-        register_span_consumer(_TestConsumer("a"))
-        register_span_consumer(_TestConsumer("b"))
-        names = list_span_consumers()
-        assert "a" in names
-        assert "b" in names
-
-    def test_get_missing(self) -> None:
-        assert get_span_consumer("nonexistent") is None
-
-    def test_clear_consumers(self) -> None:
-        register_span_consumer(_TestConsumer("temp"))
-        clear_span_consumers()
-        assert list_span_consumers() == []
-
-    def test_overwrite(self) -> None:
-        c1 = _TestConsumer("same")
-        c2 = _TestConsumer("same")
-        register_span_consumer(c1)
-        register_span_consumer(c2)
-        assert get_span_consumer("same") is c2
-
-
-# ---------------------------------------------------------------------------
-# Consumer registration — decorator
-# ---------------------------------------------------------------------------
-
-
-class TestConsumerRegistrationDecorator:
-    def test_decorator_on_class(self) -> None:
-        @register_span_consumer
-        class MyConsumer(SpanConsumer):
-            @property
-            def name(self) -> str:
-                return "decorated"
-
-            def consume(self, spans: Sequence[Any]) -> None:
-                pass
-
-        assert get_span_consumer("decorated") is not None
-        assert isinstance(MyConsumer, type)
-
-    def test_decorated_class_still_usable(self) -> None:
-        @register_span_consumer
-        class Another(SpanConsumer):
-            @property
-            def name(self) -> str:
-                return "another"
-
-            def consume(self, spans: Sequence[Any]) -> None:
-                pass
-
-        instance = Another()
-        assert instance.name == "another"
-
-
-# ---------------------------------------------------------------------------
-# dispatch_spans
-# ---------------------------------------------------------------------------
-
-
-class TestDispatchSpans:
-    def test_dispatch_to_single_consumer(self) -> None:
-        c = _TestConsumer("sink")
-        register_span_consumer(c)
-        dispatch_spans(["s1", "s2"])
-        assert len(c.received) == 1
-        assert c.received[0] == ["s1", "s2"]
-
-    def test_dispatch_to_multiple_consumers(self) -> None:
-        c1 = _TestConsumer("c1")
-        c2 = _TestConsumer("c2")
-        register_span_consumer(c1)
-        register_span_consumer(c2)
-        dispatch_spans(["span"])
-        assert len(c1.received) == 1
-        assert len(c2.received) == 1
-
-    def test_dispatch_empty_spans(self) -> None:
-        c = _TestConsumer("empty")
-        register_span_consumer(c)
-        dispatch_spans([])
-        assert len(c.received) == 1
-        assert c.received[0] == []
-
-    def test_dispatch_no_consumers(self) -> None:
-        dispatch_spans(["s1"])  # should not raise
 
 
 # ---------------------------------------------------------------------------

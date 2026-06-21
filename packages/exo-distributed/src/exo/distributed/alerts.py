@@ -6,13 +6,13 @@ worker availability, and task wait time using the global AlertManager.
 
 from __future__ import annotations
 
-from exo.observability.alerts import (  # pyright: ignore[reportMissingImports]
+from exo.distributed._alerts import (  # pyright: ignore[reportMissingImports]
     AlertRule,
     AlertSeverity,
     Comparator,
     get_manager,
 )
-from exo.observability.semconv import (  # pyright: ignore[reportMissingImports]
+from exo.distributed._semconv import (  # pyright: ignore[reportMissingImports]
     METRIC_DIST_QUEUE_DEPTH,
     METRIC_DIST_TASK_WAIT_TIME,
     METRIC_DIST_TASKS_FAILED,

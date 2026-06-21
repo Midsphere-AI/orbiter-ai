@@ -176,32 +176,62 @@ class TestCLIRun:
         monkeypatch.chdir(tmp_path)
         cfg = tmp_path / ".exo.yaml"
         cfg.write_text("agents:\n  bot:\n    model: test\n")
-        result = runner.invoke(app, ["run", "hello"])
+        mock_result = MagicMock()
+        mock_result.output = "Hello!"
+        mock_result.steps = 1
+        mock_result.elapsed = 0.1
+        mock_result.usage = {}
+        with patch("exo_cli.executor.LocalExecutor.execute", new_callable=AsyncMock, return_value=mock_result):
+            result = runner.invoke(app, ["run", "hello"])
         assert result.exit_code == 0
         assert "Running with input:" in result.output
 
     def test_run_with_explicit_config(self, tmp_path: Path) -> None:
         cfg = tmp_path / "custom.yaml"
         cfg.write_text("agents:\n  bot:\n    model: test\n")
-        result = runner.invoke(app, ["run", "--config", str(cfg), "hello"])
+        mock_result = MagicMock()
+        mock_result.output = "OK"
+        mock_result.steps = 1
+        mock_result.elapsed = 0.1
+        mock_result.usage = {}
+        with patch("exo_cli.executor.LocalExecutor.execute", new_callable=AsyncMock, return_value=mock_result):
+            result = runner.invoke(app, ["run", "--config", str(cfg), "hello"])
         assert result.exit_code == 0
 
     def test_run_with_model_flag(self, tmp_path: Path) -> None:
         cfg = tmp_path / "m.yaml"
-        cfg.write_text("agents: {}\n")
-        result = runner.invoke(app, ["run", "-c", str(cfg), "-m", "openai:gpt-4o", "test"])
+        cfg.write_text("agents:\n  bot:\n    model: test\n")
+        mock_result = MagicMock()
+        mock_result.output = "OK"
+        mock_result.steps = 1
+        mock_result.elapsed = 0.1
+        mock_result.usage = {}
+        with patch("exo_cli.executor.LocalExecutor.execute", new_callable=AsyncMock, return_value=mock_result):
+            result = runner.invoke(app, ["run", "-c", str(cfg), "-m", "openai:gpt-4o", "test"])
         assert result.exit_code == 0
 
     def test_run_with_stream_flag(self, tmp_path: Path) -> None:
         cfg = tmp_path / "s.yaml"
-        cfg.write_text("agents: {}\n")
-        result = runner.invoke(app, ["run", "-c", str(cfg), "--stream", "test"])
+        cfg.write_text("agents:\n  bot:\n    model: test\n")
+
+        async def _fake_stream(*_a: object, **_kw: object):
+            yield "chunk1"
+            yield "chunk2"
+
+        with patch("exo_cli.executor.LocalExecutor.stream", side_effect=_fake_stream):
+            result = runner.invoke(app, ["run", "-c", str(cfg), "--stream", "test"])
         assert result.exit_code == 0
 
     def test_run_verbose(self, tmp_path: Path) -> None:
         cfg = tmp_path / "v.yaml"
         cfg.write_text("agents:\n  a:\n    model: x\n")
-        result = runner.invoke(app, ["--verbose", "run", "-c", str(cfg), "test"])
+        mock_result = MagicMock()
+        mock_result.output = "Done"
+        mock_result.steps = 1
+        mock_result.elapsed = 0.2
+        mock_result.usage = {}
+        with patch("exo_cli.executor.LocalExecutor.execute", new_callable=AsyncMock, return_value=mock_result):
+            result = runner.invoke(app, ["--verbose", "run", "-c", str(cfg), "test"])
         assert result.exit_code == 0
         assert "Loaded config" in result.output
 
@@ -899,3 +929,122 @@ class TestWorkerListCommand:
         ) as mock_fn:
             runner.invoke(app, ["worker", "list"])
         mock_fn.assert_called_once_with("redis://envhost:6379")
+
+
+# ---------------------------------------------------------------------------
+# CLI: chat command
+# ---------------------------------------------------------------------------
+
+
+class TestChatCommand:
+    def test_chat_help(self) -> None:
+        result = runner.invoke(app, ["chat", "--help"])
+        assert result.exit_code == 0
+        assert "--config" in result.output
+        assert "--model" in result.output
+        assert "--stream" in result.output
+
+    def test_chat_no_config_exits_1(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        result = runner.invoke(app, ["chat"])
+        assert result.exit_code == 1
+        assert "No config file found" in result.output
+
+    def test_chat_with_config(self, tmp_path: Path) -> None:
+        cfg = tmp_path / "c.yaml"
+        cfg.write_text("agents:\n  bot:\n    model: test\n")
+        mock_console = MagicMock()
+        mock_console.start = AsyncMock()
+        with patch("exo_cli.console.InteractiveConsole", return_value=mock_console):
+            result = runner.invoke(app, ["chat", "-c", str(cfg)])
+        assert result.exit_code == 0
+        mock_console.start.assert_called_once()
+
+    def test_chat_with_model_override(self, tmp_path: Path) -> None:
+        cfg = tmp_path / "c.yaml"
+        cfg.write_text("agents:\n  bot:\n    model: test\n")
+        mock_console = MagicMock()
+        mock_console.start = AsyncMock()
+        with patch("exo_cli.console.InteractiveConsole", return_value=mock_console):
+            result = runner.invoke(app, ["chat", "-c", str(cfg), "-m", "openai:gpt-4o"])
+        assert result.exit_code == 0
+
+    def test_chat_empty_agents_exits_1(self, tmp_path: Path) -> None:
+        cfg = tmp_path / "c.yaml"
+        cfg.write_text("agents: {}\n")
+        result = runner.invoke(app, ["chat", "-c", str(cfg)])
+        assert result.exit_code == 1
+
+
+# ---------------------------------------------------------------------------
+# CLI: batch command
+# ---------------------------------------------------------------------------
+
+
+class TestBatchCommand:
+    def test_batch_help(self) -> None:
+        result = runner.invoke(app, ["batch", "--help"])
+        assert result.exit_code == 0
+        assert "--config" in result.output
+        assert "--concurrency" in result.output
+
+    def test_batch_no_config_exits_1(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        inputs = tmp_path / "in.jsonl"
+        inputs.write_text('{"input": "hello"}\n')
+        result = runner.invoke(app, ["batch", str(inputs)])
+        assert result.exit_code == 1
+        assert "No config file found" in result.output
+
+    def test_batch_missing_inputs_file_exits_1(self, tmp_path: Path) -> None:
+        cfg = tmp_path / "c.yaml"
+        cfg.write_text("agents:\n  bot:\n    model: test\n")
+        result = runner.invoke(app, ["batch", "-c", str(cfg), str(tmp_path / "missing.jsonl")])
+        assert result.exit_code == 1
+        assert "Error loading inputs" in result.output
+
+    def test_batch_runs_and_prints_results(self, tmp_path: Path) -> None:
+        cfg = tmp_path / "c.yaml"
+        cfg.write_text("agents:\n  bot:\n    model: test\n")
+        inputs = tmp_path / "in.jsonl"
+        inputs.write_text('{"input": "hello"}\n{"input": "world"}\n')
+
+        from exo_cli.batch import BatchResult, ItemResult
+
+        mock_batch_result = BatchResult(
+            results=[
+                ItemResult(item_id="1", success=True, output="hi", elapsed=0.1),
+                ItemResult(item_id="2", success=True, output="there", elapsed=0.1),
+            ],
+            total=2,
+            succeeded=2,
+            failed=0,
+        )
+        with patch("exo_cli.batch.batch_execute", new_callable=AsyncMock, return_value=mock_batch_result):
+            result = runner.invoke(app, ["batch", "-c", str(cfg), str(inputs)])
+        assert result.exit_code == 0
+        assert "2 items" in result.output
+
+    def test_batch_csv_output(self, tmp_path: Path) -> None:
+        cfg = tmp_path / "c.yaml"
+        cfg.write_text("agents:\n  bot:\n    model: test\n")
+        inputs = tmp_path / "in.jsonl"
+        inputs.write_text('{"input": "hello"}\n')
+
+        from exo_cli.batch import BatchResult, ItemResult
+
+        mock_batch_result = BatchResult(
+            results=[ItemResult(item_id="1", success=True, output="hi", elapsed=0.1)],
+            total=1,
+            succeeded=1,
+            failed=0,
+        )
+        with patch("exo_cli.batch.batch_execute", new_callable=AsyncMock, return_value=mock_batch_result):
+            result = runner.invoke(
+                app, ["batch", "-c", str(cfg), str(inputs), "--output-format", "csv"]
+            )
+        assert result.exit_code == 0

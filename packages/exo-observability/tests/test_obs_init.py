@@ -93,31 +93,6 @@ class TestLazyImports:
 
         assert HealthStatus is not None
 
-    def test_alert_severity(self) -> None:
-        from exo.observability import AlertSeverity  # pyright: ignore[reportMissingImports]
-
-        assert AlertSeverity is not None
-
-    def test_cost_tracker(self) -> None:
-        from exo.observability import CostTracker  # pyright: ignore[reportMissingImports]
-
-        assert CostTracker is not None
-
-    def test_slo_tracker(self) -> None:
-        from exo.observability import SLOTracker  # pyright: ignore[reportMissingImports]
-
-        assert SLOTracker is not None
-
-    def test_prompt_logger(self) -> None:
-        from exo.observability import PromptLogger  # pyright: ignore[reportMissingImports]
-
-        assert PromptLogger is not None
-
-    def test_baggage_propagator(self) -> None:
-        from exo.observability import BaggagePropagator  # pyright: ignore[reportMissingImports]
-
-        assert BaggagePropagator is not None
-
     def test_semconv_constant(self) -> None:
         from exo.observability import AGENT_NAME  # pyright: ignore[reportMissingImports]
 
@@ -132,17 +107,6 @@ class TestLazyImports:
         from exo.observability import HealthRegistry  # pyright: ignore[reportMissingImports]
 
         assert HealthRegistry is not None
-
-    def test_alert_manager(self) -> None:
-        from exo.observability import AlertManager  # pyright: ignore[reportMissingImports]
-
-        assert AlertManager is not None
-
-    def test_model_pricing(self) -> None:
-        from exo.observability import ModelPricing  # pyright: ignore[reportMissingImports]
-
-        assert ModelPricing is not None
-
 
 # ── Sub-module imports ────────────────────────────────────────────────────
 
@@ -182,37 +146,6 @@ class TestSubModuleImports:
         )
 
         assert HealthStatus is not None
-
-    def test_from_alerts(self) -> None:
-        from exo.observability.alerts import (  # pyright: ignore[reportMissingImports]
-            AlertManager,
-        )
-
-        assert AlertManager is not None
-
-    def test_from_cost(self) -> None:
-        from exo.observability.cost import CostTracker  # pyright: ignore[reportMissingImports]
-
-        assert CostTracker is not None
-
-    def test_from_slo(self) -> None:
-        from exo.observability.slo import SLOTracker  # pyright: ignore[reportMissingImports]
-
-        assert SLOTracker is not None
-
-    def test_from_prompt_logger(self) -> None:
-        from exo.observability.prompt_logger import (  # pyright: ignore[reportMissingImports]
-            PromptLogger,
-        )
-
-        assert PromptLogger is not None
-
-    def test_from_propagation(self) -> None:
-        from exo.observability.propagation import (  # pyright: ignore[reportMissingImports]
-            BaggagePropagator,
-        )
-
-        assert BaggagePropagator is not None
 
     def test_from_config(self) -> None:
         from exo.observability.config import (  # pyright: ignore[reportMissingImports]
@@ -294,48 +227,17 @@ class TestAllCompleteness:
         health = {"HealthStatus", "HealthResult", "HealthCheck", "HealthRegistry"}
         assert health.issubset(set(obs.__all__))
 
-    def test_all_includes_alert_symbols(self) -> None:
-        import exo.observability as obs  # pyright: ignore[reportMissingImports]
-
-        alerts = {"AlertSeverity", "AlertRule", "Alert", "AlertManager"}
-        assert alerts.issubset(set(obs.__all__))
-
-    def test_all_includes_cost_symbols(self) -> None:
-        import exo.observability as obs  # pyright: ignore[reportMissingImports]
-
-        cost = {"ModelPricing", "CostEntry", "CostTracker"}
-        assert cost.issubset(set(obs.__all__))
-
-    def test_all_includes_slo_symbols(self) -> None:
-        import exo.observability as obs  # pyright: ignore[reportMissingImports]
-
-        slo = {"SLO", "SLOReport", "SLOTracker"}
-        assert slo.issubset(set(obs.__all__))
-
     def test_all_includes_semconv_constants(self) -> None:
         import exo.observability as obs  # pyright: ignore[reportMissingImports]
 
         semconv = {"AGENT_NAME", "TOOL_NAME", "GEN_AI_SYSTEM", "COST_TOTAL_USD"}
         assert semconv.issubset(set(obs.__all__))
 
-    def test_all_includes_propagation_symbols(self) -> None:
-        import exo.observability as obs  # pyright: ignore[reportMissingImports]
-
-        propagation = {"BaggagePropagator", "SpanConsumer", "DictCarrier"}
-        assert propagation.issubset(set(obs.__all__))
-
     def test_all_includes_tracing_symbols(self) -> None:
         import exo.observability as obs  # pyright: ignore[reportMissingImports]
 
         tracing = {"NullSpan", "SpanLike", "extract_metadata", "traced", "span", "aspan"}
         assert tracing.issubset(set(obs.__all__))
-
-    def test_all_includes_prompt_logger_symbols(self) -> None:
-        import exo.observability as obs  # pyright: ignore[reportMissingImports]
-
-        pl = {"PromptLogger", "TokenBreakdown", "estimate_tokens"}
-        assert pl.issubset(set(obs.__all__))
-
 
 # ── Lazy loading behavior ────────────────────────────────────────────────
 
@@ -354,9 +256,9 @@ class TestLazyLoading:
         import exo.observability as obs  # pyright: ignore[reportMissingImports]
 
         # First access triggers __getattr__
-        val1 = obs.CostTracker
+        val1 = obs.MetricsCollector
         # Second access should come from globals (same object)
-        val2 = obs.CostTracker
+        val2 = obs.MetricsCollector
         assert val1 is val2
 
     def test_lazy_import_returns_correct_type(self) -> None:
@@ -439,4 +341,4 @@ class TestConveniencePatterns:
         # Python uses __all__ for `from module import *`
         # We verify __all__ is set and non-empty
         assert hasattr(obs, "__all__")
-        assert len(obs.__all__) > 100  # We have ~150+ symbols
+        assert len(obs.__all__) > 50  # Core logging, tracing, metrics, semconv, health, alerts

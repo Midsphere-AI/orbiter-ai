@@ -118,8 +118,14 @@ class TrajectoryValidator(Scorer):
 class TimeCostScorer(Scorer):
     """Scores based on execution time relative to a maximum budget.
 
-    Reads ``_time_cost_ms`` from the output dict (or falls back to 0).
-    Score = clamp(1.0 - elapsed / max_ms, 0.0, 1.0).
+    Reads ``_time_cost_ms`` from the output dict.  If the key is **absent**,
+    the scorer raises :exc:`KeyError` so callers (e.g. ``RalphRunner._analyze``
+    or the ``Evaluator``) can distinguish "timing not available" from a real
+    zero-time result.  Previously the scorer silently fell back to ``0 ms``,
+    which produced a spurious perfect score of 1.0 for any output that did not
+    carry timing information.
+
+    Score formula: ``clamp(1.0 - elapsed / max_ms, 0.0, 1.0)``.
     """
 
     __slots__ = ("_max_ms", "_name")
@@ -129,9 +135,13 @@ class TimeCostScorer(Scorer):
         self._name = name
 
     async def score(self, case_id: str, input: Any, output: Any) -> ScorerResult:
-        elapsed: float = 0.0
-        if isinstance(output, dict):
-            elapsed = float(output.get("_time_cost_ms", 0.0))
+        if not isinstance(output, dict) or "_time_cost_ms" not in output:
+            msg = (
+                f"TimeCostScorer (case={case_id!r}): '_time_cost_ms' key missing from output. "
+                "Include timing information in the output dict or skip this scorer."
+            )
+            raise KeyError(msg)
+        elapsed = float(output["_time_cost_ms"])
         score = max(0.0, min(1.0, 1.0 - elapsed / self._max_ms)) if self._max_ms > 0 else 0.0
         logger.debug("TimeCostScorer case=%s score=%.3f elapsed_ms=%.1f", case_id, score, elapsed)
         return ScorerResult(

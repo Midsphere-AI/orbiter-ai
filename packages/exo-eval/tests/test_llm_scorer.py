@@ -73,11 +73,11 @@ class TestLLMAsJudgeScorerInit:
 
 
 class TestLLMAsJudgeScorerScore:
-    async def test_no_judge_returns_error(self) -> None:
+    async def test_no_judge_raises(self) -> None:
+        """judge=None must raise ValueError — silent 0.0 was a footgun."""
         s = LLMAsJudgeScorer()
-        sr = await s.score("c1", "input", "output")
-        assert sr.score == 0.0
-        assert "error" in sr.details
+        with pytest.raises(ValueError, match="judge callable"):
+            await s.score("c1", "input", "output")
 
     async def test_with_judge(self) -> None:
         judge = _mock_judge({"score": 0.8, "explanation": "Good"})
@@ -300,9 +300,8 @@ class TestLogicConsistencyScorerScore:
 
     async def test_no_judge(self) -> None:
         s = LogicConsistencyScorer()
-        sr = await s.score("c1", None, "text")
-        assert sr.score == 0.0
-        assert "error" in sr.details
+        with pytest.raises(ValueError, match="judge callable"):
+            await s.score("c1", None, "text")
 
 
 # ---------------------------------------------------------------------------
@@ -348,8 +347,8 @@ class TestReasoningValidityScorerScore:
 
     async def test_no_judge(self) -> None:
         s = ReasoningValidityScorer()
-        sr = await s.score("c1", None, "text")
-        assert sr.score == 0.0
+        with pytest.raises(ValueError, match="judge callable"):
+            await s.score("c1", None, "text")
 
 
 # ---------------------------------------------------------------------------
@@ -432,8 +431,8 @@ class TestConstraintSatisfactionScorerScore:
 
     async def test_no_judge(self) -> None:
         s = ConstraintSatisfactionScorer(["a"])
-        sr = await s.score("c1", None, "text")
-        assert sr.score == 0.0
+        with pytest.raises(ValueError, match="judge callable"):
+            await s.score("c1", None, "text")
 
 
 # ---------------------------------------------------------------------------

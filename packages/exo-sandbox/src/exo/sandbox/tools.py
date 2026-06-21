@@ -1,4 +1,4 @@
-"""Built-in sandbox tools: filesystem access and terminal execution."""
+"""Built-in sandbox tools: filesystem access and shell/terminal execution."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ import platform
 import shlex
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from exo.tool import Tool, ToolError  # pyright: ignore[reportMissingImports]
 
@@ -160,7 +160,7 @@ class FilesystemTool(Tool):
 
 
 # ---------------------------------------------------------------------------
-# TerminalTool
+# ShellTool — unified command execution (allowlist or blacklist mode)
 # ---------------------------------------------------------------------------
 
 _DANGEROUS_COMMANDS: frozenset[str] = frozenset(
@@ -184,203 +184,6 @@ _DANGEROUS_COMMANDS: frozenset[str] = frozenset(
     }
 )
 
-_TERMINAL_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "command": {
-            "type": "string",
-            "description": "Shell command to execute.",
-        },
-    },
-    "required": ["command"],
-}
-
-
-class TerminalTool(Tool):
-    """Sandboxed terminal tool with command filtering and timeout.
-
-    Dangerous commands (``rm``, ``shutdown``, etc.) are blocked by default.
-    Custom blacklists can be provided.  All commands run with a configurable
-    timeout to prevent runaway processes.
-
-    When a ``sandbox`` is provided, commands are executed remotely via
-    :meth:`~Sandbox.run_tool` instead of on the local machine.
-    """
-
-    name = "terminal"
-    description = "Execute a shell command in the sandbox."
-    parameters = _TERMINAL_SCHEMA
-
-    def __init__(
-        self,
-        *,
-        blacklist: frozenset[str] | None = None,
-        timeout: float = 30.0,
-        sandbox: Any | None = None,
-    ) -> None:
-        self._blacklist: frozenset[str] = (
-            blacklist if blacklist is not None else _DANGEROUS_COMMANDS
-        )
-        self._timeout = timeout
-        self._sandbox = sandbox
-
-    @property
-    def platform(self) -> str:
-        """Return the current platform identifier."""
-        return sys.platform
-
-    @staticmethod
-    def _split_command_segments(command: str) -> list[str]:
-        """Split *command* on shell control operators to get individual command segments.
-
-        First splits on literal newlines (each newline introduces a new shell statement),
-        then tokenizes each resulting line with ``shlex`` so that quoted strings are
-        handled correctly, and finally collects the text between shell control tokens
-        (``|``, ``||``, ``&&``, ``;``, ``&``).  Returns each non-empty segment as a
-        string so the caller can inspect the leading executable of every chained
-        sub-command.
-        """
-        # Shell control operators that introduce a new command context.
-        _control = frozenset({"|", "||", "&&", ";", "&"})
-
-        segments: list[str] = []
-
-        # A newline in the shell is a command delimiter equivalent to ';', so
-        # pre-split on newlines before tokenising each line individually.
-        for line in command.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                lex = shlex.shlex(line, posix=True)
-                lex.whitespace_split = True
-                tokens = list(lex)
-            except ValueError:
-                # shlex couldn't parse (e.g. unterminated quote) — treat the
-                # whole line as a single opaque segment.
-                segments.append(line)
-                continue
-
-            current: list[str] = []
-            for tok in tokens:
-                if tok in _control:
-                    if current:
-                        segments.append(" ".join(current))
-                        current = []
-                else:
-                    current.append(tok)
-
-            if current:
-                segments.append(" ".join(current))
-
-        return [s for s in segments if s.strip()]
-
-    def _check_command(self, command: str) -> None:
-        """Raise ``ToolError`` if any sub-command in *command* is blacklisted.
-
-        Security rationale: the command is executed via ``asyncio.create_subprocess_shell``
-        which passes the string to ``/bin/sh -c``.  Checking only ``parts[0]`` of the
-        whole string is insufficient — an attacker can chain blocked commands using shell
-        control operators (``; && || | &``) or embed them in command substitutions
-        (``$(…)`` / backticks).
-
-        Defense strategy:
-        - Reject immediately if the command contains command-substitution syntax
-          (``$(`` or backticks) because the substituted commands cannot be safely
-          validated without executing them.
-        - Otherwise, split on all shell control operators and check the leading
-          executable of **every** resulting segment against the blocklist.
-        """
-        stripped = command.strip()
-        if not stripped:
-            raise ToolError("Empty command")
-
-        # Block command substitution — $(...) and backtick forms inject arbitrary
-        # commands that we cannot inspect without running the shell.
-        if "$(" in stripped or "`" in stripped:
-            logger.warning(
-                "TerminalTool: blocked command with command substitution (sandbox policy)"
-            )
-            raise ToolError("Command substitution ('$()' / backticks) is not permitted")
-
-        blacklist_lower = {b.lower() for b in self._blacklist}
-
-        for segment in self._split_command_segments(stripped):
-            seg_parts = segment.strip().split()
-            if not seg_parts:
-                continue
-            base = seg_parts[0].rsplit("/", maxsplit=1)[-1]  # strip path prefix
-            base = base.rsplit("\\", maxsplit=1)[-1]
-            if base.lower() in blacklist_lower:
-                logger.warning("TerminalTool: blocked command %r (sandbox policy)", base)
-                raise ToolError(f"Command {base!r} is blocked by sandbox policy")
-
-    async def execute(self, **kwargs: Any) -> str | dict[str, Any]:
-        command: str = kwargs.get("command", "")
-        if not command.strip():
-            raise ToolError("Empty command")
-
-        self._check_command(command)
-
-        if self._sandbox is not None:
-            try:
-                result = await self._sandbox.run_tool("command", {"command": command})
-                return result  # type: ignore[no-any-return]
-            except ToolError:
-                raise
-            except Exception as exc:
-                raise ToolError(f"Sandbox command execution failed: {exc}") from exc
-
-        logger.debug("TerminalTool: executing %r (timeout=%.1fs)", command, self._timeout)
-
-        if platform.system() == "Windows":
-            prog: str | None = None  # use default shell
-        else:
-            prog = "/bin/sh"
-
-        proc: asyncio.subprocess.Process | None = None
-        try:
-            proc = await asyncio.create_subprocess_shell(
-                command,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                executable=prog,
-            )
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=self._timeout)
-        except TimeoutError as exc:
-            if proc is not None:
-                proc.kill()
-                await proc.wait()
-            logger.warning(
-                "TerminalTool: command timed out after %.1fs: %r", self._timeout, command
-            )
-            raise ToolError(f"Command timed out after {self._timeout}s") from exc
-        except asyncio.CancelledError:
-            if proc is not None:
-                proc.kill()
-                await proc.wait()
-            logger.debug("TerminalTool: cancelled, killed subprocess for %r", command)
-            raise
-        except Exception as exc:
-            if proc is not None and proc.returncode is None:
-                proc.kill()
-                await proc.wait()
-            logger.error("TerminalTool: execution failed for %r: %s", command, exc)
-            raise ToolError(f"Command execution failed: {exc}") from exc
-
-        logger.debug("TerminalTool: %r exited with code %s", command, proc.returncode)
-        return {
-            "exit_code": proc.returncode,
-            "stdout": stdout.decode(errors="replace") if stdout else "",
-            "stderr": stderr.decode(errors="replace") if stderr else "",
-            "platform": self.platform,
-        }
-
-
-# ---------------------------------------------------------------------------
-# ShellTool (allowlist-based shell command execution)
-# ---------------------------------------------------------------------------
-
 _DEFAULT_ALLOWED_COMMANDS: list[str] = [
     "ls",
     "cat",
@@ -401,7 +204,7 @@ _SHELL_SCHEMA: dict[str, Any] = {
     "properties": {
         "command": {
             "type": "string",
-            "description": "Shell command to execute (must start with an allowed command).",
+            "description": "Shell command to execute.",
         },
     },
     "required": ["command"],
@@ -409,49 +212,70 @@ _SHELL_SCHEMA: dict[str, Any] = {
 
 
 class ShellTool(Tool):
-    """Allowlist-based shell tool for safe command execution.
+    """Unified shell/terminal tool with configurable command filtering.
 
-    Only commands whose base executable is in the allowlist are permitted.
-    Uses ``asyncio.create_subprocess_exec()`` (no shell) for safety.
-    Output is truncated to 10,000 characters.
+    Two modes are supported, selected via the ``mode`` parameter:
 
-    When a ``sandbox`` is provided, commands are executed remotely via
-    :meth:`~Sandbox.run_tool` instead of on the local machine.
+    ``"allowlist"`` (default)
+        Only commands whose base executable appears in *allowed_commands* are
+        permitted.  Execution uses ``asyncio.create_subprocess_exec()`` (no
+        shell expansion) and output is truncated to 10,000 characters.
+
+    ``"blacklist"``
+        Commands in *blacklist* are rejected; all other commands are permitted.
+        Execution uses ``asyncio.create_subprocess_shell()`` so pipes and
+        redirects work.  Command-substitution syntax (``$(…)`` / backticks)
+        is also blocked because inner commands cannot be safely validated.
+
+    When a ``sandbox`` is provided, commands are forwarded to
+    :meth:`~Sandbox.run_tool` instead of running locally.
     """
 
     name = "shell"
-    description = "Execute a shell command from the configured allowlist."
+    description = "Execute a shell command in the sandbox."
     parameters = _SHELL_SCHEMA
 
     def __init__(
         self,
         *,
+        mode: Literal["allowlist", "blacklist"] = "allowlist",
         allowed_commands: list[str] | None = None,
+        blacklist: frozenset[str] | None = None,
         timeout: float = 30.0,
         sandbox: Any | None = None,
     ) -> None:
+        if mode not in ("allowlist", "blacklist"):
+            raise ValueError(f"mode must be 'allowlist' or 'blacklist', got {mode!r}")
+        self._mode = mode
         self._allowed: list[str] = (
             list(allowed_commands)
             if allowed_commands is not None
             else list(_DEFAULT_ALLOWED_COMMANDS)
         )
+        self._blacklist: frozenset[str] = (
+            blacklist if blacklist is not None else _DANGEROUS_COMMANDS
+        )
         self._timeout = timeout
         self._sandbox = sandbox
 
+    @property
+    def platform(self) -> str:
+        """Return the current platform identifier."""
+        return sys.platform
+
+    # -- allowlist helpers --------------------------------------------------
+
     def _validate_command(self, command: str) -> list[str]:
-        """Parse and validate *command* against the allowlist."""
+        """Parse *command* and verify the base executable is in the allowlist."""
         stripped = command.strip()
         if not stripped:
             raise ToolError("Empty command")
-
         try:
             parts = shlex.split(stripped)
         except ValueError as exc:
             raise ToolError(f"Invalid command syntax: {exc}") from exc
-
         if not parts:
             raise ToolError("Empty command")
-
         base = parts[0].rsplit("/", maxsplit=1)[-1]
         if base not in self._allowed:
             raise ToolError(f"Command {base!r} is not in the allowed list: {self._allowed}")
@@ -464,8 +288,77 @@ class ShellTool(Tool):
             return text
         return text[:_MAX_OUTPUT_CHARS] + f"\n... (truncated at {_MAX_OUTPUT_CHARS} chars)"
 
+    # -- blacklist helpers --------------------------------------------------
+
+    @staticmethod
+    def _split_command_segments(command: str) -> list[str]:
+        """Split *command* on shell control operators to get individual command segments.
+
+        First splits on literal newlines, then tokenizes each line with
+        ``shlex`` and collects segments between control tokens
+        (``|``, ``||``, ``&&``, ``;``, ``&``).
+        """
+        _control = frozenset({"|", "||", "&&", ";", "&"})
+        segments: list[str] = []
+        for line in command.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                lex = shlex.shlex(line, posix=True)
+                lex.whitespace_split = True
+                tokens = list(lex)
+            except ValueError:
+                segments.append(line)
+                continue
+            current: list[str] = []
+            for tok in tokens:
+                if tok in _control:
+                    if current:
+                        segments.append(" ".join(current))
+                        current = []
+                else:
+                    current.append(tok)
+            if current:
+                segments.append(" ".join(current))
+        return [s for s in segments if s.strip()]
+
+    def _check_command(self, command: str) -> None:
+        """Raise ``ToolError`` if any sub-command in *command* is blacklisted.
+
+        Also rejects command-substitution syntax (``$(…)`` / backticks)
+        because the substituted commands cannot be safely validated.
+        """
+        stripped = command.strip()
+        if not stripped:
+            raise ToolError("Empty command")
+        if "$(" in stripped or "`" in stripped:
+            logger.warning("ShellTool: blocked command with command substitution (sandbox policy)")
+            raise ToolError("Command substitution ('$()' / backticks) is not permitted")
+        blacklist_lower = {b.lower() for b in self._blacklist}
+        for segment in self._split_command_segments(stripped):
+            seg_parts = segment.strip().split()
+            if not seg_parts:
+                continue
+            base = seg_parts[0].rsplit("/", maxsplit=1)[-1]
+            base = base.rsplit("\\", maxsplit=1)[-1]
+            if base.lower() in blacklist_lower:
+                logger.warning("ShellTool: blocked command %r (sandbox policy)", base)
+                raise ToolError(f"Command {base!r} is blocked by sandbox policy")
+
+    # -- execution ----------------------------------------------------------
+
     async def execute(self, **kwargs: Any) -> str | dict[str, Any]:
         command: str = kwargs.get("command", "")
+        if not command.strip():
+            raise ToolError("Empty command")
+
+        if self._mode == "allowlist":
+            return await self._exec_allowlist(command)
+        return await self._exec_blacklist(command)
+
+    async def _exec_allowlist(self, command: str) -> dict[str, Any]:
+        """Run command via allowlist validation and subprocess exec (no shell)."""
         parts = self._validate_command(command)
 
         if self._sandbox is not None:
@@ -494,12 +387,95 @@ class ShellTool(Tool):
 
         stdout_str = stdout.decode(errors="replace") if stdout else ""
         stderr_str = stderr.decode(errors="replace") if stderr else ""
-
         return {
             "exit_code": proc.returncode,
             "stdout": self._truncate(stdout_str),
             "stderr": self._truncate(stderr_str),
         }
+
+    async def _exec_blacklist(self, command: str) -> dict[str, Any]:
+        """Run command via blacklist validation and subprocess shell."""
+        self._check_command(command)
+
+        if self._sandbox is not None:
+            try:
+                result = await self._sandbox.run_tool("command", {"command": command})
+                return result  # type: ignore[no-any-return]
+            except ToolError:
+                raise
+            except Exception as exc:
+                raise ToolError(f"Sandbox command execution failed: {exc}") from exc
+
+        logger.debug("ShellTool: executing %r (timeout=%.1fs)", command, self._timeout)
+
+        if platform.system() == "Windows":
+            prog: str | None = None
+        else:
+            prog = "/bin/sh"
+
+        proc: asyncio.subprocess.Process | None = None
+        try:
+            proc = await asyncio.create_subprocess_shell(
+                command,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                executable=prog,
+            )
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=self._timeout)
+        except TimeoutError as exc:
+            if proc is not None:
+                proc.kill()
+                await proc.wait()
+            logger.warning(
+                "ShellTool: command timed out after %.1fs: %r", self._timeout, command
+            )
+            raise ToolError(f"Command timed out after {self._timeout}s") from exc
+        except asyncio.CancelledError:
+            if proc is not None:
+                proc.kill()
+                await proc.wait()
+            logger.debug("ShellTool: cancelled, killed subprocess for %r", command)
+            raise
+        except Exception as exc:
+            if proc is not None and proc.returncode is None:
+                proc.kill()
+                await proc.wait()
+            logger.error("ShellTool: execution failed for %r: %s", command, exc)
+            raise ToolError(f"Command execution failed: {exc}") from exc
+
+        logger.debug("ShellTool: %r exited with code %s", command, proc.returncode)
+        return {
+            "exit_code": proc.returncode,
+            "stdout": stdout.decode(errors="replace") if stdout else "",
+            "stderr": stderr.decode(errors="replace") if stderr else "",
+            "platform": self.platform,
+        }
+
+
+#: ``TerminalTool`` is a convenience alias for ``ShellTool`` in blacklist mode.
+#: Prefer constructing ``ShellTool(mode="blacklist", ...)`` directly.
+class TerminalTool(ShellTool):
+    """Blacklist-based terminal tool — a thin alias for ``ShellTool(mode="blacklist")``.
+
+    Deprecated: construct ``ShellTool(mode="blacklist", ...)`` directly.
+    """
+
+    name = "terminal"
+    description = "Execute a shell command in the sandbox."
+
+    def __init__(
+        self,
+        *,
+        blacklist: frozenset[str] | None = None,
+        timeout: float = 30.0,
+        sandbox: Any | None = None,
+    ) -> None:
+        super().__init__(
+            mode="blacklist",
+            blacklist=blacklist,
+            timeout=timeout,
+            sandbox=sandbox,
+        )
 
 
 def shell_tool(

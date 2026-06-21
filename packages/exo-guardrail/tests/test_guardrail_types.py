@@ -169,7 +169,6 @@ class TestGuardrailResult:
         assert result.risk_level == RiskLevel.SAFE
         assert result.risk_type is None
         assert result.details == {}
-        assert result.modified_data is None
 
     def test_block_factory(self) -> None:
         result = GuardrailResult.block(
@@ -181,7 +180,6 @@ class TestGuardrailResult:
         assert result.risk_level == RiskLevel.CRITICAL
         assert result.risk_type == "prompt_injection"
         assert result.details == {"pattern": "ignore previous"}
-        assert result.modified_data is None
 
     def test_block_default_details(self) -> None:
         result = GuardrailResult.block(
@@ -194,17 +192,6 @@ class TestGuardrailResult:
         result = GuardrailResult.safe()
         with pytest.raises(Exception):  # noqa: B017
             result.is_safe = False  # type: ignore[misc]
-
-    def test_create_with_modified_data(self) -> None:
-        result = GuardrailResult(
-            is_safe=True,
-            risk_level=RiskLevel.LOW,
-            risk_type="sanitized",
-            modified_data={"messages": ["cleaned"]},
-        )
-        assert result.is_safe is True
-        assert result.risk_level == RiskLevel.LOW
-        assert result.modified_data == {"messages": ["cleaned"]}
 
     def test_details_default_factory(self) -> None:
         """Each instance gets its own details dict."""

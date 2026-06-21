@@ -87,23 +87,43 @@ def resource_read(
     vault = get_vault(ctx)
 
     async def _run() -> None:
+        import base64
+
         from pydantic import AnyUrl
 
         async with connect_to_server(entry, vault) as session:
             result = await session.read_resource(AnyUrl(uri))
             if output:
-                # Write to file
-                out_path = Path(output)
-                for item in getattr(result, "contents", []):
+                contents = getattr(result, "contents", [])
+                if len(contents) == 1:
+                    # Single-blob: write to the exact path given.
+                    out_path = Path(output)
+                    item = contents[0]
                     text = getattr(item, "text", None)
                     if text is not None:
                         out_path.write_text(text, encoding="utf-8")
                     else:
-                        import base64
-
                         blob = getattr(item, "blob", "")
                         out_path.write_bytes(base64.b64decode(blob))
-                print_success(f"Written to {out_path}")
+                    print_success(f"Written to {out_path}")
+                else:
+                    # Multi-blob: index filenames as <base>.<n>[.<ext>] so no item
+                    # is silently overwritten.
+                    base_path = Path(output)
+                    stem = base_path.stem
+                    suffix = base_path.suffix
+                    written: list[Path] = []
+                    for idx, item in enumerate(contents):
+                        indexed_path = base_path.with_name(f"{stem}.{idx}{suffix}")
+                        text = getattr(item, "text", None)
+                        if text is not None:
+                            indexed_path.write_text(text, encoding="utf-8")
+                        else:
+                            blob = getattr(item, "blob", "")
+                            indexed_path.write_bytes(base64.b64decode(blob))
+                        written.append(indexed_path)
+                    for p in written:
+                        print_success(f"Written to {p}")
             else:
                 print_resource_contents(result)
 

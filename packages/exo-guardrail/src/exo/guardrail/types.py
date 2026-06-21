@@ -37,6 +37,11 @@ class RiskAssessment(BaseModel):
     has_risk: bool
     risk_level: RiskLevel
     risk_type: str | None = None
+    # NOTE: confidence is populated by backends (e.g. PatternBackend uses match
+    # count; LLMGuardrailBackend forwards the model's self-reported confidence)
+    # but is not currently used in blocking decisions inside BaseGuardrail.
+    # It is exposed for callers that want to implement confidence-threshold
+    # policies at the application layer.
     confidence: float = 1.0
     details: dict[str, Any] = Field(default_factory=dict)
 
@@ -89,14 +94,13 @@ class GuardrailBackend(ABC):
 
 
 class GuardrailResult(BaseModel):
-    """Outcome of a guardrail check, including an optional data modification.
+    """Outcome of a guardrail check.
 
     Attributes:
         is_safe: Whether the data passed the guardrail check.
         risk_level: Severity of the detected risk.
         risk_type: Category of risk (e.g., "prompt_injection", "pii_leak").
         details: Additional metadata for logging and auditing.
-        modified_data: Optionally sanitised version of the original data.
     """
 
     model_config = {"frozen": True}
@@ -105,7 +109,6 @@ class GuardrailResult(BaseModel):
     risk_level: RiskLevel
     risk_type: str | None = None
     details: dict[str, Any] = Field(default_factory=dict)
-    modified_data: dict[str, Any] | None = None
 
     @classmethod
     def safe(cls) -> GuardrailResult:

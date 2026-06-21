@@ -1,8 +1,7 @@
-"""MCP execution utilities — retry logic, config loading, and env var substitution."""
+"""MCP execution utilities — config loading and env var substitution."""
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import os
@@ -21,91 +20,7 @@ logger = logging.getLogger(__name__)
 
 
 class MCPExecutionError(MCPClientError):
-    """Error raised during MCP tool execution with retries."""
-
-
-# ---------------------------------------------------------------------------
-# Retry wrapper
-# ---------------------------------------------------------------------------
-
-
-async def call_tool_with_retry(
-    client: Any,
-    server_name: str,
-    tool_name: str,
-    arguments: dict[str, Any] | None = None,
-    *,
-    max_retries: int = 3,
-    timeout: float | None = None,
-    backoff_base: float = 1.0,
-) -> Any:
-    """Call an MCP tool with retry logic and optional timeout.
-
-    Retries on transient failures with exponential backoff (``backoff_base * 2^attempt``).
-    Timeout wraps each individual attempt, not the total call.
-
-    Args:
-        client: An MCPClient or MCPServerConnection with ``call_tool()``.
-        server_name: Server name (used for MCPClient routing; ignored for connections).
-        tool_name: Name of the tool to call.
-        arguments: Tool arguments.
-        max_retries: Maximum number of retry attempts (0 = no retries, just one attempt).
-        timeout: Per-attempt timeout in seconds. None = no timeout.
-        backoff_base: Base delay in seconds for exponential backoff.
-
-    Returns:
-        CallToolResult from the MCP server.
-
-    Raises:
-        MCPExecutionError: After all retries are exhausted or on non-retryable errors.
-    """
-    last_error: Exception | None = None
-
-    for attempt in range(max_retries + 1):
-        try:
-            coro = (
-                client.call_tool(server_name, tool_name, arguments)
-                if hasattr(client, "server_names")
-                else client.call_tool(tool_name, arguments)
-            )
-            if timeout is not None:
-                result = await asyncio.wait_for(coro, timeout=timeout)
-            else:
-                result = await coro
-            return result
-
-        except TimeoutError as exc:
-            last_error = exc
-            logger.warning(
-                "MCP tool '%s' on '%s' timed out (attempt %d/%d)",
-                tool_name,
-                server_name,
-                attempt + 1,
-                max_retries + 1,
-            )
-
-        except MCPClientError:
-            raise
-
-        except Exception as exc:
-            last_error = exc
-            logger.warning(
-                "MCP tool '%s' on '%s' failed (attempt %d/%d): %s",
-                tool_name,
-                server_name,
-                attempt + 1,
-                max_retries + 1,
-                exc,
-            )
-
-        if attempt < max_retries:
-            delay = backoff_base * (2**attempt)
-            await asyncio.sleep(delay)
-
-    raise MCPExecutionError(
-        f"MCP tool '{tool_name}' on '{server_name}' failed after "
-        f"{max_retries + 1} attempts: {last_error}"
-    ) from last_error
+    """Error raised during MCP config loading or execution."""
 
 
 # ---------------------------------------------------------------------------

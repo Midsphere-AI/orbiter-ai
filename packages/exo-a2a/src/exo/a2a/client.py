@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import logging
-import threading
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -139,20 +138,25 @@ class A2AClient:
         except httpx.HTTPError as exc:
             raise A2AClientError(f"Task request failed: {exc}") from exc
 
-    async def send_task_streaming(
+    async def send_task_collect(
         self,
         text: str,
         *,
         task_id: str | None = None,
     ) -> list[dict[str, Any]]:
-        """Send a task with streaming and collect all events.
+        """Send a task to the streaming endpoint and collect all NDJSON events.
+
+        This method **buffers the full response** before returning — it is
+        *not* a true async generator.  It exists for convenience when the
+        caller wants a simple list of events rather than incremental delivery.
+        The remote server must have streaming enabled (``ServingConfig(streaming=True)``).
 
         Args:
             text: The input text for the task.
             task_id: Optional task identifier.
 
         Returns:
-            List of parsed NDJSON event dicts.
+            List of parsed NDJSON event dicts received from ``/stream``.
 
         Raises:
             A2AClientError: If the request fails or streaming is not supported.
@@ -188,60 +192,6 @@ class A2AClient:
     def __repr__(self) -> str:
         name = self._agent_card.name if self._agent_card else self._source or "unresolved"
         return f"A2AClient({name!r})"
-
-
-# ---------------------------------------------------------------------------
-# Thread-safe client manager
-# ---------------------------------------------------------------------------
-
-
-class ClientManager:
-    """Thread-safe manager that provides per-thread A2A client instances.
-
-    Each thread gets its own ``A2AClient`` via ``get_client()``.  Clients
-    are cleaned up when ``shutdown()`` is called.
-
-    Args:
-        agent_card: Agent card or source string to pass to each client.
-        config: Client configuration shared across all threads.
-    """
-
-    __slots__ = ("_agent_card", "_clients", "_config", "_local", "_lock")
-
-    def __init__(
-        self,
-        agent_card: AgentCard | str,
-        config: ClientConfig | None = None,
-    ) -> None:
-        self._agent_card = agent_card
-        self._config = config
-        self._local = threading.local()
-        self._clients: dict[int, A2AClient] = {}
-        self._lock = threading.Lock()
-
-    def get_client(self) -> A2AClient:
-        """Return the A2A client for the current thread, creating if needed."""
-        tid = threading.get_ident()
-        client: A2AClient | None = getattr(self._local, "client", None)
-        if client is None:
-            client = A2AClient(self._agent_card, self._config)
-            self._local.client = client
-            with self._lock:
-                self._clients[tid] = client
-        return client
-
-    async def shutdown(self) -> None:
-        """Close all client instances across all threads."""
-        with self._lock:
-            clients = list(self._clients.values())
-            self._clients.clear()
-        for client in clients:
-            await client.close()
-
-    def __repr__(self) -> str:
-        with self._lock:
-            count = len(self._clients)
-        return f"ClientManager(clients={count})"
 
 
 # ---------------------------------------------------------------------------

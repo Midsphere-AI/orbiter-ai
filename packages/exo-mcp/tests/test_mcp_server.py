@@ -12,7 +12,6 @@ from exo.mcp.server import (  # pyright: ignore[reportMissingImports]
     MCPServerRegistry,
     _register_methods,
     mcp_server,
-    server_registry,
 )
 
 # ---------------------------------------------------------------------------
@@ -135,43 +134,6 @@ class TestMCPServerRegistryClear:
 # ---------------------------------------------------------------------------
 # @mcp_server() decorator tests
 # ---------------------------------------------------------------------------
-
-
-@pytest.fixture(autouse=True)
-def _clear_global_registry() -> None:
-    """Ensure global registry is clean for each test."""
-    server_registry.clear()
-
-
-class TestMCPServerDecoratorRegistration:
-    def test_registers_in_global_registry(self) -> None:
-        with patch("exo.mcp.server.FastMCP"):
-
-            @mcp_server(name="test-server")
-            class TestServer:
-                pass
-
-        assert server_registry.has("test-server")
-        assert server_registry.get_class("test-server") is TestServer
-
-    def test_default_name_from_class(self) -> None:
-        with patch("exo.mcp.server.FastMCP"):
-
-            @mcp_server()
-            class MyCalculator:
-                pass
-
-        assert server_registry.has("MyCalculator")
-
-    def test_custom_name(self) -> None:
-        with patch("exo.mcp.server.FastMCP"):
-
-            @mcp_server(name="custom-calc")
-            class Calculator:
-                pass
-
-        assert server_registry.has("custom-calc")
-        assert not server_registry.has("Calculator")
 
 
 class TestMCPServerDecoratorInit:
@@ -456,25 +418,3 @@ class TestRegisterMethods:
         names = _register_methods(inst, mock_mcp)
         assert names == []
 
-
-# ---------------------------------------------------------------------------
-# Global registry (module-level singleton) tests
-# ---------------------------------------------------------------------------
-
-
-class TestGlobalRegistry:
-    def test_global_registry_exists(self) -> None:
-        assert isinstance(server_registry, MCPServerRegistry)
-
-    def test_decorator_uses_global_registry(self) -> None:
-        with patch("exo.mcp.server.FastMCP"):
-
-            @mcp_server(name="global-test")
-            class GlobalSrv:
-                pass
-
-        assert server_registry.has("global-test")
-
-    def test_global_registry_cleared_between_tests(self) -> None:
-        # The autouse fixture clears global registry
-        assert len(server_registry) == 0

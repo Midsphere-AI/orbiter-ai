@@ -43,14 +43,8 @@ def _mock_k8s_api() -> MagicMock:
     # create_namespaced_pod returns a pod object
     api.create_namespaced_pod.return_value = MagicMock()
 
-    # create_namespaced_service returns a service with cluster_ip
-    svc = MagicMock()
-    svc.spec.cluster_ip = "10.0.0.42"
-    api.create_namespaced_service.return_value = svc
-
     # delete operations succeed
     api.delete_namespaced_pod.return_value = MagicMock()
-    api.delete_namespaced_service.return_value = MagicMock()
 
     return api
 
@@ -67,7 +61,6 @@ class TestInit:
         assert sb.image == _DEFAULT_IMAGE
         assert sb.status == SandboxStatus.INIT
         assert sb.pod_name is None
-        assert sb.cluster_ip is None
 
     def test_custom_values(self) -> None:
         sb = KubernetesSandbox(
@@ -138,13 +131,6 @@ class TestManifests:
         assert manifest["spec"]["containers"][0]["image"] == "myimg:v1"
         assert manifest["spec"]["restartPolicy"] == "Never"
 
-    def test_service_manifest(self) -> None:
-        sb = KubernetesSandbox(sandbox_id="xyz", namespace="dev")
-        manifest = sb._service_manifest()
-        assert manifest["metadata"]["name"] == "exo-svc-xyz"
-        assert manifest["metadata"]["namespace"] == "dev"
-        assert manifest["spec"]["selector"]["sandbox-id"] == "xyz"
-
 
 # ---------------------------------------------------------------------------
 # TestStart
@@ -152,7 +138,7 @@ class TestManifests:
 
 
 class TestStart:
-    async def test_start_creates_pod_and_service(self) -> None:
+    async def test_start_creates_pod(self) -> None:
         sb = KubernetesSandbox(sandbox_id="s1")
         api = _mock_k8s_api()
         sb._k8s_client = api
@@ -161,9 +147,10 @@ class TestStart:
 
         assert sb.status == SandboxStatus.RUNNING
         assert sb.pod_name == "exo-s1"
-        assert sb.cluster_ip == "10.0.0.42"
         api.create_namespaced_pod.assert_called_once()
-        api.create_namespaced_service.assert_called_once()
+        # Service must NOT be created
+        assert not hasattr(api, "create_namespaced_service") or \
+            api.create_namespaced_service.call_count == 0
 
     async def test_start_waits_for_pod_ready(self) -> None:
         sb = KubernetesSandbox(sandbox_id="s2")
@@ -218,7 +205,7 @@ class TestStart:
 
 
 class TestStop:
-    async def test_stop_deletes_resources(self) -> None:
+    async def test_stop_deletes_pod(self) -> None:
         sb = KubernetesSandbox(sandbox_id="s5")
         api = _mock_k8s_api()
         sb._k8s_client = api
@@ -228,9 +215,7 @@ class TestStop:
 
         assert sb.status == SandboxStatus.IDLE
         assert sb.pod_name is None
-        assert sb.cluster_ip is None
         api.delete_namespaced_pod.assert_called_once()
-        api.delete_namespaced_service.assert_called_once()
 
     async def test_stop_no_client(self) -> None:
         sb = KubernetesSandbox(sandbox_id="s6")
@@ -259,7 +244,6 @@ class TestCleanup:
 
         assert sb.status == SandboxStatus.CLOSED
         api.delete_namespaced_pod.assert_called_once()
-        api.delete_namespaced_service.assert_called_once()
 
     async def test_cleanup_tolerates_delete_errors(self) -> None:
         sb = KubernetesSandbox(sandbox_id="s8")
@@ -268,7 +252,6 @@ class TestCleanup:
         await sb.start()
 
         api.delete_namespaced_pod.side_effect = RuntimeError("gone")
-        api.delete_namespaced_service.side_effect = RuntimeError("gone")
 
         await sb.cleanup()  # should not raise
         assert sb.status == SandboxStatus.CLOSED
@@ -308,25 +291,25 @@ class TestRunTool:
         with pytest.raises(SandboxError, match="Sandbox must be running"):
             await sb.run_tool("tool", {})
 
-    async def test_run_tool_unregistered_pod_exec_fails_no_client(self) -> None:
-        """Unregistered tool triggers pod exec path; raises if k8s unavailable."""
+    async def test_run_tool_unregistered_raises_clear_error(self) -> None:
+        """Unregistered tool raises a clear SandboxError (not a misleading ImportError)."""
         sb = KubernetesSandbox(sandbox_id="s11")
         api = _mock_k8s_api()
         sb._k8s_client = api
         await sb.start()
 
-        # Mock the kubernetes stream import to simulate missing package
-        with (
-            patch.dict(
-                "sys.modules",
-                {
-                    "kubernetes.stream": None,
-                    "kubernetes.stream.stream": None,
-                },
-            ),
-            pytest.raises(SandboxError),
-        ):
+        with pytest.raises(SandboxError, match="not registered"):
             await sb.run_tool("unknown_tool", {})
+
+    async def test_run_tool_unregistered_error_names_tool(self) -> None:
+        """Error message includes the tool name for clear diagnostics."""
+        sb = KubernetesSandbox(sandbox_id="s12")
+        api = _mock_k8s_api()
+        sb._k8s_client = api
+        await sb.start()
+
+        with pytest.raises(SandboxError, match="my_missing_tool"):
+            await sb.run_tool("my_missing_tool", {})
 
 
 # ---------------------------------------------------------------------------
@@ -360,8 +343,8 @@ class TestDescribe:
         assert info["namespace"] == "ns"
         assert info["image"] == "img:v1"
         assert info["pod_name"] is None
-        assert info["service_name"] is None
-        assert info["cluster_ip"] is None
+        assert "service_name" not in info
+        assert "cluster_ip" not in info
 
     async def test_describe_after_start(self) -> None:
         sb = KubernetesSandbox(sandbox_id="d2")
@@ -371,8 +354,6 @@ class TestDescribe:
 
         info = sb.describe()
         assert info["pod_name"] == "exo-d2"
-        assert info["service_name"] == "exo-svc-d2"
-        assert info["cluster_ip"] == "10.0.0.42"
 
     def test_repr(self) -> None:
         sb = KubernetesSandbox(sandbox_id="r1")

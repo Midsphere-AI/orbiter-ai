@@ -6,6 +6,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from exo.distributed._propagation import (  # pyright: ignore[reportMissingImports]
+    BaggagePropagator,
+    DictCarrier,
+    clear_baggage,
+    get_baggage,
+    set_baggage,
+)
 from exo.distributed.cancel import CancellationToken  # pyright: ignore[reportMissingImports]
 from exo.distributed.client import distributed  # pyright: ignore[reportMissingImports]
 from exo.distributed.models import (  # pyright: ignore[reportMissingImports]
@@ -14,13 +21,6 @@ from exo.distributed.models import (  # pyright: ignore[reportMissingImports]
     TaskStatus,
 )
 from exo.distributed.worker import Worker  # pyright: ignore[reportMissingImports]
-from exo.observability.propagation import (  # pyright: ignore[reportMissingImports]
-    BaggagePropagator,
-    DictCarrier,
-    clear_baggage,
-    get_baggage,
-    set_baggage,
-)
 
 
 @pytest.fixture(autouse=True)

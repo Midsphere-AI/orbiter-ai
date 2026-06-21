@@ -97,10 +97,14 @@ def _mock_provider(content: str = "Hello!") -> AsyncMock:
 
 
 class TestBaseGuardrailConstruction:
-    def test_default_no_backend(self) -> None:
-        guard = BaseGuardrail()
-        assert guard.backend is None
-        assert guard.events == []
+    def test_no_backend_raises_value_error(self) -> None:
+        """BaseGuardrail(backend=None) must raise ValueError — no silent no-ops."""
+        with pytest.raises(ValueError, match="requires a backend"):
+            BaseGuardrail()
+
+    def test_explicit_none_backend_raises_value_error(self) -> None:
+        with pytest.raises(ValueError, match="requires a backend"):
+            BaseGuardrail(backend=None)
 
     def test_with_backend_and_events(self) -> None:
         backend = SafeBackend()
@@ -109,7 +113,8 @@ class TestBaseGuardrailConstruction:
         assert guard.events == ["pre_llm_call"]
 
     def test_multiple_events(self) -> None:
-        guard = BaseGuardrail(events=["pre_llm_call", "pre_tool_call"])
+        backend = SafeBackend()
+        guard = BaseGuardrail(backend=backend, events=["pre_llm_call", "pre_tool_call"])
         assert guard.events == ["pre_llm_call", "pre_tool_call"]
 
 
@@ -119,12 +124,6 @@ class TestBaseGuardrailConstruction:
 
 
 class TestDetect:
-    async def test_no_backend_returns_safe(self) -> None:
-        guard = BaseGuardrail()
-        result = await guard.detect("pre_llm_call", messages=[])
-        assert result.is_safe is True
-        assert result.risk_level == RiskLevel.SAFE
-
     async def test_safe_backend_returns_safe(self) -> None:
         guard = BaseGuardrail(backend=SafeBackend())
         result = await guard.detect("pre_llm_call", messages=[])
@@ -167,7 +166,7 @@ class TestDetect:
 class TestAttachDetach:
     def test_attach_registers_hooks(self) -> None:
         agent = Agent(name="bot")
-        guard = BaseGuardrail(events=["pre_llm_call", "post_llm_call"])
+        guard = BaseGuardrail(backend=SafeBackend(), events=["pre_llm_call", "post_llm_call"])
 
         guard.attach(agent)
 
@@ -179,7 +178,7 @@ class TestAttachDetach:
     def test_attach_idempotent(self) -> None:
         """Calling attach twice on the same agent does not double-register."""
         agent = Agent(name="bot")
-        guard = BaseGuardrail(events=["pre_llm_call"])
+        guard = BaseGuardrail(backend=SafeBackend(), events=["pre_llm_call"])
 
         guard.attach(agent)
         guard.attach(agent)
@@ -189,7 +188,7 @@ class TestAttachDetach:
 
     def test_detach_removes_hooks(self) -> None:
         agent = Agent(name="bot", memory=None, context=None)
-        guard = BaseGuardrail(events=["pre_llm_call", "post_llm_call"])
+        guard = BaseGuardrail(backend=SafeBackend(), events=["pre_llm_call", "post_llm_call"])
 
         guard.attach(agent)
         guard.detach(agent)
@@ -199,7 +198,7 @@ class TestAttachDetach:
 
     def test_detach_without_attach_is_safe(self) -> None:
         agent = Agent(name="bot")
-        guard = BaseGuardrail(events=["pre_llm_call"])
+        guard = BaseGuardrail(backend=SafeBackend(), events=["pre_llm_call"])
 
         # Should not raise
         guard.detach(agent)
@@ -215,7 +214,7 @@ class TestAttachDetach:
             name="bot",
             hooks=[(HookPoint.PRE_LLM_CALL, existing_hook)],
         )
-        guard = BaseGuardrail(events=["pre_llm_call"])
+        guard = BaseGuardrail(backend=SafeBackend(), events=["pre_llm_call"])
 
         guard.attach(agent)
 
@@ -233,7 +232,7 @@ class TestAttachDetach:
             name="bot",
             hooks=[(HookPoint.PRE_LLM_CALL, existing_hook)],
         )
-        guard = BaseGuardrail(events=["pre_llm_call"])
+        guard = BaseGuardrail(backend=SafeBackend(), events=["pre_llm_call"])
 
         guard.attach(agent)
         guard.detach(agent)
@@ -245,7 +244,7 @@ class TestAttachDetach:
 
     def test_invalid_event_raises(self) -> None:
         agent = Agent(name="bot")
-        guard = BaseGuardrail(events=["not_a_real_event"])
+        guard = BaseGuardrail(backend=SafeBackend(), events=["not_a_real_event"])
 
         with pytest.raises(ValueError, match="Unknown hook point"):
             guard.attach(agent)
@@ -302,11 +301,11 @@ class TestGuardrailHookIntegration:
         output = await agent.run("Suspicious input", provider=provider)
         assert output.text == "Proceeding."
 
-    async def test_no_backend_allows_agent_run(self) -> None:
-        """Guardrail without backend does not interfere with agent."""
+    async def test_safe_backend_allows_agent_run(self) -> None:
+        """Guardrail with a safe backend does not interfere with agent."""
         provider = _mock_provider(content="Fine.")
         agent = Agent(name="bot")
-        guard = BaseGuardrail(events=["pre_llm_call"])
+        guard = BaseGuardrail(backend=SafeBackend(), events=["pre_llm_call"])
         guard.attach(agent)
 
         output = await agent.run("Hello", provider=provider)

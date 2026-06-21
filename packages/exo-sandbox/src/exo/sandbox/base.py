@@ -1,8 +1,7 @@
-"""Sandbox interface and local implementation for safe agent execution."""
+"""Sandbox interface for safe agent execution."""
 
 from __future__ import annotations
 
-import inspect
 import logging
 import uuid
 from abc import ABC, abstractmethod
@@ -150,99 +149,3 @@ class Sandbox(ABC):
         return (
             f"{type(self).__name__}(sandbox_id={self._sandbox_id!r}, status={self._status.value!r})"
         )
-
-
-# ---------------------------------------------------------------------------
-# LocalSandbox
-# ---------------------------------------------------------------------------
-
-
-class LocalSandbox(Sandbox):
-    """Sandbox that executes on the local machine.
-
-    Pass a *tools* mapping of ``{tool_name: Tool}`` to enable real tool
-    execution via :meth:`run_tool`.  Tools must expose an async
-    ``execute(**kwargs)`` method (as defined by :class:`exo.tool.Tool`).
-    """
-
-    __slots__ = (
-        "_agents",
-        "_mcp_config",
-        "_sandbox_id",
-        "_status",
-        "_timeout",
-        "_tools",
-        "_workspace",
-    )
-
-    def __init__(
-        self,
-        *,
-        sandbox_id: str | None = None,
-        workspace: list[str] | None = None,
-        mcp_config: dict[str, Any] | None = None,
-        agents: dict[str, Any] | None = None,
-        timeout: float = 30.0,
-        tools: dict[str, Any] | None = None,
-    ) -> None:
-        super().__init__(
-            sandbox_id=sandbox_id,
-            workspace=workspace,
-            mcp_config=mcp_config,
-            agents=agents,
-            timeout=timeout,
-        )
-        self._tools: dict[str, Any] = dict(tools) if tools else {}
-
-    def register_tool(self, tool: Any) -> None:
-        """Register a :class:`~exo.tool.Tool` instance for use in :meth:`run_tool`."""
-        self._tools[tool.name] = tool
-
-    async def start(self) -> None:
-        logger.info("Sandbox %s: starting", self._sandbox_id)
-        self._transition(SandboxStatus.RUNNING)
-
-    async def stop(self) -> None:
-        logger.info("Sandbox %s: stopping", self._sandbox_id)
-        self._transition(SandboxStatus.IDLE)
-
-    async def cleanup(self) -> None:
-        self._transition(SandboxStatus.CLOSED)
-
-    async def run_tool(self, tool_name: str, arguments: dict[str, Any]) -> Any:
-        """Execute a registered tool by name within this sandbox.
-
-        The tool's ``execute(**arguments)`` method is called directly.
-        Both async and sync callables are supported (sync callables are
-        awaited if they return a coroutine).
-
-        Raises :class:`SandboxError` if the sandbox is not running or if
-        no tool matching *tool_name* is registered.
-        """
-        if self._status != SandboxStatus.RUNNING:
-            msg = f"Sandbox must be running to call tools (status={self._status!r})"
-            raise SandboxError(msg)
-
-        tool = self._tools.get(tool_name)
-        if tool is None:
-            msg = f"Tool {tool_name!r} is not registered in this sandbox"
-            raise SandboxError(msg)
-
-        logger.debug("Sandbox %s: executing tool %r", self._sandbox_id, tool_name)
-        try:
-            result = tool.execute(**arguments)
-            if inspect.isawaitable(result):
-                result = await result
-            return result
-        except SandboxError:
-            raise
-        except Exception as exc:
-            logger.error("Sandbox %s: tool %r raised %s", self._sandbox_id, tool_name, exc)
-            raise SandboxError(f"Tool {tool_name!r} failed: {exc}") from exc
-
-    async def __aenter__(self) -> LocalSandbox:
-        await self.start()
-        return self
-
-    async def __aexit__(self, *exc: object) -> None:
-        await self.cleanup()

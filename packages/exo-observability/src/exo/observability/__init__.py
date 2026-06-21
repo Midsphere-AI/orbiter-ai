@@ -1,4 +1,4 @@
-"""Exo Observability: structured logging, tracing, metrics, cost tracking.
+"""Exo Observability: structured logging, tracing, metrics, health checks.
 
 Convenience imports -- the most common symbols are available directly::
 
@@ -94,102 +94,17 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     "record_tool_step": ("exo.observability.metrics", "record_tool_step"),
     "Timer": ("exo.observability.metrics", "Timer"),
     "timer": ("exo.observability.metrics", "timer"),
-    # prompt logger
-    "DEFAULT_CHAR_TOKEN_RATIO": (
-        "exo.observability.prompt_logger",
-        "DEFAULT_CHAR_TOKEN_RATIO",
-    ),
-    "estimate_tokens": (
-        "exo.observability.prompt_logger",
-        "estimate_tokens",
-    ),
-    "TokenBreakdown": (
-        "exo.observability.prompt_logger",
-        "TokenBreakdown",
-    ),
-    "compute_token_breakdown": (
-        "exo.observability.prompt_logger",
-        "compute_token_breakdown",
-    ),
-    "ExecutionLogEntry": (
-        "exo.observability.prompt_logger",
-        "ExecutionLogEntry",
-    ),
-    "PromptLogger": ("exo.observability.prompt_logger", "PromptLogger"),
-    # propagation
-    "BAGGAGE_HEADER": (
-        "exo.observability.propagation",
-        "BAGGAGE_HEADER",
-    ),
-    "MAX_HEADER_LENGTH": (
-        "exo.observability.propagation",
-        "MAX_HEADER_LENGTH",
-    ),
-    "MAX_PAIR_LENGTH": (
-        "exo.observability.propagation",
-        "MAX_PAIR_LENGTH",
-    ),
-    "MAX_PAIRS": ("exo.observability.propagation", "MAX_PAIRS"),
-    "Carrier": ("exo.observability.propagation", "Carrier"),
-    "DictCarrier": ("exo.observability.propagation", "DictCarrier"),
-    "get_baggage": ("exo.observability.propagation", "get_baggage"),
-    "get_baggage_value": (
-        "exo.observability.propagation",
-        "get_baggage_value",
-    ),
-    "set_baggage": ("exo.observability.propagation", "set_baggage"),
-    "clear_baggage": ("exo.observability.propagation", "clear_baggage"),
-    "BaggagePropagator": (
-        "exo.observability.propagation",
-        "BaggagePropagator",
-    ),
-    "SpanConsumer": ("exo.observability.propagation", "SpanConsumer"),
-    "register_span_consumer": (
-        "exo.observability.propagation",
-        "register_span_consumer",
-    ),
-    "get_span_consumer": (
-        "exo.observability.propagation",
-        "get_span_consumer",
-    ),
-    "list_span_consumers": (
-        "exo.observability.propagation",
-        "list_span_consumers",
-    ),
-    "dispatch_spans": ("exo.observability.propagation", "dispatch_spans"),
-    "clear_span_consumers": (
-        "exo.observability.propagation",
-        "clear_span_consumers",
-    ),
     # health
     "HealthStatus": ("exo.observability.health", "HealthStatus"),
     "HealthResult": ("exo.observability.health", "HealthResult"),
     "HealthCheck": ("exo.observability.health", "HealthCheck"),
     "MemoryUsageCheck": ("exo.observability.health", "MemoryUsageCheck"),
-    "EventLoopCheck": ("exo.observability.health", "EventLoopCheck"),
     "HealthRegistry": ("exo.observability.health", "HealthRegistry"),
     "get_registry": ("exo.observability.health", "get_registry"),
     "get_health_summary": (
         "exo.observability.health",
         "get_health_summary",
     ),
-    # alerts
-    "AlertSeverity": ("exo.observability.alerts", "AlertSeverity"),
-    "Comparator": ("exo.observability.alerts", "Comparator"),
-    "AlertRule": ("exo.observability.alerts", "AlertRule"),
-    "Alert": ("exo.observability.alerts", "Alert"),
-    "AlertCallback": ("exo.observability.alerts", "AlertCallback"),
-    "AlertManager": ("exo.observability.alerts", "AlertManager"),
-    "get_manager": ("exo.observability.alerts", "get_manager"),
-    # cost
-    "ModelPricing": ("exo.observability.cost", "ModelPricing"),
-    "CostEntry": ("exo.observability.cost", "CostEntry"),
-    "CostTracker": ("exo.observability.cost", "CostTracker"),
-    "get_tracker": ("exo.observability.cost", "get_tracker"),
-    # slo
-    "SLO": ("exo.observability.slo", "SLO"),
-    "SLOReport": ("exo.observability.slo", "SLOReport"),
-    "SLOTracker": ("exo.observability.slo", "SLOTracker"),
 }
 
 # Semconv constants — all lazy-loaded from semconv module
@@ -241,19 +156,7 @@ _SEMCONV_NAMES: list[str] = [
     "SPAN_PREFIX_TOOL",
     "SPAN_PREFIX_LLM",
     "SPAN_PREFIX_TASK",
-    "DIST_TASK_ID",
-    "DIST_WORKER_ID",
-    "DIST_QUEUE_NAME",
-    "DIST_TASK_STATUS",
-    "METRIC_DIST_TASKS_SUBMITTED",
-    "METRIC_DIST_TASKS_COMPLETED",
-    "METRIC_DIST_TASKS_FAILED",
-    "METRIC_DIST_TASKS_CANCELLED",
-    "METRIC_DIST_QUEUE_DEPTH",
-    "METRIC_DIST_TASK_DURATION",
-    "METRIC_DIST_TASK_WAIT_TIME",
     "METRIC_STREAM_EVENTS_EMITTED",
-    "METRIC_STREAM_EVENT_PUBLISH_DURATION",
     "STREAM_EVENT_TYPE",
 ]
 for _name in _SEMCONV_NAMES:

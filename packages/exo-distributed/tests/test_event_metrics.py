@@ -6,6 +6,9 @@ from unittest.mock import patch
 
 import pytest
 
+from exo.distributed._semconv import (  # pyright: ignore[reportMissingImports]
+    METRIC_STREAM_EVENT_PUBLISH_DURATION,
+)
 from exo.distributed.events import (  # pyright: ignore[reportMissingImports]
     EventPublisher,
     _record_event_published,
@@ -15,7 +18,6 @@ from exo.observability.metrics import (  # pyright: ignore[reportMissingImports]
     reset_metrics,
 )
 from exo.observability.semconv import (  # pyright: ignore[reportMissingImports]
-    METRIC_STREAM_EVENT_PUBLISH_DURATION,
     METRIC_STREAM_EVENTS_EMITTED,
     STREAM_EVENT_TYPE,
 )

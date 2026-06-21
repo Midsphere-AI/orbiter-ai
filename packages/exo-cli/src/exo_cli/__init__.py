@@ -24,7 +24,6 @@ from exo_cli.loader import (
     validate_agent,
 )
 from exo_cli.main import CLIError, app, find_config, load_config, resolve_config
-from exo_cli.plugins import PluginError, PluginHook, PluginManager, PluginSpec
 
 __all__: list[str] = [
     "AgentLoadError",
@@ -38,10 +37,6 @@ __all__: list[str] = [
     "InteractiveConsole",
     "ItemResult",
     "LocalExecutor",
-    "PluginError",
-    "PluginHook",
-    "PluginManager",
-    "PluginSpec",
     "app",
     "discover_agent_files",
     "find_config",

@@ -5,6 +5,9 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from exo.guardrail._helpers import (  # pyright: ignore[reportMissingImports]
+    _extract_latest_user_message,
+)
 from exo.guardrail.base import BaseGuardrail  # pyright: ignore[reportMissingImports]
 from exo.guardrail.types import (  # pyright: ignore[reportMissingImports]
     GuardrailBackend,
@@ -169,6 +172,10 @@ class UserInputGuardrail(BaseGuardrail):
 # Helpers
 # ---------------------------------------------------------------------------
 
+# _extract_latest_user_message is imported from _helpers and re-exported here
+# so that existing test imports (from exo.guardrail.user_input import
+# _extract_latest_user_message) continue to work.
+
 _RISK_ORDER: dict[RiskLevel, int] = {
     RiskLevel.SAFE: 0,
     RiskLevel.LOW: 1,
@@ -180,32 +187,3 @@ _RISK_ORDER: dict[RiskLevel, int] = {
 
 def _risk_rank(level: RiskLevel) -> int:
     return _RISK_ORDER.get(level, 0)
-
-
-def _extract_latest_user_message(data: dict[str, Any]) -> str:
-    """Return the text content of the last user message, or ``""``.
-
-    Handles both plain dicts (``{"role": "user", "content": "..."}``),
-    and Pydantic message objects with ``.role`` / ``.content`` attributes
-    (e.g. ``UserMessage``).
-    """
-    messages = data.get("messages")
-    if not isinstance(messages, list):
-        return ""
-    for msg in reversed(messages):
-        # Support both dict-like and object-like messages.
-        role = msg.get("role") if isinstance(msg, dict) else getattr(msg, "role", None)
-        if role != "user":
-            continue
-        content = msg.get("content", "") if isinstance(msg, dict) else getattr(msg, "content", "")
-        if isinstance(content, str):
-            return content
-        # Handle list-format content (e.g. [{"type": "text", "text": "..."}])
-        if isinstance(content, list):
-            parts = []
-            for part in content:
-                if isinstance(part, dict) and part.get("type") == "text":
-                    parts.append(part.get("text", ""))
-            return " ".join(parts)
-        return ""
-    return ""

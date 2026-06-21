@@ -10,9 +10,9 @@ from httpx import ASGITransport, AsyncClient
 
 from exo.a2a.server import (  # pyright: ignore[reportMissingImports]
     A2AServer,
+    A2ATaskStore,
     AgentExecutor,
     InMemoryTaskStore,
-    TaskStore,
 )
 from exo.a2a.types import (  # pyright: ignore[reportMissingImports]
     AgentSkill,
@@ -72,7 +72,7 @@ class TestInMemoryTaskStore:
         assert await store.get("t1") == {"v": 2}
 
     def test_protocol_conformance(self) -> None:
-        assert isinstance(InMemoryTaskStore(), TaskStore)
+        assert isinstance(InMemoryTaskStore(), A2ATaskStore)
 
     def test_repr(self) -> None:
         store = InMemoryTaskStore()

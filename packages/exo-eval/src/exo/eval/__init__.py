@@ -33,8 +33,15 @@ from exo.eval.scorers import (  # pyright: ignore[reportMissingImports]
     OutputCompletenessScorer,
     OutputCorrectnessScorer,
     OutputLengthScorer,
-    OutputRelevanceScorer,
     SchemaValidationScorer,
+)
+from exo.eval.trajectory import (  # pyright: ignore[reportMissingImports]
+    DefaultStrategy,
+    TrajectoryDataset,
+    TrajectoryError,
+    TrajectoryExtractor,
+    TrajectoryItem,
+    TrajectoryStrategy,
 )
 from exo.eval.trajectory_scorers import (  # pyright: ignore[reportMissingImports]
     AnswerAccuracyLLMScorer,
@@ -46,9 +53,28 @@ from exo.eval.trajectory_scorers import (  # pyright: ignore[reportMissingImport
     scorer_register,
 )
 
+# ---------------------------------------------------------------------------
+# Register all rule-based scorers in the scorer registry.
+# trajectory_scorers.py registers its own four classes via @scorer_register.
+# The rule-based scorers from scorers.py are registered here so the registry
+# is fully populated when the package is imported.
+# ---------------------------------------------------------------------------
+scorer_register("format")(FormatValidationScorer)
+scorer_register("schema")(SchemaValidationScorer)
+scorer_register("correctness")(OutputCorrectnessScorer)
+scorer_register("length")(OutputLengthScorer)
+scorer_register("completeness")(OutputCompletenessScorer)
+# LLM-based scorers (require a judge callable at construction time)
+scorer_register("llm_judge")(LLMAsJudgeScorer)
+scorer_register("output_quality")(OutputQualityScorer)
+scorer_register("logic_consistency")(LogicConsistencyScorer)
+scorer_register("reasoning_validity")(ReasoningValidityScorer)
+scorer_register("constraint_satisfaction")(ConstraintSatisfactionScorer)
+
 __all__: list[str] = [
     "AnswerAccuracyLLMScorer",
     "ConstraintSatisfactionScorer",
+    "DefaultStrategy",
     "EvalCaseResult",
     "EvalCriteria",
     "EvalError",
@@ -65,7 +91,6 @@ __all__: list[str] = [
     "OutputCorrectnessScorer",
     "OutputLengthScorer",
     "OutputQualityScorer",
-    "OutputRelevanceScorer",
     "ReasoningValidityScorer",
     "ReflectionHistory",
     "ReflectionLevel",
@@ -76,6 +101,11 @@ __all__: list[str] = [
     "Scorer",
     "ScorerResult",
     "TimeCostScorer",
+    "TrajectoryDataset",
+    "TrajectoryError",
+    "TrajectoryExtractor",
+    "TrajectoryItem",
+    "TrajectoryStrategy",
     "TrajectoryValidator",
     "get_scorer",
     "list_scorers",

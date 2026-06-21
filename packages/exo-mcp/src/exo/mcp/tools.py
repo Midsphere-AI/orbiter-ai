@@ -497,35 +497,3 @@ async def load_tools_from_connection(
     return tools
 
 
-async def load_tools_from_client(
-    client: Any,
-    *,
-    namespace: str = DEFAULT_NAMESPACE,
-    tool_filter: MCPToolFilter | None = None,
-) -> list[MCPToolWrapper]:
-    """Load and convert tools from all servers in an MCP client.
-
-    Args:
-        client: An MCPClient (duck-typed: needs ``server_names``,
-            ``connect(name)``, connection has ``list_tools()`` and ``call_tool()``).
-        namespace: Namespace prefix for tool names.
-        tool_filter: Optional filter for including/excluding tools.
-
-    Returns:
-        List of MCPToolWrapper instances from all servers.
-
-    Raises:
-        MCPToolError: If tool loading fails for any server.
-    """
-    all_tools: list[MCPToolWrapper] = []
-    for server_name in client.server_names:
-        conn = await client.connect(server_name)
-        tools = await load_tools_from_connection(conn, namespace=namespace, tool_filter=tool_filter)
-        all_tools.extend(tools)
-        logger.debug("Server '%s': loaded %d tools", server_name, len(tools))
-    logger.debug(
-        "Total tools loaded from client: %d across %d servers",
-        len(all_tools),
-        len(client.server_names),
-    )
-    return all_tools

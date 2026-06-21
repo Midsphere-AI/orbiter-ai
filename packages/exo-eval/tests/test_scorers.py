@@ -12,7 +12,6 @@ from exo.eval.scorers import (  # pyright: ignore[reportMissingImports]
     OutputCompletenessScorer,
     OutputCorrectnessScorer,
     OutputLengthScorer,
-    OutputRelevanceScorer,
     SchemaValidationScorer,
 )
 
@@ -267,38 +266,6 @@ class TestOutputLengthScorer:
         assert sr.details["length"] == 4
         assert sr.details["min"] == 1
         assert sr.details["max"] == 100
-
-
-# ---------------------------------------------------------------------------
-# OutputRelevanceScorer
-# ---------------------------------------------------------------------------
-
-
-class TestOutputRelevanceScorer:
-    async def test_full_overlap(self) -> None:
-        s = OutputRelevanceScorer()
-        sr = await s.score("c1", "hello world", "hello world")
-        assert sr.score == 1.0
-
-    async def test_partial_overlap(self) -> None:
-        s = OutputRelevanceScorer()
-        sr = await s.score("c1", "hello world", "hello there")
-        assert sr.score == pytest.approx(0.5)
-
-    async def test_no_overlap(self) -> None:
-        s = OutputRelevanceScorer()
-        sr = await s.score("c1", "alpha beta", "gamma delta")
-        assert sr.score == 0.0
-
-    async def test_empty_input(self) -> None:
-        s = OutputRelevanceScorer()
-        sr = await s.score("c1", "", "some output")
-        assert sr.score == 0.0
-
-    async def test_custom_name(self) -> None:
-        s = OutputRelevanceScorer(name="rel")
-        sr = await s.score("c1", "x", "y")
-        assert sr.scorer_name == "rel"
 
 
 # ---------------------------------------------------------------------------

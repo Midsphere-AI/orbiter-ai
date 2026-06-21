@@ -210,7 +210,9 @@ class AlertManager:
             else:
                 cb(alert)  # type: ignore[arg-type]
         except Exception:
-            logger.error("alert callback %r failed for rule %r", cb, alert.rule_name, exc_info=True)
+            logger.error(
+                "alert callback %r failed for rule %r", cb, alert.rule_name, exc_info=True
+            )
 
 
 # ---------------------------------------------------------------------------

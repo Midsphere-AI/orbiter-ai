@@ -9,6 +9,10 @@ import time
 from collections.abc import AsyncIterator
 from typing import Any
 
+from exo.distributed._propagation import (  # pyright: ignore[reportMissingImports]
+    BaggagePropagator,
+    DictCarrier,
+)
 from exo.distributed.broker import TaskBroker  # pyright: ignore[reportMissingImports]
 from exo.distributed.events import EventSubscriber  # pyright: ignore[reportMissingImports]
 from exo.distributed.models import (  # pyright: ignore[reportMissingImports]
@@ -17,10 +21,6 @@ from exo.distributed.models import (  # pyright: ignore[reportMissingImports]
     TaskStatus,
 )
 from exo.distributed.store import TaskStore  # pyright: ignore[reportMissingImports]
-from exo.observability.propagation import (  # pyright: ignore[reportMissingImports]
-    BaggagePropagator,
-    DictCarrier,
-)
 from exo.observability.tracing import aspan  # pyright: ignore[reportMissingImports]
 from exo.types import ExoError, StreamEvent  # pyright: ignore[reportMissingImports]
 

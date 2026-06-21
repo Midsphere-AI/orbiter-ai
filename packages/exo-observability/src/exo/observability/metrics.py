@@ -203,6 +203,38 @@ def build_tool_attributes(
 
 
 # ---------------------------------------------------------------------------
+# OTel instrument cache — create once per meter instance, reuse on every call
+# ---------------------------------------------------------------------------
+
+# Keyed by (meter_id, instrument_name) so the cache is invalidated automatically
+# when the global MeterProvider changes (e.g. between tests).
+_otel_counters: dict[tuple[int, str], Any] = {}
+_otel_histograms: dict[tuple[int, str], Any] = {}
+
+
+def _get_counter(name: str) -> Any:
+    """Return a cached OTel counter for the current meter, creating it on first use."""
+    meter = _get_meter()
+    # Use the meter's MeterProvider identity as part of the key so the cache is
+    # invalidated automatically when the global MeterProvider is replaced.
+    provider = getattr(meter, "_meter_provider", meter)
+    key = (id(provider), name)
+    if key not in _otel_counters:
+        _otel_counters[key] = meter.create_counter(name=name)
+    return _otel_counters[key]
+
+
+def _get_histogram(name: str) -> Any:
+    """Return a cached OTel histogram for the current meter, creating it on first use."""
+    meter = _get_meter()
+    provider = getattr(meter, "_meter_provider", meter)
+    key = (id(provider), name)
+    if key not in _otel_histograms:
+        _otel_histograms[key] = meter.create_histogram(name=name)
+    return _otel_histograms[key]
+
+
+# ---------------------------------------------------------------------------
 # Branching helpers — encapsulate OTel vs in-memory dispatch
 # ---------------------------------------------------------------------------
 
@@ -210,7 +242,7 @@ def build_tool_attributes(
 def _increment_counter(name: str, attrs: dict[str, Any], *, value: float = 1.0) -> None:
     """Increment a counter via OTel or the in-memory fallback."""
     if HAS_OTEL:
-        _get_meter().create_counter(name=name).add(value, attrs)
+        _get_counter(name).add(value, attrs)
     else:
         _collector.add_counter(name, value, attrs)
 
@@ -218,7 +250,7 @@ def _increment_counter(name: str, attrs: dict[str, Any], *, value: float = 1.0) 
 def _record_histogram_value(name: str, value: float, attrs: dict[str, Any]) -> None:
     """Record a histogram observation via OTel or the in-memory fallback."""
     if HAS_OTEL:
-        _get_meter().create_histogram(name=name).record(value, attrs)
+        _get_histogram(name).record(value, attrs)
     else:
         _collector.record_histogram(name, value, attrs)
 

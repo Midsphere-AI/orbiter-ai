@@ -6,6 +6,17 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from exo.distributed._alerts import (  # pyright: ignore[reportMissingImports]
+    AlertRule,
+    AlertSeverity,
+    get_manager,
+    reset,
+)
+from exo.distributed._semconv import (  # pyright: ignore[reportMissingImports]
+    METRIC_DIST_QUEUE_DEPTH,
+    METRIC_DIST_TASK_WAIT_TIME,
+    METRIC_DIST_TASKS_FAILED,
+)
 from exo.distributed.alerts import (  # pyright: ignore[reportMissingImports]
     METRIC_WORKER_COUNT,
     RULE_FAILURE_RATE_WARNING,
@@ -14,17 +25,6 @@ from exo.distributed.alerts import (  # pyright: ignore[reportMissingImports]
     RULE_WAIT_TIME_WARNING,
     RULE_WORKER_COUNT_CRITICAL,
     register_distributed_alerts,
-)
-from exo.observability.alerts import (  # pyright: ignore[reportMissingImports]
-    AlertRule,
-    AlertSeverity,
-    get_manager,
-    reset,
-)
-from exo.observability.semconv import (  # pyright: ignore[reportMissingImports]
-    METRIC_DIST_QUEUE_DEPTH,
-    METRIC_DIST_TASK_WAIT_TIME,
-    METRIC_DIST_TASKS_FAILED,
 )
 
 

@@ -15,6 +15,10 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import redis.asyncio as aioredis
 
+from exo.distributed._propagation import (  # pyright: ignore[reportMissingImports]
+    BaggagePropagator,
+    DictCarrier,
+)
 from exo.distributed.broker import TaskBroker  # pyright: ignore[reportMissingImports]
 from exo.distributed.cancel import CancellationToken  # pyright: ignore[reportMissingImports]
 from exo.distributed.events import EventPublisher  # pyright: ignore[reportMissingImports]
@@ -29,14 +33,10 @@ from exo.distributed.models import (  # pyright: ignore[reportMissingImports]
 )
 from exo.distributed.store import TaskStore  # pyright: ignore[reportMissingImports]
 from exo.distributed.temporal import HAS_TEMPORAL  # pyright: ignore[reportMissingImports]
-from exo.observability.propagation import (  # pyright: ignore[reportMissingImports]
-    BaggagePropagator,
-    DictCarrier,
-)
 from exo.observability.tracing import aspan  # pyright: ignore[reportMissingImports]
 from exo.types import ExoError  # pyright: ignore[reportMissingImports]
 
-_log = logging.getLogger(__name__)
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from exo.distributed.temporal import (  # pyright: ignore[reportMissingImports]
@@ -174,7 +174,7 @@ class Worker:
         """
         self._started_at = time.time()
 
-        _log.info(
+        logger.info(
             "Worker %s starting (concurrency=%d, executor=%s, queue=%s)",
             self._worker_id,
             self._concurrency,
@@ -188,14 +188,14 @@ class Worker:
 
         if self._temporal_executor is not None:
             await self._temporal_executor.connect()
-            _log.info("Worker %s connected to Temporal", self._worker_id)
+            logger.info("Worker %s connected to Temporal", self._worker_id)
 
         # Register signal handlers for graceful shutdown
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGINT, signal.SIGTERM):
             loop.add_signal_handler(sig, self._handle_signal)
 
-        _log.info("Worker %s ready, waiting for tasks", self._worker_id)
+        logger.info("Worker %s ready, waiting for tasks", self._worker_id)
 
         try:
             # Start heartbeat in the background
@@ -208,7 +208,7 @@ class Worker:
             with contextlib.suppress(asyncio.CancelledError):
                 await heartbeat_task
         finally:
-            _log.info(
+            logger.info(
                 "Worker %s shutting down (processed=%d, failed=%d)",
                 self._worker_id,
                 self._tasks_processed,
@@ -226,7 +226,7 @@ class Worker:
 
     def _handle_signal(self) -> None:
         """Signal handler for SIGINT/SIGTERM."""
-        _log.info("Worker %s received shutdown signal", self._worker_id)
+        logger.info("Worker %s received shutdown signal", self._worker_id)
         self._shutdown_event.set()
 
     async def _heartbeat_loop(self) -> None:
@@ -251,7 +251,7 @@ class Worker:
                 except asyncio.CancelledError:
                     raise
                 except Exception:
-                    _log.warning(
+                    logger.warning(
                         "Worker %s heartbeat failed, will retry next interval",
                         self._worker_id,
                         exc_info=True,
@@ -268,7 +268,7 @@ class Worker:
             except asyncio.CancelledError:
                 raise
             except Exception:
-                _log.error(
+                logger.error(
                     "Worker %s error claiming task, retrying in 2s",
                     self._worker_id,
                     exc_info=True,
@@ -281,7 +281,7 @@ class Worker:
 
     async def _execute_task(self, task: TaskPayload) -> None:
         """Execute a single task: reconstruct agent, stream, update status."""
-        _log.info(
+        logger.info(
             "Worker %s claimed task %s (input=%.80s...)",
             self._worker_id,
             task.task_id,
@@ -341,7 +341,7 @@ class Worker:
                 else:
                     # Local execution: reconstruct agent and stream directly
                     agent = self._reconstruct_agent(task.agent_config)
-                    _log.debug(
+                    logger.debug(
                         "Task %s: reconstructed agent '%s' (model=%s)",
                         task.task_id,
                         getattr(agent, "name", "?"),
@@ -351,7 +351,7 @@ class Worker:
                     # Memory hydration (Feature 4)
                     mem_config = task.metadata.get("memory")
                     if mem_config:
-                        _log.info(
+                        logger.info(
                             "Task %s: hydrating memory (backend=%s)",
                             task.task_id,
                             mem_config.get("backend", "short_term"),
@@ -363,27 +363,39 @@ class Worker:
                         store, mem_metadata = await create_memory_store(mem_config, task.task_id)
                         agent.memory = store
 
-                        from exo.memory.persistence import (  # pyright: ignore[reportMissingImports]
-                            MemoryPersistence,
-                        )
+                        _memory_persistence_cls: type | None = None
+                        try:
+                            from exo.memory.persistence import (  # pyright: ignore[reportMissingImports]
+                                MemoryPersistence as _MemoryPersistence,
+                            )
 
-                        persistence = MemoryPersistence(store, metadata=mem_metadata)
-                        # L-6: Guard against double hook registration. If the agent
-                        # already has a MemoryPersistence attached (e.g. from
-                        # Agent.__init__ with memory=), detach it first.
-                        existing_persistence = getattr(agent, "_memory_persistence", None)
-                        if existing_persistence is not None:
-                            existing_persistence.detach(agent)
-                            _log.debug(
-                                "Task %s: detached existing memory persistence before re-attaching",
+                            _memory_persistence_cls = _MemoryPersistence
+                        except ImportError:
+                            logger.warning(
+                                "Task %s: exo-memory is not installed; "
+                                "memory persistence will be skipped. "
+                                "Install it with: pip install exo-memory",
                                 task.task_id,
                             )
-                        persistence.attach(agent)
-                        _log.debug(
-                            "Task %s: memory persistence attached (scope=%s)",
-                            task.task_id,
-                            mem_metadata,
-                        )
+
+                        if _memory_persistence_cls is not None:
+                            persistence = _memory_persistence_cls(store, metadata=mem_metadata)
+                            # L-6: Guard against double hook registration. If the agent
+                            # already has a MemoryPersistence attached (e.g. from
+                            # Agent.__init__ with memory=), detach it first.
+                            existing_persistence = getattr(agent, "_memory_persistence", None)
+                            if existing_persistence is not None:
+                                existing_persistence.detach(agent)
+                                logger.debug(
+                                    "Task %s: detached existing memory persistence before re-attaching",
+                                    task.task_id,
+                                )
+                            persistence.attach(agent)
+                            logger.debug(
+                                "Task %s: memory persistence attached (scope=%s)",
+                                task.task_id,
+                                mem_metadata,
+                            )
 
                         from exo.memory.base import (  # pyright: ignore[reportMissingImports]
                             HumanMemory,
@@ -398,7 +410,7 @@ class Worker:
 
                 if token.cancelled:
                     # Cancellation took effect during execution
-                    _log.info("Task %s cancelled after %.2fs", task.task_id, duration)
+                    logger.info("Task %s cancelled after %.2fs", task.task_id, duration)
                     await self._store.set_status(
                         task.task_id,
                         TaskStatus.CANCELLED,
@@ -412,7 +424,7 @@ class Worker:
                     final_status = TaskStatus.CANCELLED
                 else:
                     # Mark as COMPLETED
-                    _log.info(
+                    logger.info(
                         "Task %s completed in %.2fs (output_len=%d)",
                         task.task_id,
                         duration,
@@ -440,7 +452,7 @@ class Worker:
                 self._tasks_failed += 1
                 duration = time.time() - started_at
                 final_error = str(exc)
-                _log.error(
+                logger.error(
                     "Task %s failed after %.2fs: %s",
                     task.task_id,
                     duration,
@@ -463,7 +475,7 @@ class Worker:
                 status = await self._store.get_status(task.task_id)
                 retries = status.retries if status else 0
                 if retries < self._broker.max_retries:
-                    _log.info(
+                    logger.info(
                         "Task %s scheduling retry %d/%d",
                         task.task_id,
                         retries + 1,
@@ -476,7 +488,7 @@ class Worker:
                     )
                     await self._broker.nack(task.task_id)
                 else:
-                    _log.warning(
+                    logger.warning(
                         "Task %s exhausted all %d retries",
                         task.task_id,
                         self._broker.max_retries,
@@ -487,7 +499,7 @@ class Worker:
                 # Tear down memory persistence
                 if persistence is not None and agent is not None:
                     persistence.detach(agent)
-                    _log.debug("Task %s: memory persistence detached", task.task_id)
+                    logger.debug("Task %s: memory persistence detached", task.task_id)
                 if mem_result is not None:
                     from exo.distributed.memory import (  # pyright: ignore[reportMissingImports]
                         teardown_memory_store,
@@ -495,7 +507,7 @@ class Worker:
 
                     with contextlib.suppress(Exception):
                         await teardown_memory_store(mem_result[0])
-                    _log.debug("Task %s: memory store torn down", task.task_id)
+                    logger.debug("Task %s: memory store torn down", task.task_id)
 
                 self._current_task_id = None
                 cancel_task.cancel()
@@ -505,7 +517,7 @@ class Worker:
                 try:
                     await self.on_task_done(task, final_status, final_result, final_error)
                 except Exception:
-                    _log.exception("on_task_done failed for task %s", task.task_id)
+                    logger.exception("on_task_done failed for task %s", task.task_id)
 
     async def _listen_for_cancel(self, task_id: str, token: CancellationToken) -> None:
         """Subscribe to ``exo:cancel:{task_id}`` and set the token on signal."""
@@ -517,7 +529,7 @@ class Worker:
             while True:
                 msg = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
                 if msg is not None and msg["type"] == "message":
-                    _log.info("Task %s: cancel signal received", task_id)
+                    logger.info("Task %s: cancel signal received", task_id)
                     token.cancel()
                     return
                 await asyncio.sleep(0.01)
@@ -527,7 +539,27 @@ class Worker:
             await r.aclose()
 
     def _reconstruct_agent(self, agent_config: dict[str, Any]) -> Any:
-        """Reconstruct an Agent or Swarm from the serialized config dict."""
+        """Reconstruct an Agent or Swarm from the serialized config dict.
+
+        .. warning:: **Tool-serialization gap — the most common remote-worker footgun.**
+
+            ``Agent.to_dict()`` / ``Swarm.from_dict()`` serialize *configuration*
+            (name, model, instructions, memory settings, etc.) but do **NOT**
+            serialize ``@tool``-decorated Python functions.  When an agent is
+            reconstructed here, any tools that were attached as Python callables
+            on the submitting side will be silently absent on the worker side.
+
+            **Required action:** the worker process must independently register
+            every tool the agent needs before it receives tasks.  The canonical
+            pattern is to pass a pre-built ``Agent`` subclass or factory to the
+            worker, or to ensure the same tool-registration code runs on both
+            the submitting process and the worker process.
+
+            There is intentionally no automatic fix here — serializing arbitrary
+            callables across process boundaries is unsafe.  This note exists so
+            that the problem is visible at the call site rather than discovered
+            as silent no-ops at runtime.
+        """
         if "agents" in agent_config:
             # Swarm config
             from exo.swarm import Swarm  # pyright: ignore[reportMissingImports]
@@ -591,15 +623,15 @@ class Worker:
                 if prior_items:
                     history = memory_items_to_messages(prior_items)
                     messages = history + (messages or [])
-                    _log.info(
+                    logger.info(
                         "Task %s: loaded %d prior memory items as conversation history",
                         task.task_id,
                         len(prior_items),
                     )
                 else:
-                    _log.debug("Task %s: no prior memory items found", task.task_id)
+                    logger.debug("Task %s: no prior memory items found", task.task_id)
             except Exception:
-                _log.warning(
+                logger.warning(
                     "Failed to load conversation history for task %s",
                     task.task_id,
                     exc_info=True,
@@ -611,9 +643,9 @@ class Worker:
             model = getattr(agent, "model", None) or task.model
             if model:
                 provider = self._provider_factory(model)
-                _log.debug("Task %s: resolved provider for model '%s'", task.task_id, model)
+                logger.debug("Task %s: resolved provider for model '%s'", task.task_id, model)
 
-        _log.debug("Task %s: starting agent stream", task.task_id)
+        logger.debug("Task %s: starting agent stream", task.task_id)
         text_parts: list[str] = []
 
         async for event in run.stream(
