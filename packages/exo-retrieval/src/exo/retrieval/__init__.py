@@ -10,6 +10,14 @@ try:
 except PackageNotFoundError:
     __version__ = "0.1.0"
 
+from exo.models.embeddings import (  # pyright: ignore[reportMissingImports]
+    EmbeddingError,
+    Embeddings,
+    HTTPEmbeddings,
+    OpenAIEmbeddings,
+    VertexEmbeddings,
+    cosine_similarity,
+)
 from exo.retrieval.agentic_retriever import (
     AgenticRetriever,  # pyright: ignore[reportMissingImports]
 )
@@ -19,18 +27,11 @@ from exo.retrieval.chunker import (  # pyright: ignore[reportMissingImports]
     ParagraphChunker,
     TokenChunker,
 )
-from exo.retrieval.embeddings import Embeddings  # pyright: ignore[reportMissingImports]
 from exo.retrieval.graph_retriever import (
     GraphRetriever,  # pyright: ignore[reportMissingImports]
 )
-from exo.retrieval.http_embeddings import (
-    HTTPEmbeddings,  # pyright: ignore[reportMissingImports]
-)
 from exo.retrieval.hybrid_retriever import (
     HybridRetriever,  # pyright: ignore[reportMissingImports]
-)
-from exo.retrieval.openai_embeddings import (
-    OpenAIEmbeddings,  # pyright: ignore[reportMissingImports]
 )
 from exo.retrieval.parsers import (  # pyright: ignore[reportMissingImports]
     JSONParser,
@@ -69,9 +70,6 @@ from exo.retrieval.vector_store import (  # pyright: ignore[reportMissingImports
     InMemoryVectorStore,
     VectorStore,
 )
-from exo.retrieval.vertex_embeddings import (
-    VertexEmbeddings,  # pyright: ignore[reportMissingImports]
-)
 
 __all__: list[str] = [
     "AgenticRetriever",
@@ -79,6 +77,7 @@ __all__: list[str] = [
     "Chunk",
     "Chunker",
     "Document",
+    "EmbeddingError",
     "Embeddings",
     "GraphRetriever",
     "HTTPEmbeddings",
@@ -104,6 +103,7 @@ __all__: list[str] = [
     "VectorRetriever",
     "VectorStore",
     "VertexEmbeddings",
+    "cosine_similarity",
     "index_tool",
     "retrieve_tool",
 ]

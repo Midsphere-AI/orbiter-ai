@@ -1,44 +1,204 @@
-"""Semantic reranking tools using embedding-based cosine similarity.
+"""Semantic reranking using the canonical exo.models embeddings layer.
 
 Reranks search results by computing cosine similarity between query
-and result embeddings.  Supports OpenAI, Gemini, and Vertex AI embedding
-providers.  Falls back to keyword overlap scoring when no API key is
-configured.
+and result embeddings.  Supports OpenAI, Gemini (via HTTPEmbeddings REST
+wrapper), and Vertex AI embedding providers, all sourced from
+``exo.models``.  Falls back to keyword overlap scoring when no API key
+is configured.
 
 Provider auto-detection order:
     1. Gemini  — if ``GEMINI_API_KEY`` is set
-    2. Vertex AI — if ``GOOGLE_CLOUD_PROJECT`` is set (uses ADC)
+       Implemented via ``exo.models.HTTPEmbeddings`` pointed at the Gemini
+       batchEmbedContents REST endpoint.  The Gemini REST response wraps
+       vectors under ``embeddings[*].values``; HTTPEmbeddings' configurable
+       ``output_field`` / ``vector_field`` parameters handle that shape.
+       Note: Gemini batchEmbedContents uses ``?key=`` query-param auth and
+       a ``{"requests": [...]}`` body that does NOT match HTTPEmbeddings'
+       simple array input.  We therefore use a thin ``_GeminiEmbeddings``
+       subclass (still httpx-based, still implements the ``Embeddings`` ABC)
+       rather than introducing a 4th bespoke urllib impl.
+    2. Vertex AI — if ``GOOGLE_CLOUD_PROJECT`` and ``GOOGLE_CLOUD_ACCESS_TOKEN`` are set
     3. OpenAI  — if ``OPENAI_API_KEY`` is set
     4. Keyword overlap fallback
 
 Usage:
-    from examples.advanced.exo-search.tools.embeddings import rerank_by_embeddings
+    from exo.search.tools.embeddings import rerank_search_results
 """
 
 from __future__ import annotations
 
-import asyncio
-import json
+import logging
 import os
-import re
+from typing import Any
 
-from exo import tool
-from exo.observability.logging import get_logger  # pyright: ignore[reportMissingImports]
+import httpx
 
-_log = get_logger(__name__)
+from exo.models.embeddings import (
+    EmbeddingError,
+    Embeddings,
+    OpenAIEmbeddings,
+    VertexEmbeddings,
+    cosine_similarity,
+)
+
+logger = logging.getLogger(__name__)
+
+_GEMINI_DEFAULT_MODEL = "gemini-embedding-2-preview"
+_GEMINI_DIMENSION = 3072
+_GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models"
+
+_OPENAI_DEFAULT_MODEL = "text-embedding-3-small"
+_OPENAI_DIMENSION = 1536
 
 
-def _cosine_similarity(a: list[float], b: list[float]) -> float:
-    """Compute cosine similarity between two vectors.
+# ---------------------------------------------------------------------------
+# Gemini embeddings — thin httpx-based Embeddings subclass
+# ---------------------------------------------------------------------------
+
+
+class _GeminiEmbeddings(Embeddings):
+    """Embeddings via the Gemini batchEmbedContents REST API.
+
+    Implements the canonical ``Embeddings`` ABC from ``exo.models`` using
+    ``httpx`` — no ``google-genai`` SDK required.
 
     Args:
-        a: First vector.
-        b: Second vector.
+        api_key: Gemini API key.
+        model: Embedding model name. Defaults to ``"gemini-embedding-2-preview"``.
+        dimension: Vector dimensionality. Defaults to 3072.
     """
-    dot = sum(x * y for x, y in zip(a, b, strict=True))
-    norm_a = sum(x * x for x in a) ** 0.5
-    norm_b = sum(x * x for x in b) ** 0.5
-    return dot / (norm_a * norm_b) if norm_a and norm_b else 0.0
+
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        model: str = _GEMINI_DEFAULT_MODEL,
+        dimension: int = _GEMINI_DIMENSION,
+    ) -> None:
+        self._api_key = api_key
+        self._model = model
+        self._dimension = dimension
+
+    @property
+    def dimension(self) -> int:
+        """The dimensionality of the embedding vectors."""
+        return self._dimension
+
+    async def embed(self, text: str) -> list[float]:
+        """Embed a single text string.
+
+        Args:
+            text: The text to embed.
+        """
+        results = await self.embed_batch([text])
+        return results[0]
+
+    async def embed_batch(self, texts: list[str]) -> list[list[float]]:
+        """Embed multiple texts via the Gemini batchEmbedContents API.
+
+        Args:
+            texts: A list of texts to embed.
+
+        Returns:
+            A list of dense vectors, one per input text.
+
+        Raises:
+            EmbeddingError: If the API call fails.
+        """
+        if not texts:
+            return []
+
+        url = f"{_GEMINI_BASE_URL}/{self._model}:batchEmbedContents"
+        requests_list: list[dict[str, Any]] = [
+            {
+                "model": f"models/{self._model}",
+                "content": {"parts": [{"text": t}]},
+                "taskType": "SEMANTIC_SIMILARITY",
+                "outputDimensionality": self._dimension,
+            }
+            for t in texts
+        ]
+        payload: dict[str, Any] = {"requests": requests_list}
+        params = {"key": self._api_key}
+
+        async with httpx.AsyncClient() as client:
+            try:
+                resp = await client.post(
+                    url,
+                    json=payload,
+                    params=params,
+                    headers={"Content-Type": "application/json"},
+                    timeout=60.0,
+                )
+                resp.raise_for_status()
+            except httpx.HTTPStatusError as exc:
+                raise EmbeddingError(
+                    f"Gemini embeddings API error: {exc.response.status_code}",
+                    operation="embed",
+                    details={"status": exc.response.status_code, "body": exc.response.text},
+                ) from exc
+            except httpx.HTTPError as exc:
+                raise EmbeddingError(
+                    f"Gemini embeddings request failed: {exc}",
+                    operation="embed",
+                ) from exc
+
+        body = resp.json()
+        try:
+            return [emb["values"] for emb in body["embeddings"]]
+        except (KeyError, TypeError) as exc:
+            raise EmbeddingError(
+                f"Failed to extract Gemini embeddings from response: {exc}",
+                operation="embed",
+            ) from exc
+
+
+# ---------------------------------------------------------------------------
+# Provider auto-detection
+# ---------------------------------------------------------------------------
+
+
+def _build_embedder() -> Embeddings | None:
+    """Auto-detect embedding provider and return a canonical Embeddings instance.
+
+    Returns ``None`` when no provider credentials are available.
+    """
+    gemini_key = os.environ.get("GEMINI_API_KEY", "")
+    gcp_project = os.environ.get("GOOGLE_CLOUD_PROJECT", "")
+    gcp_token = os.environ.get("GOOGLE_CLOUD_ACCESS_TOKEN", "")
+    openai_key = os.environ.get("OPENAI_API_KEY", "")
+
+    if gemini_key:
+        model = os.environ.get("EXO_SEARCH_EMBEDDING_MODEL", _GEMINI_DEFAULT_MODEL)
+        logger.debug("embedding provider=gemini model=%s", model)
+        return _GeminiEmbeddings(api_key=gemini_key, model=model)
+
+    if gcp_project and gcp_token:
+        model = os.environ.get("EXO_SEARCH_EMBEDDING_MODEL", "text-embedding-005")
+        location = os.environ.get("GOOGLE_CLOUD_LOCATION", "us-central1")
+        logger.debug("embedding provider=vertex model=%s", model)
+        return VertexEmbeddings(
+            api_key=gcp_token,
+            project=gcp_project,
+            model=model,
+            location=location,
+        )
+
+    if openai_key:
+        model = os.environ.get("EXO_SEARCH_EMBEDDING_MODEL", _OPENAI_DEFAULT_MODEL)
+        logger.debug("embedding provider=openai model=%s", model)
+        return OpenAIEmbeddings(
+            api_key=openai_key,
+            model=model,
+            dimension=_OPENAI_DIMENSION,
+        )
+
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Keyword fallback scorer
+# ---------------------------------------------------------------------------
 
 
 def _keyword_score(query_words: list[str], text: str) -> float:
@@ -52,160 +212,9 @@ def _keyword_score(query_words: list[str], text: str) -> float:
     return sum(1 for w in query_words if w in text_lower) / max(len(query_words), 1)
 
 
-def _parse_results(results_json: str) -> list[dict[str, str]]:
-    """Parse search results from JSON array or numbered text format.
-
-    Args:
-        results_json: JSON string or numbered-list text of search results.
-    """
-    # Try JSON first.
-    try:
-        parsed = json.loads(results_json)
-        if isinstance(parsed, list):
-            results = []
-            for item in parsed:
-                results.append(
-                    {
-                        "title": item.get("title", ""),
-                        "url": item.get("url", ""),
-                        "snippet": item.get("snippet", ""),
-                    }
-                )
-            return results
-    except (json.JSONDecodeError, TypeError):
-        pass
-
-    # Fall back to parsing numbered text format: [N] Title | URL | Snippet
-    results = []
-    for line in results_json.strip().splitlines():
-        match = re.match(r"\[(\d+)\]\s*(.+?)\s*\|\s*(\S+)\s*\|\s*(.+)", line)
-        if match:
-            results.append(
-                {
-                    "title": match.group(2).strip(),
-                    "url": match.group(3).strip(),
-                    "snippet": match.group(4).strip(),
-                }
-            )
-    return results
-
-
-def _get_openai_embeddings(texts: list[str], api_key: str, model: str) -> list[list[float]]:
-    """Fetch embeddings from the OpenAI API.
-
-    Args:
-        texts: List of text strings to embed.
-        api_key: OpenAI API key.
-        model: Embedding model name.
-    """
-    import urllib.request
-
-    payload = json.dumps({"input": texts, "model": model}).encode("utf-8")
-    req = urllib.request.Request(
-        "https://api.openai.com/v1/embeddings",
-        data=payload,
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
-        method="POST",
-    )
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        data = json.loads(resp.read().decode("utf-8", errors="replace"))
-
-    # Sort by index to ensure correct ordering.
-    sorted_data = sorted(data["data"], key=lambda x: x["index"])
-    return [item["embedding"] for item in sorted_data]
-
-
-def _get_gemini_embeddings(texts: list[str], api_key: str, model: str) -> list[list[float]]:
-    """Fetch embeddings from the Gemini API via REST.
-
-    Args:
-        texts: List of text strings to embed.
-        api_key: Gemini API key.
-        model: Embedding model name (e.g. "text-embedding-004").
-    """
-    import urllib.request
-
-    url = (
-        f"https://generativelanguage.googleapis.com/v1beta"
-        f"/models/{model}:batchEmbedContents?key={api_key}"
-    )
-    requests_list = [
-        {
-            "model": f"models/{model}",
-            "content": {"parts": [{"text": t}]},
-            "taskType": "SEMANTIC_SIMILARITY",
-            "outputDimensionality": 3072,
-        }
-        for t in texts
-    ]
-    payload = json.dumps({"requests": requests_list}).encode("utf-8")
-    req = urllib.request.Request(
-        url,
-        data=payload,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        data = json.loads(resp.read().decode("utf-8", errors="replace"))
-
-    return [emb["values"] for emb in data["embeddings"]]
-
-
-def _get_vertex_embeddings(texts: list[str], model: str) -> list[list[float]]:
-    """Fetch embeddings from Vertex AI using the google-genai library.
-
-    Uses Application Default Credentials (no API key needed).
-
-    Args:
-        texts: List of text strings to embed.
-        model: Embedding model name (e.g. "text-embedding-004").
-    """
-    from google import genai
-
-    project = os.environ.get("GOOGLE_CLOUD_PROJECT", "")
-    location = os.environ.get("GOOGLE_CLOUD_LOCATION", "us-central1")
-
-    client = genai.Client(vertexai=True, project=project, location=location)
-    response = client.models.embed_content(
-        model=model,
-        contents=texts,
-        config={"task_type": "SEMANTIC_SIMILARITY", "output_dimensionality": 3072},
-    )
-    return [emb.values for emb in response.embeddings]
-
-
-def _get_embeddings(texts: list[str]) -> list[list[float]] | None:
-    """Auto-detect provider and fetch embeddings.
-
-    Tries OpenAI, Gemini, then Vertex AI based on available credentials.
-    Returns None if no provider is available.
-
-    Args:
-        texts: List of text strings to embed.
-    """
-    gemini_key = os.environ.get("GEMINI_API_KEY", "")
-    gcp_project = os.environ.get("GOOGLE_CLOUD_PROJECT", "")
-    openai_key = os.environ.get("OPENAI_API_KEY", "")
-
-    if gemini_key:
-        model = os.environ.get("EXO_SEARCH_EMBEDDING_MODEL", "gemini-embedding-2-preview")
-        _log.debug("embedding provider=gemini model=%s texts=%d", model, len(texts))
-        return _get_gemini_embeddings(texts, gemini_key, model)
-
-    if gcp_project:
-        model = os.environ.get("EXO_SEARCH_EMBEDDING_MODEL", "gemini-embedding-2-preview")
-        _log.debug("embedding provider=vertex model=%s texts=%d", model, len(texts))
-        return _get_vertex_embeddings(texts, model)
-
-    if openai_key:
-        model = os.environ.get("EXO_SEARCH_EMBEDDING_MODEL", "text-embedding-3-small")
-        _log.debug("embedding provider=openai model=%s texts=%d", model, len(texts))
-        return _get_openai_embeddings(texts, openai_key, model)
-
-    return None
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
 
 
 async def rerank_search_results(
@@ -217,6 +226,11 @@ async def rerank_search_results(
 
     Uses embedding cosine similarity when an API key is available,
     falls back to keyword overlap scoring otherwise.
+
+    Args:
+        query: The original search query.
+        results: List of SearchResult objects to rerank.
+        top_k: Number of top results to return. Defaults to all results.
     """
     if not results:
         return results
@@ -226,17 +240,19 @@ async def rerank_search_results(
     texts = [query] + [f"{r.title} {r.content[:500]}" for r in results]
 
     scored: list[tuple[float, object]] = []
-    try:
-        embeddings = await asyncio.to_thread(_get_embeddings, texts)
-        if embeddings is not None:
+    embedder = _build_embedder()
+    if embedder is not None:
+        try:
+            embeddings = await embedder.embed_batch(texts)
             query_emb = embeddings[0]
             for i, r in enumerate(results):
-                sim = _cosine_similarity(query_emb, embeddings[i + 1])
+                sim = cosine_similarity(query_emb, embeddings[i + 1])
                 scored.append((sim, r))
-        else:
-            raise ValueError("No embedding provider available")
-    except Exception as exc:
-        _log.warning("embedding failed, falling back to keyword scoring: %s", exc)
+        except Exception as exc:
+            logger.warning("embedding failed, falling back to keyword scoring: %s", exc)
+            embedder = None
+
+    if embedder is None:
         query_words = query.lower().split()
         for r in results:
             text = f"{r.title} {r.content[:500]}"
@@ -244,52 +260,5 @@ async def rerank_search_results(
             scored.append((score, r))
 
     scored.sort(key=lambda x: x[0], reverse=True)
-    _log.debug("reranked %d results", len(scored))
+    logger.debug("reranked %d results", len(scored))
     return [r for _, r in scored[:top_k]]
-
-
-@tool
-async def rerank_by_embeddings(query: str, results_json: str, top_k: int = 6) -> str:
-    """Rerank search results using embedding-based cosine similarity.
-
-    Args:
-        query: The original user query.
-        results_json: JSON string containing search results to rerank.
-            Each result should have title, url, and snippet fields.
-        top_k: Number of top results to return after reranking.
-    """
-    results = _parse_results(results_json)
-    if not results:
-        return "No results to rerank."
-
-    scored: list[tuple[float, dict[str, str]]] = []
-    texts = [query] + [r.get("snippet", "") or r.get("title", "") for r in results]
-
-    try:
-        embeddings = _get_embeddings(texts)
-        if embeddings is not None:
-            query_emb = embeddings[0]
-            for i, result in enumerate(results):
-                sim = _cosine_similarity(query_emb, embeddings[i + 1])
-                scored.append((sim, result))
-        else:
-            raise ValueError("No embedding provider available")
-    except Exception:
-        # Fall back to keyword scoring.
-        query_words = query.lower().split()
-        for result in results:
-            text = f"{result.get('title', '')} {result.get('snippet', '')}"
-            score = _keyword_score(query_words, text)
-            scored.append((score, result))
-
-    # Sort by score descending, take top_k.
-    scored.sort(key=lambda x: x[0], reverse=True)
-    top = scored[:top_k]
-
-    lines: list[str] = []
-    for i, (score, result) in enumerate(top, start=1):
-        title = result.get("title", "Untitled")
-        url = result.get("url", "")
-        snippet = result.get("snippet", "")
-        lines.append(f"[{i}] ({score:.2f}) {title} | {url} | {snippet}")
-    return "\n".join(lines)

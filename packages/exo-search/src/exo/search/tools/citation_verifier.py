@@ -18,6 +18,7 @@ import re
 
 from exo.observability.logging import get_logger  # pyright: ignore[reportMissingImports]
 
+from .._utils import resolve_provider
 from ..config import SearchConfig
 from ..types import CitationVerification, SearchResult
 
@@ -193,19 +194,6 @@ _NUMBER_RE = re.compile(r"\b\d[\d,.]*%?\b")
 _PROPER_NOUN_RE = re.compile(r"\b(?:[A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)\b")
 
 
-# ---------------------------------------------------------------------------
-# Provider resolution helper (same pattern as writer.py)
-# ---------------------------------------------------------------------------
-
-
-def _resolve_provider(model: str):
-    try:
-        from exo.models import get_provider
-
-        return get_provider(model)
-    except Exception as exc:
-        _log.warning("provider resolution failed for %s: %s", model, exc)
-        return None
 
 
 # ---------------------------------------------------------------------------
@@ -484,7 +472,7 @@ async def verify_citations(
     else:
         # Phase 2: LLM spot-check keyword-passed citations
         model = cfg.fast_model
-        provider = _resolve_provider(model)
+        provider = resolve_provider(model)
 
         spot_check_batch: list[tuple[int, str, str, str]] = []
         for cite_idx, src_idx, claim in keyword_passed:

@@ -18,13 +18,18 @@ classifiers = [
 ]
 dependencies = [
     "exo-core",
+    "exo-models",
+    # aiosqlite is a hard dependency: SQLite-backed memory is a batteries-included
+    # default and must work out of the box with zero extra install.
+    "aiosqlite>=0.20",
 ]
 
 [project.optional-dependencies]
-sqlite = ["aiosqlite>=0.20"]
 postgres = ["asyncpg>=0.29"]
 vector = ["chromadb>=0.6"]
-vertex = ["google-genai>=1.0", "google-auth>=2.0"]
+# vertex embeddings are now provided by exo-models; the exo-memory[vertex] extra
+# is kept as a convenience alias so existing installs don't break.
+vertex = ["exo-models"]
 
 [project.urls]
 Homepage = "https://github.com/midsphere-ai/exo"
@@ -34,6 +39,7 @@ Issues = "https://github.com/midsphere-ai/exo/issues"
 
 [tool.uv.sources]
 exo-core = { workspace = true }
+exo-models = { workspace = true }
 
 [build-system]
 requires = ["hatchling"]

@@ -7,11 +7,14 @@ from unittest.mock import AsyncMock, patch
 import httpx
 import pytest
 
-from exo.retrieval.embeddings import Embeddings
-from exo.retrieval.http_embeddings import HTTPEmbeddings, _get_nested
-from exo.retrieval.openai_embeddings import OpenAIEmbeddings
-from exo.retrieval.types import RetrievalError
-from exo.retrieval.vertex_embeddings import VertexEmbeddings
+from exo.models.embeddings import (
+    EmbeddingError,
+    Embeddings,
+    HTTPEmbeddings,
+    OpenAIEmbeddings,
+    VertexEmbeddings,
+    _get_nested,
+)
 
 # ---------------------------------------------------------------------------
 # Embeddings ABC
@@ -90,7 +93,7 @@ class TestOpenAIEmbeddings:
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
         mock_client.__aexit__ = AsyncMock(return_value=False)
 
-        with patch("exo.retrieval.openai_embeddings.httpx.AsyncClient", return_value=mock_client):
+        with patch("exo.models.embeddings.httpx.AsyncClient", return_value=mock_client):
             e = OpenAIEmbeddings(api_key="test-key")
             result = await e.embed("hello")
 
@@ -111,7 +114,7 @@ class TestOpenAIEmbeddings:
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
         mock_client.__aexit__ = AsyncMock(return_value=False)
 
-        with patch("exo.retrieval.openai_embeddings.httpx.AsyncClient", return_value=mock_client):
+        with patch("exo.models.embeddings.httpx.AsyncClient", return_value=mock_client):
             e = OpenAIEmbeddings(api_key="test-key", dimension=2)
             result = await e.embed_batch(["a", "b", "c"])
 
@@ -148,7 +151,7 @@ class TestOpenAIEmbeddings:
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
         mock_client.__aexit__ = AsyncMock(return_value=False)
 
-        with patch("exo.retrieval.openai_embeddings.httpx.AsyncClient", return_value=mock_client):
+        with patch("exo.models.embeddings.httpx.AsyncClient", return_value=mock_client):
             e = OpenAIEmbeddings(api_key="test-key", dimension=2)
             result = await e.embed_batch(["first", "second"])
 
@@ -163,9 +166,9 @@ class TestOpenAIEmbeddings:
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
         mock_client.__aexit__ = AsyncMock(return_value=False)
 
-        with patch("exo.retrieval.openai_embeddings.httpx.AsyncClient", return_value=mock_client):
+        with patch("exo.models.embeddings.httpx.AsyncClient", return_value=mock_client):
             e = OpenAIEmbeddings(api_key="bad-key")
-            with pytest.raises(RetrievalError, match="401"):
+            with pytest.raises(EmbeddingError, match="401"):
                 await e.embed("hello")
 
     @pytest.mark.asyncio
@@ -175,9 +178,9 @@ class TestOpenAIEmbeddings:
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
         mock_client.__aexit__ = AsyncMock(return_value=False)
 
-        with patch("exo.retrieval.openai_embeddings.httpx.AsyncClient", return_value=mock_client):
+        with patch("exo.models.embeddings.httpx.AsyncClient", return_value=mock_client):
             e = OpenAIEmbeddings(api_key="test-key")
-            with pytest.raises(RetrievalError, match="request failed"):
+            with pytest.raises(EmbeddingError, match="request failed"):
                 await e.embed("hello")
 
     @pytest.mark.asyncio
@@ -190,7 +193,7 @@ class TestOpenAIEmbeddings:
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
         mock_client.__aexit__ = AsyncMock(return_value=False)
 
-        with patch("exo.retrieval.openai_embeddings.httpx.AsyncClient", return_value=mock_client):
+        with patch("exo.models.embeddings.httpx.AsyncClient", return_value=mock_client):
             e = OpenAIEmbeddings(
                 api_key="test-key",
                 base_url="https://custom.api.com/v1/",
@@ -211,7 +214,7 @@ class TestOpenAIEmbeddings:
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
         mock_client.__aexit__ = AsyncMock(return_value=False)
 
-        with patch("exo.retrieval.openai_embeddings.httpx.AsyncClient", return_value=mock_client):
+        with patch("exo.models.embeddings.httpx.AsyncClient", return_value=mock_client):
             e = OpenAIEmbeddings(
                 api_key="test-key",
                 model="text-embedding-3-large",
@@ -222,8 +225,8 @@ class TestOpenAIEmbeddings:
         call_kwargs = mock_client.post.call_args
         assert call_kwargs[1]["json"]["model"] == "text-embedding-3-large"
 
-    def test_retrieval_error_fields(self) -> None:
-        err = RetrievalError("fail", operation="embed", details={"code": 401})
+    def test_embedding_error_fields(self) -> None:
+        err = EmbeddingError("fail", operation="embed", details={"code": 401})
         assert err.operation == "embed"
         assert err.details == {"code": 401}
         assert "fail" in str(err)
@@ -268,7 +271,7 @@ class TestVertexEmbeddings:
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
         mock_client.__aexit__ = AsyncMock(return_value=False)
 
-        with patch("exo.retrieval.vertex_embeddings.httpx.AsyncClient", return_value=mock_client):
+        with patch("exo.models.embeddings.httpx.AsyncClient", return_value=mock_client):
             e = VertexEmbeddings(api_key="token", project="my-project")
             result = await e.embed("hello")
 
@@ -289,7 +292,7 @@ class TestVertexEmbeddings:
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
         mock_client.__aexit__ = AsyncMock(return_value=False)
 
-        with patch("exo.retrieval.vertex_embeddings.httpx.AsyncClient", return_value=mock_client):
+        with patch("exo.models.embeddings.httpx.AsyncClient", return_value=mock_client):
             e = VertexEmbeddings(api_key="token", project="my-project", dimension=2)
             result = await e.embed_batch(["a", "b"])
 
@@ -313,7 +316,7 @@ class TestVertexEmbeddings:
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
         mock_client.__aexit__ = AsyncMock(return_value=False)
 
-        with patch("exo.retrieval.vertex_embeddings.httpx.AsyncClient", return_value=mock_client):
+        with patch("exo.models.embeddings.httpx.AsyncClient", return_value=mock_client):
             e = VertexEmbeddings(
                 api_key="token",
                 project="my-project",
@@ -342,9 +345,9 @@ class TestVertexEmbeddings:
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
         mock_client.__aexit__ = AsyncMock(return_value=False)
 
-        with patch("exo.retrieval.vertex_embeddings.httpx.AsyncClient", return_value=mock_client):
+        with patch("exo.models.embeddings.httpx.AsyncClient", return_value=mock_client):
             e = VertexEmbeddings(api_key="bad-token", project="my-project")
-            with pytest.raises(RetrievalError, match="403"):
+            with pytest.raises(EmbeddingError, match="403"):
                 await e.embed("hello")
 
     @pytest.mark.asyncio
@@ -354,9 +357,9 @@ class TestVertexEmbeddings:
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
         mock_client.__aexit__ = AsyncMock(return_value=False)
 
-        with patch("exo.retrieval.vertex_embeddings.httpx.AsyncClient", return_value=mock_client):
+        with patch("exo.models.embeddings.httpx.AsyncClient", return_value=mock_client):
             e = VertexEmbeddings(api_key="token", project="my-project")
-            with pytest.raises(RetrievalError, match="request failed"):
+            with pytest.raises(EmbeddingError, match="request failed"):
                 await e.embed("hello")
 
 
@@ -396,7 +399,7 @@ class TestHTTPEmbeddings:
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
         mock_client.__aexit__ = AsyncMock(return_value=False)
 
-        with patch("exo.retrieval.http_embeddings.httpx.AsyncClient", return_value=mock_client):
+        with patch("exo.models.embeddings.httpx.AsyncClient", return_value=mock_client):
             e = HTTPEmbeddings(url="https://example.com/embed", dimension=3)
             result = await e.embed("hello")
 
@@ -414,7 +417,7 @@ class TestHTTPEmbeddings:
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
         mock_client.__aexit__ = AsyncMock(return_value=False)
 
-        with patch("exo.retrieval.http_embeddings.httpx.AsyncClient", return_value=mock_client):
+        with patch("exo.models.embeddings.httpx.AsyncClient", return_value=mock_client):
             e = HTTPEmbeddings(url="https://example.com/embed", dimension=2)
             result = await e.embed_batch(["a", "b"])
 
@@ -446,7 +449,7 @@ class TestHTTPEmbeddings:
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
         mock_client.__aexit__ = AsyncMock(return_value=False)
 
-        with patch("exo.retrieval.http_embeddings.httpx.AsyncClient", return_value=mock_client):
+        with patch("exo.models.embeddings.httpx.AsyncClient", return_value=mock_client):
             e = HTTPEmbeddings(
                 url="https://example.com/embed",
                 dimension=2,
@@ -470,7 +473,7 @@ class TestHTTPEmbeddings:
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
         mock_client.__aexit__ = AsyncMock(return_value=False)
 
-        with patch("exo.retrieval.http_embeddings.httpx.AsyncClient", return_value=mock_client):
+        with patch("exo.models.embeddings.httpx.AsyncClient", return_value=mock_client):
             e = HTTPEmbeddings(
                 url="https://example.com/embed",
                 dimension=1,
@@ -502,7 +505,7 @@ class TestHTTPEmbeddings:
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
         mock_client.__aexit__ = AsyncMock(return_value=False)
 
-        with patch("exo.retrieval.http_embeddings.httpx.AsyncClient", return_value=mock_client):
+        with patch("exo.models.embeddings.httpx.AsyncClient", return_value=mock_client):
             e = HTTPEmbeddings(
                 url="https://example.com/embed",
                 dimension=2,
@@ -526,9 +529,9 @@ class TestHTTPEmbeddings:
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
         mock_client.__aexit__ = AsyncMock(return_value=False)
 
-        with patch("exo.retrieval.http_embeddings.httpx.AsyncClient", return_value=mock_client):
+        with patch("exo.models.embeddings.httpx.AsyncClient", return_value=mock_client):
             e = HTTPEmbeddings(url="https://example.com/embed", dimension=2)
-            with pytest.raises(RetrievalError, match="500"):
+            with pytest.raises(EmbeddingError, match="500"):
                 await e.embed("hello")
 
     @pytest.mark.asyncio
@@ -538,14 +541,14 @@ class TestHTTPEmbeddings:
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
         mock_client.__aexit__ = AsyncMock(return_value=False)
 
-        with patch("exo.retrieval.http_embeddings.httpx.AsyncClient", return_value=mock_client):
+        with patch("exo.models.embeddings.httpx.AsyncClient", return_value=mock_client):
             e = HTTPEmbeddings(url="https://example.com/embed", dimension=2)
-            with pytest.raises(RetrievalError, match="request failed"):
+            with pytest.raises(EmbeddingError, match="request failed"):
                 await e.embed("hello")
 
     @pytest.mark.asyncio
     async def test_bad_response_shape(self) -> None:
-        """Bad response shape raises RetrievalError."""
+        """Bad response shape raises EmbeddingError."""
         mock_resp = httpx.Response(
             status_code=200,
             json={"unexpected": "format"},
@@ -557,9 +560,9 @@ class TestHTTPEmbeddings:
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
         mock_client.__aexit__ = AsyncMock(return_value=False)
 
-        with patch("exo.retrieval.http_embeddings.httpx.AsyncClient", return_value=mock_client):
+        with patch("exo.models.embeddings.httpx.AsyncClient", return_value=mock_client):
             e = HTTPEmbeddings(url="https://example.com/embed", dimension=2)
-            with pytest.raises(RetrievalError, match="extract embeddings"):
+            with pytest.raises(EmbeddingError, match="extract embeddings"):
                 await e.embed("hello")
 
     def test_get_nested_helper(self) -> None:

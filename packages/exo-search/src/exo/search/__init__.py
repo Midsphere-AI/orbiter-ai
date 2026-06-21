@@ -9,12 +9,16 @@ Usage:
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+
 try:
     from importlib.metadata import version
 
     __version__: str = version("exo-search")
 except Exception:
     __version__ = "0.1.0"
+
+from exo.types import StreamEvent
 
 from .config import SearchConfig
 from .conversation import ConversationManager
@@ -38,12 +42,12 @@ async def search(
     return result.answer
 
 
-def stream(
+async def stream(
     query: str,
     mode: str = "balanced",
     chat_history: list[tuple[str, str]] | None = None,
     config: SearchConfig | None = None,
-):
+) -> AsyncIterator[PipelineEvent | StreamEvent | SearchResponse]:
     """Stream the search pipeline, yielding events as they happen.
 
     Yields PipelineEvent for stage transitions, exo StreamEvent for
@@ -59,12 +63,13 @@ def stream(
             elif isinstance(event, SearchResponse):
                 print(event.sources)
     """
-    return stream_search_pipeline(
+    async for event in stream_search_pipeline(
         query=query,
         chat_history=chat_history,
         mode=mode,
         config=config,
-    )
+    ):
+        yield event
 
 
 async def search_with_details(

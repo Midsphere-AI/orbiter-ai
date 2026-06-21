@@ -7,10 +7,15 @@ vectors and supports similarity search.
 from __future__ import annotations
 
 import abc
-import math
 from typing import Any
 
-from exo.retrieval.types import Chunk, RetrievalResult  # pyright: ignore[reportMissingImports]
+from exo.models.embeddings import (
+    cosine_similarity as _cosine_similarity,  # pyright: ignore[reportMissingImports]
+)
+from exo.retrieval.types import (  # pyright: ignore[reportMissingImports]
+    Chunk,
+    RetrievalResult,
+)
 
 
 class VectorStore(abc.ABC):
@@ -65,19 +70,6 @@ class VectorStore(abc.ABC):
     @abc.abstractmethod
     async def clear(self) -> None:
         """Remove all stored chunks and embeddings."""
-
-
-def _cosine_similarity(a: list[float], b: list[float]) -> float:
-    """Compute cosine similarity between two vectors.
-
-    Returns 0.0 when either vector has zero magnitude.
-    """
-    dot = sum(x * y for x, y in zip(a, b))
-    mag_a = math.sqrt(sum(x * x for x in a))
-    mag_b = math.sqrt(sum(x * x for x in b))
-    if mag_a == 0.0 or mag_b == 0.0:
-        return 0.0
-    return dot / (mag_a * mag_b)
 
 
 class InMemoryVectorStore(VectorStore):

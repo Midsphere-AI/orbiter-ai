@@ -7,11 +7,11 @@ from typing import Any
 
 import pytest
 
+from exo.models.embeddings import cosine_similarity as _cosine_similarity
 from exo.retrieval.types import Chunk, RetrievalResult
 from exo.retrieval.vector_store import (
     InMemoryVectorStore,
     VectorStore,
-    _cosine_similarity,
 )
 
 # ---------------------------------------------------------------------------

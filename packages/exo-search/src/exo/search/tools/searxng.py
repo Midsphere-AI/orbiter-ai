@@ -4,8 +4,9 @@ Uses Serper API (``SERPER_API_KEY``) by default for fast Google Search.
 Falls back to a local SearXNG instance when ``SEARXNG_URL`` is set
 without a Serper key.
 
-Tools write their raw results to a module-level collector so the
+Tools write their raw results to a per-task context variable so the
 researcher pipeline can retrieve them after the agent run completes.
+Concurrent searches each hold their own result list, avoiding races.
 """
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+from contextvars import ContextVar
 from urllib.parse import quote_plus
 
 from exo import tool
@@ -21,20 +23,32 @@ from exo.observability.logging import get_logger  # pyright: ignore[reportMissin
 _log = get_logger(__name__)
 
 # ---------------------------------------------------------------------------
-# Shared result collector — tools append here, pipeline reads after run()
+# Per-task result collector — stored in a ContextVar so concurrent searches
+# each see an independent list; no shared mutable state between runs.
 # ---------------------------------------------------------------------------
 
-_collected_results: list[dict] = []
+_collected_results_var: ContextVar[list[dict] | None] = ContextVar(
+    "_collected_results_var", default=None
+)
+
+
+def _get_results_list() -> list[dict]:
+    """Return the current context's result list, initialising it if absent."""
+    lst = _collected_results_var.get()
+    if lst is None:
+        lst = []
+        _collected_results_var.set(lst)
+    return lst
 
 
 def get_collected_results() -> list[dict]:
     """Return all results collected during the current research run."""
-    return list(_collected_results)
+    return list(_get_results_list())
 
 
 def clear_collected_results() -> None:
-    """Clear the result collector before a new research run."""
-    _collected_results.clear()
+    """Reset the result collector for a new research run (per-task context)."""
+    _collected_results_var.set([])
 
 
 # ---------------------------------------------------------------------------
@@ -265,8 +279,8 @@ async def _multi_search(
 
     _log.debug("multi_search queries=%s total_results=%d", queries, len(unique_results))
 
-    # Side-effect: collect results for the pipeline
-    _collected_results.extend(unique_results)
+    # Side-effect: collect results for the pipeline (per-task context variable)
+    _collected_results_var.set([*_get_results_list(), *unique_results])
 
     if not unique_results:
         return "No results found."

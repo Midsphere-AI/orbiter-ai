@@ -5,21 +5,12 @@ from __future__ import annotations
 from exo import Agent, run
 from exo.observability.logging import get_logger  # pyright: ignore[reportMissingImports]
 
+from .._utils import resolve_provider
 from ..config import SearchConfig
 from ..prompts.instructions import CLASSIFIER_PROMPT
 from ..types import ClassifierOutput
 
 _log = get_logger(__name__)
-
-
-def _resolve_provider(model: str):
-    try:
-        from exo.models import get_provider
-
-        return get_provider(model)
-    except Exception as exc:
-        _log.warning("provider resolution failed for %s: %s", model, exc)
-        return None
 
 
 async def classify(
@@ -45,7 +36,7 @@ async def classify(
         max_steps=1,
     )
 
-    provider = _resolve_provider(config.fast_model)
+    provider = resolve_provider(config.fast_model)
     result = await run(classifier, formatted_input, provider=provider)
 
     try:

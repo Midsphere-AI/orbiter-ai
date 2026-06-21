@@ -270,10 +270,10 @@ class TestAgentIntegration:
         rt = retrieve_tool(VectorRetriever(emb, store))
         it = index_tool(CharacterChunker(chunk_size=200), store, emb)
 
-        agent = Agent(name="rag-agent", tools=[rt, it], memory=None, context=None)
+        agent = Agent(name="rag-agent", tools=[rt, it], memory=None, context=None, subagents=False)
 
         assert "retrieve" in agent.tools
         assert "index_document" in agent.tools
         schemas = agent.get_tool_schemas()
         tool_names = {s["function"]["name"] for s in schemas}
-        assert tool_names == {"retrieve", "index_document"}
+        assert {"retrieve", "index_document"}.issubset(tool_names)

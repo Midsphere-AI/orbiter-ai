@@ -9,6 +9,7 @@ from exo import Agent, run
 from exo.observability.logging import get_logger  # pyright: ignore[reportMissingImports]
 from exo.types import StreamEvent
 
+from .._utils import resolve_provider
 from ..config import SearchConfig
 from ..conversation import format_chat_history
 from ..prompts.instructions import (
@@ -20,16 +21,6 @@ from ..prompts.instructions import (
 from ..types import ExtractedClaim, SearchResult
 
 _log = get_logger(__name__)
-
-
-def _resolve_provider(model: str):
-    try:
-        from exo.models import get_provider
-
-        return get_provider(model)
-    except Exception as exc:
-        _log.warning("provider resolution failed for %s: %s", model, exc)
-        return None
 
 
 def format_results_as_context(search_results: list[SearchResult]) -> str:
@@ -77,7 +68,7 @@ async def extract_claims(
             temperature=0.0,
             max_steps=1,
         )
-        provider = _resolve_provider(cfg.fast_model)
+        provider = resolve_provider(cfg.fast_model)
         result = await run(agent, prompt, provider=provider)
 
         # Parse JSON from output — strip markdown fences if present
@@ -162,7 +153,7 @@ async def write_answer(
         max_steps=1,
     )
 
-    provider = _resolve_provider(cfg.model)
+    provider = resolve_provider(cfg.model)
     result = await run(writer, formatted_input, provider=provider)
     _log.info("writer done len=%d", len(result.output))
     return result.output
@@ -222,7 +213,7 @@ async def stream_write_answer(
         max_steps=1,
     )
 
-    provider = _resolve_provider(cfg.model)
+    provider = resolve_provider(cfg.model)
     async for event in run.stream(writer, formatted_input, provider=provider):
         yield event
 
@@ -277,7 +268,7 @@ async def revise_answer(
         max_steps=1,
     )
 
-    provider = _resolve_provider(cfg.model)
+    provider = resolve_provider(cfg.model)
     result = await run(writer, formatted_input, provider=provider)
     _log.info("revision done len=%d", len(result.output))
     return result.output

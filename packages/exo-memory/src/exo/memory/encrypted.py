@@ -113,11 +113,20 @@ class EncryptedMemoryStore:
     ) -> list[MemoryItem]:
         """Search and decrypt results.
 
-        Note: keyword search on encrypted content will not work since the
-        inner store sees ciphertext. Metadata/type/status filters work normally.
+        Raises:
+            NotImplementedError: If *query* is non-empty.  Keyword search on
+                encrypted content is silently broken (the inner store sees
+                ciphertext, not plaintext), so we fail loudly instead.
+                Metadata, memory_type, category, and status filters still work.
         """
+        if query:
+            raise NotImplementedError(
+                "EncryptedMemoryStore does not support keyword/semantic search: "
+                "the inner store indexes ciphertext, not plaintext.  "
+                "Pass query='' and use metadata/type/status filters instead."
+            )
         items = await self._store.search(
-            query=query,
+            query="",
             metadata=metadata,
             memory_type=memory_type,
             category=category,

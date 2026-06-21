@@ -8,21 +8,12 @@ import datetime
 from exo import Agent, run
 from exo.observability.logging import get_logger  # pyright: ignore[reportMissingImports]
 
+from .._utils import resolve_provider
 from ..config import SearchConfig
 from ..tools.searxng import search_and_collect
 from ..types import ClassifierOutput, QueryPlan, SearchResult
 
 _log = get_logger(__name__)
-
-
-def _resolve_provider(model: str):
-    try:
-        from exo.models import get_provider
-
-        return get_provider(model)
-    except Exception as exc:
-        _log.warning("provider resolution failed for %s: %s", model, exc)
-        return None
 
 
 _INITIAL_PROMPT = """\
@@ -170,7 +161,7 @@ async def _generate_query_plan(
         max_steps=1,
     )
 
-    provider = _resolve_provider(config.fast_model)
+    provider = resolve_provider(config.fast_model)
     result = await run(planner, formatted_input, provider=provider)
 
     try:

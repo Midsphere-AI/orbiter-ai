@@ -9,6 +9,7 @@ from exo import Agent, run
 from exo.observability.logging import get_logger  # pyright: ignore[reportMissingImports]
 from exo.types import StreamEvent
 
+from .._utils import resolve_provider
 from ..config import SearchConfig
 from ..prompts.instructions import (
     ACADEMIC_SEARCH_PROMPT,
@@ -33,17 +34,6 @@ from ..tools.web_fetcher import scrape_url
 from ..types import ClassifierOutput, SearchResult
 
 _log = get_logger(__name__)
-
-
-def _resolve_provider(model: str):
-    try:
-        from exo.models import get_provider
-
-        return get_provider(model)
-    except Exception as exc:
-        _log.warning("provider resolution failed for %s: %s", model, exc)
-        return None
-
 
 _MODE_ITERATIONS = {"speed": 2, "balanced": 6, "quality": 25, "deep": 25}
 
@@ -176,7 +166,7 @@ async def research(
     # Clear collector before run, collect results after
     clear_collected_results()
 
-    provider = _resolve_provider(cfg.model)
+    provider = resolve_provider(cfg.model)
     await run(researcher, formatted_input, provider=provider)
 
     # Get results from the shared collector (populated by tool side-effects)
@@ -256,7 +246,7 @@ async def stream_research(
 
     clear_collected_results()
 
-    provider = _resolve_provider(cfg.model)
+    provider = resolve_provider(cfg.model)
     async for event in run.stream(researcher, formatted_input, provider=provider, detailed=True):
         yield event
 
@@ -400,7 +390,7 @@ async def parallel_research(
 
     # Researchers just pick search queries — fast model suffices for speed/balanced
     research_model = cfg.model if mode == "quality" else cfg.fast_model
-    provider = _resolve_provider(research_model)
+    provider = resolve_provider(research_model)
 
     async def _run_worker(angle: str) -> None:
         # Sub-researchers always use "speed" tool descriptions — the balanced/quality

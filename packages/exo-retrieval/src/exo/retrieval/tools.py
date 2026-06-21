@@ -6,8 +6,8 @@ Factory functions that wrap retrievers and indexing pipelines as
 
 from __future__ import annotations
 
+from exo.models.embeddings import Embeddings  # pyright: ignore[reportMissingImports]
 from exo.retrieval.chunker import Chunker  # pyright: ignore[reportMissingImports]
-from exo.retrieval.embeddings import Embeddings  # pyright: ignore[reportMissingImports]
 from exo.retrieval.retriever import Retriever  # pyright: ignore[reportMissingImports]
 from exo.retrieval.types import (  # pyright: ignore[reportMissingImports]
     Document,

@@ -12,20 +12,11 @@ import json
 from exo import Agent, run
 from exo.observability.logging import get_logger  # pyright: ignore[reportMissingImports]
 
+from .._utils import resolve_provider
 from ..config import SearchConfig
 from ..types import Contradiction, ContradictionReport, FactualClaim, SearchResult
 
 _log = get_logger(__name__)
-
-
-def _resolve_provider(model: str):
-    try:
-        from exo.models import get_provider
-
-        return get_provider(model)
-    except Exception as exc:
-        _log.warning("provider resolution failed for %s: %s", model, exc)
-        return None
 
 
 # ---------------------------------------------------------------------------
@@ -53,7 +44,7 @@ async def _extract_claims(answer: str, config: SearchConfig) -> list[FactualClai
     if not answer.strip():
         return []
 
-    provider = _resolve_provider(config.fast_model)
+    provider = resolve_provider(config.fast_model)
     agent = Agent(
         name="claim_extractor",
         model=config.fast_model,
@@ -148,7 +139,7 @@ async def _analyze_conflicts(
         sources_lines.append(f"[Source {i}] {source.title}\n{content}\n")
     sources_text = "\n".join(sources_lines)
 
-    provider = _resolve_provider(config.fast_model)
+    provider = resolve_provider(config.fast_model)
     agent = Agent(
         name="conflict_analyzer",
         model=config.fast_model,

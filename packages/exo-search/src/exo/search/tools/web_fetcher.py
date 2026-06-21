@@ -1,10 +1,10 @@
-"""Web page content extraction tools.
+"""Web page content extraction helpers.
 
 Fetch and extract readable text content from web pages, stripping
 navigation, scripts, and other non-content elements.
 
-Usage:
-    from examples.advanced.exo-search.tools.web_fetcher import fetch_page_content
+The public ``@tool``-decorated entry point is ``scrape_url``.  All other
+functions in this module are internal pipeline helpers.
 """
 
 from __future__ import annotations
@@ -385,7 +385,6 @@ def _fetch_page(url: str) -> str:
     return _fetch_page_fallback(url)
 
 
-@tool
 async def fetch_page_content(url: str) -> str:
     """Fetch a web page and return its extracted text content.
 
@@ -398,7 +397,6 @@ async def fetch_page_content(url: str) -> str:
     return await asyncio.to_thread(_fetch_page, url)
 
 
-@tool
 async def fetch_multiple_pages(urls_json: str) -> str:
     """Fetch multiple web pages concurrently and return their combined content.
 

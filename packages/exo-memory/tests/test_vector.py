@@ -1,4 +1,4 @@
-"""Tests for VectorMemoryStore and Embeddings ABC."""
+"""Tests for VectorMemoryStore and Embeddings (canonical exo-models layer)."""
 
 from __future__ import annotations
 
@@ -30,17 +30,16 @@ from exo.memory.base import (  # pyright: ignore[reportMissingImports]
 )
 
 # ---------------------------------------------------------------------------
-# Mock embeddings — deterministic vectors for testing
+# Mock embeddings — canonical interface (async embed + embed_batch + dimension)
 # ---------------------------------------------------------------------------
 
 
 class MockEmbeddings(Embeddings):
     """Deterministic embeddings for testing.
 
-    Generates a simple vector based on the character-code average of the text.
+    Satisfies the canonical exo.models.Embeddings interface:
+    async ``embed(text) -> list[float]``, ``embed_batch``, ``dimension``.
     """
-
-    __slots__ = ("_dim", "call_count")
 
     def __init__(self, dim: int = 4) -> None:
         self._dim = dim
@@ -50,22 +49,19 @@ class MockEmbeddings(Embeddings):
     def dimension(self) -> int:
         return self._dim
 
-    def embed(self, text: str) -> list[float]:
+    async def embed(self, text: str) -> list[float]:
         self.call_count += 1
         if not text:
             return [0.0] * self._dim
-        # Simple deterministic embedding: use char codes
         base = sum(ord(c) for c in text) / len(text) / 256.0
         return [base + i * 0.1 for i in range(self._dim)]
 
-    async def aembed(self, text: str) -> list[float]:
-        return self.embed(text)
+    async def embed_batch(self, texts: list[str]) -> list[list[float]]:
+        return [await self.embed(t) for t in texts]
 
 
 class FixedEmbeddings(Embeddings):
     """Returns pre-set vectors based on a lookup table."""
-
-    __slots__ = ("_dim", "_vectors")
 
     def __init__(self, vectors: dict[str, list[float]], dim: int = 3) -> None:
         self._vectors = vectors
@@ -75,11 +71,11 @@ class FixedEmbeddings(Embeddings):
     def dimension(self) -> int:
         return self._dim
 
-    def embed(self, text: str) -> list[float]:
+    async def embed(self, text: str) -> list[float]:
         return self._vectors.get(text, [0.0] * self._dim)
 
-    async def aembed(self, text: str) -> list[float]:
-        return self.embed(text)
+    async def embed_batch(self, texts: list[str]) -> list[list[float]]:
+        return [await self.embed(t) for t in texts]
 
 
 # ---------------------------------------------------------------------------
@@ -88,7 +84,7 @@ class FixedEmbeddings(Embeddings):
 
 
 class TestEmbeddingsABC:
-    """Tests for the Embeddings abstract base class."""
+    """Tests for the Embeddings abstract base class (canonical exo-models interface)."""
 
     def test_cannot_instantiate_abc(self) -> None:
         with pytest.raises(TypeError, match="abstract"):
@@ -99,38 +95,33 @@ class TestEmbeddingsABC:
         assert isinstance(emb, Embeddings)
         assert emb.dimension == 8
 
-    def test_mock_embed_sync(self) -> None:
+    async def test_mock_embed_async(self) -> None:
         emb = MockEmbeddings(dim=3)
-        vec = emb.embed("hello")
+        vec = await emb.embed("hello")
         assert len(vec) == 3
         assert all(isinstance(v, float) for v in vec)
 
-    async def test_mock_embed_async(self) -> None:
-        emb = MockEmbeddings(dim=3)
-        vec = await emb.aembed("hello")
-        assert len(vec) == 3
-
-    def test_empty_text(self) -> None:
+    async def test_empty_text(self) -> None:
         emb = MockEmbeddings(dim=4)
-        vec = emb.embed("")
+        vec = await emb.embed("")
         assert vec == [0.0, 0.0, 0.0, 0.0]
+
+    async def test_embed_batch(self) -> None:
+        emb = MockEmbeddings(dim=3)
+        vecs = await emb.embed_batch(["hello", "world"])
+        assert len(vecs) == 2
+        assert all(len(v) == 3 for v in vecs)
 
 
 class TestOpenAIEmbeddings:
-    """Tests for OpenAIEmbeddings (construction only — no real API calls)."""
+    """Tests for OpenAIEmbeddings (canonical version — construction only)."""
 
     def test_is_embeddings_subclass(self) -> None:
         assert issubclass(OpenAIEmbeddings, Embeddings)
 
-    def test_dimension_property(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # Patch openai import
-        import types
-
-        mock_openai = types.ModuleType("openai")
-        mock_openai.OpenAI = lambda **kw: None  # type: ignore[attr-defined]
-        monkeypatch.setitem(__import__("sys").modules, "openai", mock_openai)
-
-        emb = OpenAIEmbeddings(model="test", dimension=768, api_key="fake")
+    def test_dimension_property(self) -> None:
+        # OpenAIEmbeddings uses httpx — no SDK needed; just check construction.
+        emb = OpenAIEmbeddings(api_key="fake", model="test", dimension=768)
         assert emb.dimension == 768
 
 
@@ -140,7 +131,7 @@ class TestOpenAIEmbeddings:
 
 
 class TestCosineSimilarity:
-    """Tests for the _cosine_similarity helper."""
+    """Tests for the _cosine_similarity helper (alias of exo.models.cosine_similarity)."""
 
     def test_identical_vectors(self) -> None:
         v = [1.0, 2.0, 3.0]
@@ -406,8 +397,23 @@ class TestVectorEmbeddingCalls:
 
 
 # ---------------------------------------------------------------------------
-# EmbeddingProvider protocol
+# VertexEmbeddings — canonical version (exo.models.VertexEmbeddings via httpx)
 # ---------------------------------------------------------------------------
+
+
+class TestVertexEmbeddings:
+    """Tests for VertexEmbeddings (canonical exo.models version — httpx-based)."""
+
+    def test_is_embeddings_subclass(self) -> None:
+        assert issubclass(VertexEmbeddings, Embeddings)
+
+    def test_vertex_embeddings_default_params(self) -> None:
+        """Defaults: model=text-embedding-005, dimension=768."""
+        emb = VertexEmbeddings(api_key="fake", project="proj")
+        assert emb._model == "text-embedding-005"
+        assert emb.dimension == 768
+
+
 
 
 class TestEmbeddingProvider:
@@ -823,7 +829,7 @@ class TestChromaVectorMemoryStore:
     async def test_uses_persistent_client_when_path_given(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        mock_client, _mock_collection = _make_chroma_mock(monkeypatch)
+        _mock_client, _mock_collection = _make_chroma_mock(monkeypatch)
         import chromadb
 
         store = ChromaVectorMemoryStore(SimpleEmbeddingProvider(), path="/tmp/testdb")
@@ -862,166 +868,3 @@ class TestChromaVectorMemoryStore:
         assert results[0].content == "round trip content"
 
 
-# ---------------------------------------------------------------------------
-# VertexEmbeddings
-# ---------------------------------------------------------------------------
-
-
-def _make_vertex_mocks(monkeypatch: pytest.MonkeyPatch) -> tuple[MagicMock, MagicMock]:
-    """Inject mock google.genai and google.oauth2.service_account modules.
-
-    Returns (mock_genai_client_instance, mock_genai_module).
-    """
-    # Build fake google.genai module tree
-    mock_genai = types.ModuleType("google.genai")
-    mock_genai_types = types.ModuleType("google.genai.types")
-
-    mock_client_instance = MagicMock()
-    mock_genai.Client = MagicMock(return_value=mock_client_instance)  # type: ignore[attr-defined]
-
-    # EmbedContentConfig mock
-    mock_embed_config = MagicMock()
-    mock_genai_types.EmbedContentConfig = MagicMock(return_value=mock_embed_config)  # type: ignore[attr-defined]
-
-    # google namespace package
-    mock_google = types.ModuleType("google")
-    mock_google.genai = mock_genai  # type: ignore[attr-defined]
-
-    # google.oauth2 / service_account
-    mock_oauth2 = types.ModuleType("google.oauth2")
-    mock_sa_mod = types.ModuleType("google.oauth2.service_account")
-    mock_sa_creds = MagicMock()
-    mock_sa_mod.Credentials = MagicMock(return_value=mock_sa_creds)  # type: ignore[attr-defined]
-    mock_oauth2.service_account = mock_sa_mod  # type: ignore[attr-defined]
-
-    monkeypatch.setitem(sys.modules, "google", mock_google)
-    monkeypatch.setitem(sys.modules, "google.genai", mock_genai)
-    monkeypatch.setitem(sys.modules, "google.genai.types", mock_genai_types)
-    monkeypatch.setitem(sys.modules, "google.oauth2", mock_oauth2)
-    monkeypatch.setitem(sys.modules, "google.oauth2.service_account", mock_sa_mod)
-
-    return mock_client_instance, mock_genai
-
-
-class TestVertexEmbeddings:
-    """Tests for VertexEmbeddings (all mocked — no real GCP calls)."""
-
-    def test_is_embeddings_subclass(self) -> None:
-        assert issubclass(VertexEmbeddings, Embeddings)
-
-    def test_vertex_embeddings_default_params(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Defaults: model=text-embedding-005, dimension=768, output_dimensionality=None."""
-        _make_vertex_mocks(monkeypatch)
-        emb = VertexEmbeddings()
-        assert emb._model == "text-embedding-005"
-        assert emb.dimension == 768
-        assert emb._output_dimensionality is None
-
-    def test_vertex_embeddings_adc(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """No service account → credentials=None passed to genai.Client."""
-        _mock_client, mock_genai = _make_vertex_mocks(monkeypatch)
-        monkeypatch.delenv("GOOGLE_SERVICE_ACCOUNT_BASE64", raising=False)
-
-        VertexEmbeddings(project="my-project", location="us-east1")
-
-        call_kwargs = mock_genai.Client.call_args.kwargs
-        assert call_kwargs["credentials"] is None
-        assert call_kwargs["project"] == "my-project"
-        assert call_kwargs["location"] == "us-east1"
-        assert call_kwargs["vertexai"] is True
-
-    def test_vertex_embeddings_service_account(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Base64 SA JSON → credentials object passed to genai.Client."""
-        import base64
-        import json as _json
-
-        _mock_client, mock_genai = _make_vertex_mocks(monkeypatch)
-
-        fake_sa = {"type": "service_account", "project_id": "proj"}
-        encoded = base64.b64encode(_json.dumps(fake_sa).encode()).decode()
-
-        VertexEmbeddings(service_account_base64=encoded)
-
-        call_kwargs = mock_genai.Client.call_args.kwargs
-        assert call_kwargs["credentials"] is not None
-
-    def test_vertex_embeddings_env_vars(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """project/location/SA read from GOOGLE_CLOUD_PROJECT etc."""
-        import base64
-        import json as _json
-
-        _mock_client, mock_genai = _make_vertex_mocks(monkeypatch)
-
-        fake_sa = {"type": "service_account", "project_id": "env-proj"}
-        encoded = base64.b64encode(_json.dumps(fake_sa).encode()).decode()
-
-        monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "env-project")
-        monkeypatch.setenv("GOOGLE_CLOUD_LOCATION", "europe-west1")
-        monkeypatch.setenv("GOOGLE_SERVICE_ACCOUNT_BASE64", encoded)
-
-        VertexEmbeddings()
-
-        call_kwargs = mock_genai.Client.call_args.kwargs
-        assert call_kwargs["project"] == "env-project"
-        assert call_kwargs["location"] == "europe-west1"
-        assert call_kwargs["credentials"] is not None
-
-    def test_vertex_embeddings_embed_sync(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """embed() calls models.embed_content and returns the first embedding values."""
-        mock_client, _mock_genai = _make_vertex_mocks(monkeypatch)
-
-        expected = [0.1, 0.2, 0.3]
-        mock_embedding = MagicMock()
-        mock_embedding.values = expected
-        mock_resp = MagicMock()
-        mock_resp.embeddings = [mock_embedding]
-        mock_client.models.embed_content.return_value = mock_resp
-
-        emb = VertexEmbeddings(model="text-embedding-005", dimension=3)
-        result = emb.embed("hello vertex")
-
-        assert result == expected
-        call_kwargs = mock_client.models.embed_content.call_args.kwargs
-        assert call_kwargs["model"] == "text-embedding-005"
-        assert call_kwargs["contents"] == "hello vertex"
-        assert "config" not in call_kwargs  # no output_dimensionality set
-
-    async def test_vertex_embeddings_aembed_async(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """aembed() delegates to embed() via asyncio.to_thread."""
-        mock_client, _mock_genai = _make_vertex_mocks(monkeypatch)
-
-        expected = [0.4, 0.5, 0.6]
-        mock_embedding = MagicMock()
-        mock_embedding.values = expected
-        mock_resp = MagicMock()
-        mock_resp.embeddings = [mock_embedding]
-        mock_client.models.embed_content.return_value = mock_resp
-
-        emb = VertexEmbeddings(model="text-embedding-005", dimension=3)
-        result = await emb.aembed("async hello")
-
-        assert result == expected
-
-    def test_vertex_embeddings_output_dimensionality(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """When output_dimensionality is set, EmbedContentConfig is passed to the API."""
-        mock_client, _mock_genai = _make_vertex_mocks(monkeypatch)
-
-        expected = [0.1, 0.2]
-        mock_embedding = MagicMock()
-        mock_embedding.values = expected
-        mock_resp = MagicMock()
-        mock_resp.embeddings = [mock_embedding]
-        mock_client.models.embed_content.return_value = mock_resp
-
-        emb = VertexEmbeddings(output_dimensionality=512)
-        assert emb.dimension == 512  # _dimension = output_dimensionality when set
-
-        emb.embed("truncated embedding")
-
-        call_kwargs = mock_client.models.embed_content.call_args.kwargs
-        assert "config" in call_kwargs
-        # EmbedContentConfig should have been constructed with output_dimensionality=512
-        import sys as _sys
-
-        genai_types = _sys.modules["google.genai.types"]
-        genai_types.EmbedContentConfig.assert_called_once_with(output_dimensionality=512)

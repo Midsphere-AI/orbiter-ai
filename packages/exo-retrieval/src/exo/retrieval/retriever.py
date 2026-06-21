@@ -10,7 +10,7 @@ from __future__ import annotations
 import abc
 from typing import Any
 
-from exo.retrieval.embeddings import Embeddings  # pyright: ignore[reportMissingImports]
+from exo.models.embeddings import Embeddings  # pyright: ignore[reportMissingImports]
 from exo.retrieval.types import (  # pyright: ignore[reportMissingImports]
     RetrievalError,
     RetrievalResult,

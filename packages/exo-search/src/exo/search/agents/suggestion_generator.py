@@ -8,6 +8,7 @@ import re
 from exo import Agent, run
 from exo.observability.logging import get_logger  # pyright: ignore[reportMissingImports]
 
+from .._utils import resolve_provider
 from ..config import SearchConfig
 from ..prompts.instructions import get_suggestion_prompt
 from ..types import SuggestionOutput
@@ -30,16 +31,6 @@ def _extract_suggestions_from_text(text: str) -> list[str]:
     # Fall back to numbered lines (e.g. "1. How does..." or "- What are...")
     lines = re.findall(r"(?:^|\n)\s*(?:\d+[.):]\s*|[-*]\s+)(.{15,120})", text)
     return [line.strip().rstrip("?").strip() + "?" for line in lines[:5]]
-
-
-def _resolve_provider(model: str):
-    try:
-        from exo.models import get_provider
-
-        return get_provider(model)
-    except Exception as exc:
-        _log.warning("provider resolution failed for %s: %s", model, exc)
-        return None
 
 
 async def generate_suggestions(
@@ -69,7 +60,7 @@ async def generate_suggestions(
         max_steps=1,
     )
 
-    provider = _resolve_provider(cfg.fast_model)
+    provider = resolve_provider(cfg.fast_model)
     result = await run(suggestion_agent, formatted_input, provider=provider)
 
     try:

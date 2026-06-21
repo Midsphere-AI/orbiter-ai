@@ -16,6 +16,7 @@ from collections.abc import AsyncIterator
 from exo import Agent, run
 from exo.observability.logging import get_logger  # pyright: ignore[reportMissingImports]
 
+from .._utils import resolve_provider
 from ..config import SearchConfig
 from ..tools.searxng import search_and_collect
 from ..tools.web_fetcher import enrich_results
@@ -29,16 +30,6 @@ from ..types import (
 )
 
 _log = get_logger(__name__)
-
-
-def _resolve_provider(model: str):
-    try:
-        from exo.models import get_provider
-
-        return get_provider(model)
-    except Exception as exc:
-        _log.warning("provider resolution failed for %s: %s", model, exc)
-        return None
 
 
 # ---------------------------------------------------------------------------
@@ -170,7 +161,7 @@ async def _plan_research(
         max_steps=1,
     )
 
-    provider = _resolve_provider(config.model)
+    provider = resolve_provider(config.model)
     result = await run(planner, query, provider=provider)
 
     try:
@@ -315,7 +306,7 @@ async def _execute_step(
             max_steps=1,
         )
 
-        provider = _resolve_provider(config.fast_model)
+        provider = resolve_provider(config.fast_model)
         extract_result = await run(extractor, step.extraction_goal, provider=provider)
         extracted_info = str(extract_result.output) if extract_result.output else "NOT FOUND"
     except Exception as exc:
