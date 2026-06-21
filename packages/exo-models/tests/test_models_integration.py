@@ -24,16 +24,25 @@ from exo.models import (  # pyright: ignore[reportMissingImports]
 
 EXPECTED_ALL = [
     "AnthropicProvider",
+    "EmbeddingError",
+    "Embeddings",
     "FinishReason",
     "GeminiProvider",
+    "HTTPEmbeddings",
+    "InMemoryVectorStore",
     "MODEL_CONTEXT_WINDOWS",
     "ModelError",
     "ModelProvider",
     "ModelResponse",
+    "OpenAIEmbeddings",
     "OpenAIProvider",
     "StreamChunk",
     "ToolCallDelta",
+    "VectorSearchResult",
+    "VectorStoreBase",
+    "VertexEmbeddings",
     "VertexProvider",
+    "cosine_similarity",
     "dalle_generate_image",
     "get_provider",
     "imagen_generate_image",
@@ -201,3 +210,118 @@ class TestModelContextWindows:
     def test_get_provider_explicit_override(self) -> None:
         provider = get_provider("openai:gpt-4o", api_key="sk-test", context_window_tokens=999)
         assert provider.config.context_window_tokens == 999
+
+
+class TestGoogleProviderMerge:
+    """After the Gemini/Vertex merge both prefixes must resolve to the same class."""
+
+    def test_gemini_and_vertex_are_same_class(self) -> None:
+        from exo.models.gemini import GoogleProvider  # pyright: ignore[reportMissingImports]
+
+        assert model_registry.get("gemini") is GoogleProvider
+        assert model_registry.get("vertex") is GoogleProvider
+        assert model_registry.get("gemini") is model_registry.get("vertex")
+
+    def test_gemini_prefix_resolves(self) -> None:
+        from unittest.mock import patch
+
+        from exo.models.gemini import GoogleProvider  # pyright: ignore[reportMissingImports]
+
+        with patch("exo.models.gemini.genai"):
+            provider = get_provider("gemini:gemini-2.0-flash", api_key="key")
+        assert isinstance(provider, GoogleProvider)
+        assert provider.config.provider == "gemini"
+        assert provider.config.model_name == "gemini-2.0-flash"
+
+    def test_vertex_prefix_resolves(self) -> None:
+        from unittest.mock import patch
+
+        from exo.models.gemini import GoogleProvider  # pyright: ignore[reportMissingImports]
+
+        with patch("exo.models.gemini.genai"):
+            provider = get_provider(
+                "vertex:gemini-2.0-flash",
+                google_project="my-project",
+            )
+        assert isinstance(provider, GoogleProvider)
+        assert provider.config.provider == "vertex"
+        assert provider.config.model_name == "gemini-2.0-flash"
+
+    def test_vertex_alias_backward_compat(self) -> None:
+        """VertexProvider is GeminiProvider is GoogleProvider (all the same class)."""
+        from exo.models.gemini import (  # pyright: ignore[reportMissingImports]
+            GeminiProvider,
+            GoogleProvider,
+        )
+        from exo.models.vertex import VertexProvider  # pyright: ignore[reportMissingImports]
+
+        assert GeminiProvider is GoogleProvider
+        assert VertexProvider is GoogleProvider
+
+
+class TestAnthropicUseCacheOpt:
+    """use_cache=False disables prompt-cache breakpoints."""
+
+    def test_cache_on_by_default(self) -> None:
+        from exo.config import ModelConfig  # pyright: ignore[reportMissingImports]
+        from exo.models.anthropic import AnthropicProvider  # pyright: ignore[reportMissingImports]
+        from exo.types import UserMessage  # pyright: ignore[reportMissingImports]
+
+        provider = AnthropicProvider(
+            ModelConfig(provider="anthropic", model_name="claude-sonnet-4-6", api_key="key")
+        )
+        kwargs = provider._build_kwargs([UserMessage(content="hi")])
+        # system is absent so the cache breakpoint manifests on user messages
+        user_msg = kwargs["messages"][0]
+        # Content is converted to a list with cache_control when caching is on
+        assert isinstance(user_msg["content"], list)
+        assert user_msg["content"][-1].get("cache_control") == {"type": "ephemeral"}
+
+    def test_cache_off_skips_breakpoints(self) -> None:
+        from exo.config import ModelConfig  # pyright: ignore[reportMissingImports]
+        from exo.models.anthropic import AnthropicProvider  # pyright: ignore[reportMissingImports]
+        from exo.types import UserMessage  # pyright: ignore[reportMissingImports]
+
+        provider = AnthropicProvider(
+            ModelConfig(
+                provider="anthropic", model_name="claude-sonnet-4-6", api_key="key", use_cache=False
+            )
+        )
+        kwargs = provider._build_kwargs([UserMessage(content="hi")])
+        user_msg = kwargs["messages"][0]
+        # With use_cache=False content stays as a plain string, no cache_control injected
+        assert user_msg["content"] == "hi"
+
+
+class TestApiKeyErrors:
+    """Missing API keys raise ModelError at construction time, not later."""
+
+    def test_anthropic_no_key_raises(self) -> None:
+        import os
+        from unittest.mock import patch
+
+        from exo.config import ModelConfig  # pyright: ignore[reportMissingImports]
+        from exo.models.anthropic import AnthropicProvider  # pyright: ignore[reportMissingImports]
+        from exo.models.types import ModelError  # pyright: ignore[reportMissingImports]
+
+        env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}
+        with patch.dict(os.environ, env, clear=True), pytest.raises(ModelError, match="ANTHROPIC_API_KEY"):
+            AnthropicProvider(
+                ModelConfig(provider="anthropic", model_name="claude-sonnet-4-6")
+            )
+
+    def test_gemini_no_key_raises(self) -> None:
+        import os
+        from unittest.mock import patch
+
+        from exo.config import ModelConfig  # pyright: ignore[reportMissingImports]
+        from exo.models.gemini import GoogleProvider  # pyright: ignore[reportMissingImports]
+        from exo.models.types import ModelError  # pyright: ignore[reportMissingImports]
+
+        env = {
+            k: v
+            for k, v in os.environ.items()
+            if k not in ("GOOGLE_API_KEY", "GEMINI_API_KEY")
+        }
+        with patch.dict(os.environ, env, clear=True), pytest.raises(ModelError, match="GOOGLE_API_KEY"):
+            GoogleProvider(ModelConfig(provider="gemini", model_name="gemini-2.0-flash"))

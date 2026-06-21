@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-import logging
-
 import pytest
 
 from exo.models.anthropic import _build_messages, _content_blocks_to_anthropic
+from exo.models.types import ModelError
 from exo.types import (
     AudioBlock,
     DocumentBlock,
@@ -56,17 +55,15 @@ class TestContentBlocksToAnthropic:
         parts = _content_blocks_to_anthropic([DocumentBlock(data="pdfdata", title="Report")])
         assert parts[0]["title"] == "Report"
 
-    def test_audio_block_skipped(self, caplog: pytest.LogCaptureFixture) -> None:
-        with caplog.at_level(logging.WARNING):
-            parts = _content_blocks_to_anthropic([AudioBlock(data="audiodata")])
-        assert parts == []
-        assert "audio" in caplog.text.lower()
+    def test_audio_block_raises(self) -> None:
+        # Anthropic does not support audio — must raise ModelError, not silently drop.
+        with pytest.raises(ModelError, match="audio"):
+            _content_blocks_to_anthropic([AudioBlock(data="audiodata")])
 
-    def test_video_block_skipped(self, caplog: pytest.LogCaptureFixture) -> None:
-        with caplog.at_level(logging.WARNING):
-            parts = _content_blocks_to_anthropic([VideoBlock(url="gs://bucket/v.mp4")])
-        assert parts == []
-        assert "video" in caplog.text.lower()
+    def test_video_block_raises(self) -> None:
+        # Anthropic does not support video — must raise ModelError, not silently drop.
+        with pytest.raises(ModelError, match="video"):
+            _content_blocks_to_anthropic([VideoBlock(url="gs://bucket/v.mp4")])
 
     def test_multiple_blocks(self) -> None:
         parts = _content_blocks_to_anthropic(

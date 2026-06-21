@@ -3,6 +3,14 @@
 # Import providers to trigger auto-registration with model_registry.
 from exo.models.anthropic import AnthropicProvider
 from exo.models.context_windows import MODEL_CONTEXT_WINDOWS
+from exo.models.embeddings import (
+    EmbeddingError,
+    Embeddings,
+    HTTPEmbeddings,
+    OpenAIEmbeddings,
+    VertexEmbeddings,
+    cosine_similarity,
+)
 from exo.models.gemini import GeminiProvider
 from exo.models.media_tools import dalle_generate_image, imagen_generate_image, veo_generate_video
 from exo.models.openai import OpenAIProvider
@@ -14,6 +22,7 @@ from exo.models.types import (
     StreamChunk,
     ToolCallDelta,
 )
+from exo.models.vector import InMemoryVectorStore, VectorSearchResult, VectorStoreBase
 from exo.models.vertex import VertexProvider
 
 __version__: str = "0.1.0"
@@ -21,15 +30,24 @@ __version__: str = "0.1.0"
 __all__: list[str] = [
     "MODEL_CONTEXT_WINDOWS",
     "AnthropicProvider",
+    "EmbeddingError",
+    "Embeddings",
     "FinishReason",
     "GeminiProvider",
+    "HTTPEmbeddings",
+    "InMemoryVectorStore",
     "ModelError",
     "ModelProvider",
     "ModelResponse",
+    "OpenAIEmbeddings",
     "OpenAIProvider",
     "StreamChunk",
     "ToolCallDelta",
+    "VectorSearchResult",
+    "VectorStoreBase",
+    "VertexEmbeddings",
     "VertexProvider",
+    "cosine_similarity",
     "dalle_generate_image",
     "get_provider",
     "imagen_generate_image",

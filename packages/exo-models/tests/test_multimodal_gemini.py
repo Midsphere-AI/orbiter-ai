@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import pytest
+
 from exo.models._media import _guess_mime_from_url, content_blocks_to_google
 from exo.models.gemini import _to_google_contents
+from exo.models.types import ModelError
 from exo.types import (
     AudioBlock,
     DocumentBlock,
@@ -56,9 +59,10 @@ class TestContentBlocksToGoogle:
         assert "inline_data" in parts[0]
         assert parts[0]["inline_data"]["data"] == "videodata"
 
-    def test_video_block_empty_skipped(self) -> None:
-        parts = content_blocks_to_google([VideoBlock()])
-        assert parts == []
+    def test_video_block_empty_raises(self) -> None:
+        # A VideoBlock with neither url nor data must raise ModelError (not silently drop).
+        with pytest.raises(ModelError, match="VideoBlock has neither url nor data"):
+            content_blocks_to_google([VideoBlock()])
 
     def test_document_block(self) -> None:
         parts = content_blocks_to_google([DocumentBlock(data="pdfdata")])

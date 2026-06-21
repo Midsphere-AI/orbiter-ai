@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -107,9 +108,17 @@ def _content_blocks_to_anthropic(blocks: list[ContentBlock]) -> list[dict[str, A
                 doc["title"] = block.title
             parts.append(doc)
         elif isinstance(block, AudioBlock):
-            _log.warning("Anthropic does not support audio input; skipping AudioBlock")
+            raise ModelError(
+                "Anthropic does not support audio input; "
+                "remove AudioBlock before calling this provider",
+                model="anthropic",
+            )
         elif isinstance(block, VideoBlock):
-            _log.warning("Anthropic does not support video input; skipping VideoBlock")
+            raise ModelError(
+                "Anthropic does not support video input; "
+                "remove VideoBlock before calling this provider",
+                model="anthropic",
+            )
     return parts
 
 
@@ -361,12 +370,21 @@ class AnthropicProvider(ModelProvider):
 
     def __init__(self, config: ModelConfig) -> None:
         super().__init__(config)
+        api_key = config.api_key or os.environ.get("ANTHROPIC_API_KEY", "")
+        if not api_key:
+            raise ModelError(
+                "No API key found for Anthropic provider. "
+                "Set ANTHROPIC_API_KEY or pass api_key= to get_provider().",
+                model=f"anthropic:{config.model_name}",
+            )
         self._client = AsyncAnthropic(
-            api_key=config.api_key or "dummy",
+            api_key=api_key,
             base_url=config.base_url,
             max_retries=config.max_retries,
             timeout=config.timeout,
         )
+        # ``use_cache`` can be set to False to disable prompt-cache breakpoints.
+        self._use_cache: bool = bool(getattr(config, "use_cache", True))
 
     async def complete(
         self,
@@ -531,7 +549,20 @@ class AnthropicProvider(ModelProvider):
             kwargs["tools"] = _convert_tools(tools)
         if temperature is not None:
             kwargs["temperature"] = temperature
-        return _apply_cache_breakpoints(kwargs)
+        # Generic escape hatch: ``extra_create_kwargs`` (an optional dict stored on
+        # ModelConfig via ``get_provider(..., extra_create_kwargs={...})``) is merged
+        # verbatim into the ``messages.create()`` call. This lets callers reach
+        # Anthropic-only params the typed interface does not expose -- notably
+        # extended thinking, e.g. ``{"thinking": {"type": "enabled",
+        # "budget_tokens": 8000}}``. Merged last, so the caller takes precedence;
+        # the caller is responsible for honouring API constraints (e.g. thinking
+        # requires ``max_tokens > budget_tokens`` and no custom ``temperature``).
+        extra = getattr(self.config, "extra_create_kwargs", None)
+        if extra:
+            kwargs.update(extra)
+        if self._use_cache:
+            return _apply_cache_breakpoints(kwargs)
+        return kwargs
 
 
 # ---------------------------------------------------------------------------

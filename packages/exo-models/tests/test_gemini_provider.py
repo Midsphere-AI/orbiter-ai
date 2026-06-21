@@ -35,7 +35,11 @@ from exo.types import (  # pyright: ignore[reportMissingImports]
 
 
 def _make_config(**overrides: Any) -> ModelConfig:
-    defaults: dict[str, Any] = {"provider": "gemini", "model_name": "gemini-2.0-flash"}
+    defaults: dict[str, Any] = {
+        "provider": "gemini",
+        "model_name": "gemini-2.0-flash",
+        "api_key": "test-key",
+    }
     defaults.update(overrides)
     return ModelConfig(**defaults)
 

@@ -34,7 +34,11 @@ from exo.types import (  # pyright: ignore[reportMissingImports]
 
 
 def _make_config(**overrides: Any) -> ModelConfig:
-    defaults: dict[str, Any] = {"provider": "anthropic", "model_name": "claude-sonnet-4-5-20250929"}
+    defaults: dict[str, Any] = {
+        "provider": "anthropic",
+        "model_name": "claude-sonnet-4-5-20250929",
+        "api_key": "test-key",
+    }
     defaults.update(overrides)
     return ModelConfig(**defaults)
 
@@ -673,3 +677,68 @@ class TestAnthropicRegistration:
         provider = get_provider("anthropic:claude-sonnet-4-5-20250929", api_key="test-key")
         assert isinstance(provider, AnthropicProvider)
         assert provider.config.model_name == "claude-sonnet-4-5-20250929"
+
+
+# ---------------------------------------------------------------------------
+# extra_create_kwargs passthrough (generic escape hatch, e.g. thinking)
+# ---------------------------------------------------------------------------
+
+
+class TestExtraCreateKwargs:
+    """``extra_create_kwargs`` on ModelConfig is merged into messages.create()."""
+
+    def test_absent_by_default(self) -> None:
+        provider = AnthropicProvider(_make_config())
+        kwargs = provider._build_kwargs([UserMessage(content="hi")])
+        assert "thinking" not in kwargs
+
+    def test_thinking_passthrough(self) -> None:
+        thinking = {"type": "enabled", "budget_tokens": 8000}
+        provider = AnthropicProvider(
+            _make_config(extra_create_kwargs={"thinking": thinking})
+        )
+        kwargs = provider._build_kwargs(
+            [UserMessage(content="hi")], max_tokens=16000
+        )
+        assert kwargs["thinking"] == thinking
+        assert kwargs["max_tokens"] == 16000  # budget headroom preserved
+
+    def test_extra_merged_last_overrides(self) -> None:
+        provider = AnthropicProvider(
+            _make_config(extra_create_kwargs={"top_k": 5})
+        )
+        kwargs = provider._build_kwargs([UserMessage(content="hi")])
+        assert kwargs["top_k"] == 5
+
+
+# ---------------------------------------------------------------------------
+# OpenAI provider: extra_create_kwargs -> extra_body (OpenRouter reasoning)
+# ---------------------------------------------------------------------------
+
+
+class TestOpenAIExtraCreateKwargs:
+    """The openai provider sends extra_create_kwargs via extra_body (not top-level)."""
+
+    def _provider(self, **cfg: Any) -> Any:
+        from exo.config import ModelConfig
+        from exo.models.openai import OpenAIProvider
+
+        defaults: dict[str, Any] = {"provider": "openai", "model_name": "gpt-4o", "api_key": "test"}
+        defaults.update(cfg)
+        return OpenAIProvider(ModelConfig(**defaults))
+
+    def test_absent_by_default(self) -> None:
+        from exo.types import UserMessage
+
+        kwargs = self._provider()._build_kwargs([UserMessage(content="hi")])
+        assert "extra_body" not in kwargs
+
+    def test_reasoning_goes_into_extra_body(self) -> None:
+        from exo.types import UserMessage
+
+        reasoning = {"reasoning": {"effort": "high"}}
+        p = self._provider(extra_create_kwargs=reasoning)
+        kwargs = p._build_kwargs([UserMessage(content="hi")])
+        # MUST be under extra_body (OpenAI SDK rejects unknown top-level kwargs).
+        assert kwargs["extra_body"] == reasoning
+        assert "reasoning" not in kwargs

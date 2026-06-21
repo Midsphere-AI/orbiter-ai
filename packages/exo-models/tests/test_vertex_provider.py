@@ -39,7 +39,12 @@ from exo.types import (  # pyright: ignore[reportMissingImports]
 
 
 def _make_config(**overrides: Any) -> ModelConfig:
-    defaults: dict[str, Any] = {"provider": "vertex", "model_name": "gemini-2.0-flash"}
+    # Default to Vertex mode with a test project so tests exercise the Vertex auth path.
+    defaults: dict[str, Any] = {
+        "provider": "vertex",
+        "model_name": "gemini-2.0-flash",
+        "google_project": "test-project",
+    }
     defaults.update(overrides)
     return ModelConfig(**defaults)
 
@@ -370,7 +375,7 @@ class TestParseStreamChunk:
 
 
 class TestVertexProviderComplete:
-    @patch("exo.models.vertex.genai")
+    @patch("exo.models.gemini.genai")
     async def test_basic_complete(self, mock_genai: MagicMock) -> None:
         config = _make_config()
         provider = VertexProvider(config)
@@ -383,7 +388,7 @@ class TestVertexProviderComplete:
         assert result.content == "world"
         provider._client.aio.models.generate_content.assert_awaited_once()
 
-    @patch("exo.models.vertex.genai")
+    @patch("exo.models.gemini.genai")
     async def test_complete_with_tools(self, mock_genai: MagicMock) -> None:
         config = _make_config()
         provider = VertexProvider(config)
@@ -399,7 +404,7 @@ class TestVertexProviderComplete:
         call_kwargs = provider._client.aio.models.generate_content.call_args[1]
         assert "tools" in call_kwargs["config"]
 
-    @patch("exo.models.vertex.genai")
+    @patch("exo.models.gemini.genai")
     async def test_complete_with_temperature_and_max_tokens(self, mock_genai: MagicMock) -> None:
         config = _make_config()
         provider = VertexProvider(config)
@@ -413,7 +418,7 @@ class TestVertexProviderComplete:
         assert call_kwargs["config"]["temperature"] == 0.5
         assert call_kwargs["config"]["max_output_tokens"] == 100
 
-    @patch("exo.models.vertex.genai")
+    @patch("exo.models.gemini.genai")
     async def test_complete_omits_none_params(self, mock_genai: MagicMock) -> None:
         config = _make_config()
         provider = VertexProvider(config)
@@ -429,7 +434,7 @@ class TestVertexProviderComplete:
         assert "temperature" not in cfg
         assert "max_output_tokens" not in cfg
 
-    @patch("exo.models.vertex.genai")
+    @patch("exo.models.gemini.genai")
     async def test_complete_api_error(self, mock_genai: MagicMock) -> None:
         config = _make_config()
         provider = VertexProvider(config)
@@ -441,7 +446,7 @@ class TestVertexProviderComplete:
         with pytest.raises(ModelError, match="rate limited"):
             await provider.complete([UserMessage(content="hi")])
 
-    @patch("exo.models.vertex.genai")
+    @patch("exo.models.gemini.genai")
     async def test_error_message_prefix(self, mock_genai: MagicMock) -> None:
         config = _make_config()
         provider = VertexProvider(config)
@@ -461,7 +466,7 @@ class TestVertexProviderComplete:
 
 
 class TestVertexProviderStream:
-    @patch("exo.models.vertex.genai")
+    @patch("exo.models.gemini.genai")
     async def test_basic_stream(self, mock_genai: MagicMock) -> None:
         config = _make_config()
         provider = VertexProvider(config)
@@ -497,7 +502,7 @@ class TestVertexProviderStream:
         assert collected[2].finish_reason == "stop"
         assert collected[2].usage.input_tokens == 5
 
-    @patch("exo.models.vertex.genai")
+    @patch("exo.models.gemini.genai")
     async def test_stream_api_error(self, mock_genai: MagicMock) -> None:
         config = _make_config()
         provider = VertexProvider(config)
@@ -510,7 +515,7 @@ class TestVertexProviderStream:
             async for _ in provider.stream([UserMessage(content="hi")]):
                 pass
 
-    @patch("exo.models.vertex.genai")
+    @patch("exo.models.gemini.genai")
     async def test_stream_error_prefix(self, mock_genai: MagicMock) -> None:
         config = _make_config()
         provider = VertexProvider(config)
@@ -534,11 +539,11 @@ class TestVertexRegistration:
     def test_registered(self) -> None:
         assert model_registry.get("vertex") is VertexProvider
 
-    @patch("exo.models.vertex.genai")
+    @patch("exo.models.gemini.genai")
     def test_get_provider_creates_instance(self, mock_genai: MagicMock) -> None:
         from exo.models.provider import get_provider  # pyright: ignore[reportMissingImports]
 
-        provider = get_provider("vertex:gemini-2.0-flash")
+        provider = get_provider("vertex:gemini-2.0-flash", google_project="test-project")
         assert isinstance(provider, VertexProvider)
         assert provider.config.model_name == "gemini-2.0-flash"
 
@@ -574,13 +579,13 @@ class TestServiceAccountCredentials:
             assert call_args[1]["scopes"] == ["https://www.googleapis.com/auth/cloud-platform"]
             assert result is mock_creds
 
-    @patch("exo.models.vertex.genai")
+    @patch("exo.models.gemini.genai")
     def test_init_uses_service_account_from_env(self, mock_genai: MagicMock) -> None:
         encoded = base64.b64encode(json.dumps(_FAKE_SA_INFO).encode()).decode()
         mock_creds = MagicMock()
         with (
             patch.dict(os.environ, {"GOOGLE_SERVICE_ACCOUNT_BASE64": encoded}),
-            patch("exo.models.vertex._credentials_from_base64", return_value=mock_creds) as mock_fn,
+            patch("exo.models.gemini._credentials_from_base64", return_value=mock_creds) as mock_fn,
         ):
             config = _make_config()
             VertexProvider(config)
@@ -588,7 +593,7 @@ class TestServiceAccountCredentials:
             call_kwargs = mock_genai.Client.call_args[1]
             assert call_kwargs["credentials"] is mock_creds
 
-    @patch("exo.models.vertex.genai")
+    @patch("exo.models.gemini.genai")
     def test_init_no_credentials_when_nothing_set(self, mock_genai: MagicMock) -> None:
         env = {k: v for k, v in os.environ.items() if k != "GOOGLE_SERVICE_ACCOUNT_BASE64"}
         with patch.dict(os.environ, env, clear=True):
@@ -604,28 +609,28 @@ class TestServiceAccountCredentials:
 
 
 class TestVertexConfigParams:
-    @patch("exo.models.vertex.genai")
+    @patch("exo.models.gemini.genai")
     def test_project_from_config(self, mock_genai: MagicMock) -> None:
         config = _make_config(google_project="cfg-project")
         VertexProvider(config)
         call_kwargs = mock_genai.Client.call_args[1]
         assert call_kwargs["project"] == "cfg-project"
 
-    @patch("exo.models.vertex.genai")
+    @patch("exo.models.gemini.genai")
     def test_location_from_config(self, mock_genai: MagicMock) -> None:
         config = _make_config(google_location="europe-west1")
         VertexProvider(config)
         call_kwargs = mock_genai.Client.call_args[1]
         assert call_kwargs["location"] == "europe-west1"
 
-    @patch("exo.models.vertex.genai")
+    @patch("exo.models.gemini.genai")
     def test_service_account_from_config(self, mock_genai: MagicMock) -> None:
         encoded = base64.b64encode(json.dumps(_FAKE_SA_INFO).encode()).decode()
         mock_creds = MagicMock()
         env = {k: v for k, v in os.environ.items() if k != "GOOGLE_SERVICE_ACCOUNT_BASE64"}
         with (
             patch.dict(os.environ, env, clear=True),
-            patch("exo.models.vertex._credentials_from_base64", return_value=mock_creds) as mock_fn,
+            patch("exo.models.gemini._credentials_from_base64", return_value=mock_creds) as mock_fn,
         ):
             config = _make_config(google_service_account_base64=encoded)
             VertexProvider(config)
@@ -633,7 +638,7 @@ class TestVertexConfigParams:
             call_kwargs = mock_genai.Client.call_args[1]
             assert call_kwargs["credentials"] is mock_creds
 
-    @patch("exo.models.vertex.genai")
+    @patch("exo.models.gemini.genai")
     def test_config_takes_precedence_over_env(self, mock_genai: MagicMock) -> None:
         with patch.dict(
             os.environ,
@@ -645,33 +650,36 @@ class TestVertexConfigParams:
             assert call_kwargs["project"] == "cfg-project"
             assert call_kwargs["location"] == "cfg-location"
 
-    @patch("exo.models.vertex.genai")
+    @patch("exo.models.gemini.genai")
     def test_falls_back_to_env_when_config_absent(self, mock_genai: MagicMock) -> None:
         with patch.dict(
             os.environ,
             {"GOOGLE_CLOUD_PROJECT": "env-project", "GOOGLE_CLOUD_LOCATION": "env-location"},
         ):
-            config = _make_config()
+            # google_project=None so env fallback is exercised.
+            config = _make_config(google_project=None)
             VertexProvider(config)
             call_kwargs = mock_genai.Client.call_args[1]
             assert call_kwargs["project"] == "env-project"
             assert call_kwargs["location"] == "env-location"
 
-    @patch("exo.models.vertex.genai")
-    def test_defaults_when_nothing_set(self, mock_genai: MagicMock) -> None:
+    @patch("exo.models.gemini.genai")
+    def test_defaults_when_only_project_set(self, mock_genai: MagicMock) -> None:
+        # When project is provided but location is not, location defaults to "us-central1".
         env = {
             k: v
             for k, v in os.environ.items()
             if k not in ("GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_LOCATION")
         }
         with patch.dict(os.environ, env, clear=True):
-            config = _make_config()
+            # Use config project only (no env fallback) and omit location.
+            config = _make_config(google_project="my-project", google_location=None)
             VertexProvider(config)
             call_kwargs = mock_genai.Client.call_args[1]
-            assert call_kwargs["project"] == ""
+            assert call_kwargs["project"] == "my-project"
             assert call_kwargs["location"] == "us-central1"
 
-    @patch("exo.models.vertex.genai")
+    @patch("exo.models.gemini.genai")
     def test_get_provider_forwards_extras(self, mock_genai: MagicMock) -> None:
         from exo.models.provider import get_provider  # pyright: ignore[reportMissingImports]
 

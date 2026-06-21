@@ -427,6 +427,16 @@ class OpenAIProvider(ModelProvider):
             kwargs["temperature"] = temperature
         if max_tokens is not None:
             kwargs["max_tokens"] = max_tokens
+        # Generic escape hatch: ``extra_create_kwargs`` (an optional dict stored on
+        # ModelConfig via ``get_provider(..., extra_create_kwargs={...})``) is sent
+        # through the OpenAI SDK's ``extra_body``, so it reaches the wire even though
+        # the SDK rejects unknown top-level kwargs. This lets callers pass
+        # OpenAI-compatible-endpoint params the typed interface omits -- notably
+        # OpenRouter's unified reasoning control, e.g.
+        # ``{"reasoning": {"effort": "high"}}``. Merged into any existing extra_body.
+        extra = getattr(self.config, "extra_create_kwargs", None)
+        if extra:
+            kwargs["extra_body"] = {**kwargs.get("extra_body", {}), **extra}
         return kwargs
 
 
