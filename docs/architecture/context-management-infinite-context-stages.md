@@ -18,7 +18,6 @@ Define an evidence-backed path for Exo's long-context work. The decision for thi
 | Long-term / vector search | `packages/exo-memory/src/exo/memory/long_term.py`, `backends/vector.py` | Exo has keyword long-term memory plus in-memory and Chroma-backed vector search. |
 | Context primitives | `packages/exo-context/src/exo/context/context.py`, `state.py`, `checkpoint.py`, `token_tracker.py` | Branchable state, in-memory checkpoints, and token tracking already exist as standalone primitives. |
 | Prompt-building / processors / workspace | `packages/exo-context/src/exo/context/prompt_builder.py`, `processor.py`, `workspace.py`, `_internal/knowledge.py`, `tools.py`, `neuron.py` | Exo has a richer context engine package, but the main `Agent.run()` path does not use it end-to-end. |
-| Web parallel implementations | `packages/exo-web/src/exo_web/services/memory.py`, `routes/playground.py`, `routes/checkpoints.py`, `routes/context_state.py` | Exo Web has its own memory summary/checkpoint concepts, separate from core runtime context objects. |
 | Evidence tests | `tests/integration/test_context_summarization.py`, `tests/integration/test_context_vector_injection.py`, `tests/integration/test_branching_isolation.py`, `tests/integration/test_spawn_memory_isolation.py`, `packages/exo-context/tests/test_context_integration.py` | These prove the current behavior and current limits more reliably than the guides alone. |
 
 ## What Exo Does Today
@@ -55,18 +54,14 @@ Define an evidence-backed path for Exo's long-context work. The decision for thi
   - local context-state writes are isolated when a real child `Context` instance is used
   - long-term memory is still shared
   - workspace objects can still be shared by reference if they live in inherited context state
-- Core checkpoints are also incomplete for branch continuation. `Context.snapshot()` writes only to the in-memory `CheckpointStore` owned by that `Context` instance, while Exo Web stores separate checkpoint rows under `workflow_runs`.
-- `packages/exo-web/src/exo_web/routes/context_state.py` still returns a placeholder tree, so there is no live branch/context inspector wired to the runtime path.
+- Core checkpoints are also incomplete for branch continuation. `Context.snapshot()` writes only to the in-memory `CheckpointStore` owned by that `Context` instance.
 
 ### 4. Memory Integration
 
 - If the caller does not pass `memory=...`, `Agent` auto-creates `AgentMemory(short_term=ShortTermMemory(), long_term=default_store)` when `exo-memory` is importable.
 - `MemoryPersistence` hooks persist AI responses and tool results; the user turn is saved before the provider call.
 - `ShortTermMemory` already knows how to scope by user/session/task, keep the last N conversation rounds, and remove incomplete trailing AI/tool-call pairs.
-- Exo Web does not use that same pipeline. `packages/exo-web/src/exo_web/services/memory.py` has separate `conversation`, `sliding_window`, and `summary` strategies backed by its own SQLite tables.
-- Result: there are two memory-management stories today:
-  - core/runtime uses hook-based message persistence plus transient `_apply_context_windowing()`
-  - web/playground uses separate DB summary rows and manual context injection
+- The core/runtime memory-management path uses hook-based message persistence plus transient `_apply_context_windowing()`.
 
 ### 5. Workspace And Artifact Behavior
 
@@ -145,12 +140,11 @@ Rules:
 - Child branches must write only child-scoped summary/checkpoint updates.
 - Large tool-result offloads should move from process-local workspace state to persisted workspace storage.
 - Offloaded artifacts should produce retrievable summary/index entries so they can participate in later compaction.
-- Exo Web checkpoint APIs and context-state inspection should read the same underlying branch-scoped artifact model as the core runtime.
+- Checkpoint and context-state inspection should read the same underlying branch-scoped artifact model as the core runtime.
 
 Why this is the right second step:
 
 - Current short-term branch isolation is real, but long-term memory and workspace behavior still leak across scopes.
-- Current core checkpoints and web checkpoints are parallel systems. Stage 2 removes that split instead of layering more logic on top of it.
 
 ### Stage 3: Retrieval-Aware Budget Enforcement + Optional Compression
 

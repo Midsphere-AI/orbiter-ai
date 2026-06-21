@@ -1,3 +1,0 @@
-ALTER TABLE agents ADD COLUMN persona_role TEXT NOT NULL DEFAULT '';
-ALTER TABLE agents ADD COLUMN persona_goal TEXT NOT NULL DEFAULT '';
-ALTER TABLE agents ADD COLUMN persona_backstory TEXT NOT NULL DEFAULT '';

@@ -52,7 +52,6 @@ packages/
 ├── exo-mcp/          # Model Context Protocol integration
 ├── exo-a2a/          # Agent-to-Agent protocol
 ├── exo-server/       # FastAPI server runtime
-├── exo-web/          # Astro frontend + FastAPI backend
 ├── exo-cli/          # Command-line interface
 ├── exo-distributed/  # Redis task queue, workers
 ├── exo-observability/ # OpenTelemetry logging, tracing, metrics

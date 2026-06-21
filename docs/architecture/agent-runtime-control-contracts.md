@@ -16,7 +16,6 @@ Define the runtime-facing contract for planning, budget awareness, hidden tool-a
 | Core runner and events | `packages/exo-core/src/exo/runner.py` in `run()` and `_stream()`; `packages/exo-core/src/exo/types.py` in `StatusEvent`, `ToolResult`, `ToolResultEvent`, and `MCPProgressEvent` | Planning must run before executor turns, MCP progress gating is emitted here, and tool-result metadata must be surfaced here. |
 | Serialization and parsing | `packages/exo-core/src/exo/config.py` (`AgentConfig`) and `packages/exo-core/src/exo/_internal/output_parser.py` (`parse_tool_arguments()`) | The new fields must survive `Agent.to_dict()/from_dict()` and injected args must be split away from executable kwargs here. |
 | Distributed execution | `packages/exo-distributed/src/exo/distributed/models.py` (`TaskPayload.agent_config`), `worker.py`, `events.py`, and `temporal.py` | Distributed workers and Temporal rebuild agents from serialized config. Event transport must carry the new metadata and optional MCP progress without drift. |
-| Exo Web storage/runtime | `packages/exo-web/src/exo_web/migrations/008_create_agents.sql`, `026_create_agent_plans.sql`, `035_create_runs.sql`, `041_create_workflow_approvals.sql`, `routes/agents.py`, `services/agent_runtime.py`, `routes/plans.py`, `routes/approvals.py`, and the agent editor pages under `src/pages/agents/` | Web already stores `autonomous_mode` and planner records, but it does not store the new runtime controls. HITL approval storage is workflow-specific today and must not be reused blindly. |
 
 ## Decisions
 
@@ -41,10 +40,6 @@ Exact code touchpoints:
 - `packages/exo-core/src/exo/agent.py`
 - `packages/exo-core/src/exo/config.py`
 - `packages/exo-core/tests/test_serialization.py`
-- `packages/exo-web/src/exo_web/routes/agents.py`
-- `packages/exo-web/src/exo_web/services/agent_runtime.py`
-- `packages/exo-web/src/pages/agents/new/index.astro`
-- `packages/exo-web/src/pages/agents/[id]/edit.astro`
 
 ### 2. Planning Contract
 
@@ -63,7 +58,6 @@ Exact touchpoints:
 
 - `packages/exo-core/src/exo/runner.py`: add a planner pre-pass before the normal execution loop.
 - `packages/exo-core/src/exo/agent.py`: surface planner fields on the agent and keep them in `to_dict()/from_dict()`.
-- `packages/exo-web/src/exo_web/routes/plans.py` and `packages/exo-web/src/exo_web/services/planner.py`: keep existing user-managed `autonomous_mode` and `agent_plans` separate from the runtime planner.
 
 Decision: do not reuse `agent_plans` for runtime planner transcripts. `agent_plans` is a user-facing, persistent web feature; runtime planning is ephemeral execution state.
 
@@ -106,7 +100,6 @@ Exact touchpoints:
 - `packages/exo-core/src/exo/agent.py`: `get_tool_schemas()`
 - `packages/exo-core/src/exo/_internal/output_parser.py`: split injected args away from executable args
 - `packages/exo-core/src/exo/types.py`: carry injected args in tool-result metadata
-- `packages/exo-web/src/exo_web/services/agent_runtime.py`: preserve schema-only fields when building live agents from DB rows
 
 Decision: `injected_tool_args` stays `dict[str, str]` rather than full JSON Schema so it round-trips cleanly through JSON, DB text storage, and distributed payloads without introducing per-provider schema drift in the first implementation.
 
@@ -128,10 +121,8 @@ Exact touchpoints:
 
 - `packages/exo-core/src/exo/agent.py`: gate tool execution inside `_execute_tools()`
 - `packages/exo-core/src/exo/types.py`: add approval fields to tool-result metadata
-- `packages/exo-web/src/exo_web/routes/approvals.py` and `packages/exo-web/src/exo_web/migrations/041_create_workflow_approvals.sql`: current approval storage is workflow-specific
-- `packages/exo-web/src/exo_web/services/agent_runtime.py`: runtime adapter must create and poll approvals for agent runs
 
-Decision: do not reuse `workflow_approvals` as-is. It references `workflow_runs(id)` and does not fit agent/runtime tool approvals. The implementation should introduce a run-scoped approval record that can serve both workflow and agent tool approvals, then reuse the existing approval UI against that broader storage.
+Decision: introduce a run-scoped approval record in exo-core that serves tool approvals, keyed by run and tool-call id.
 
 ### 6. Parallel Sub-Agent Contract
 
@@ -166,7 +157,6 @@ Exact touchpoints:
 - `packages/exo-core/src/exo/agent.py`: `_make_spawn_self_tool()`
 - `packages/exo-core/src/exo/_internal/agent_group.py`: existing `asyncio.TaskGroup` pattern is the right concurrency primitive
 - `packages/exo-core/src/exo/types.py`: add structured child-result metadata as needed
-- `packages/exo-web/src/pages/agents/[id]/edit.astro`: editor validation must reject values above `7`
 
 Decision: keep child tool subsets and `output_schema` as call-time contracts, not agent-config fields. The parent agent config only decides whether parallel sub-agents are enabled and how many can run.
 
@@ -201,7 +191,6 @@ Exact touchpoints:
 - `packages/exo-core/src/exo/agent.py`
 - `packages/exo-core/src/exo/runner.py`
 - `packages/exo-distributed/src/exo/distributed/events.py`
-- `packages/exo-web/src/exo_web/routes/runs.py`
 
 ### 8. MCP Progress Contract
 
@@ -218,7 +207,6 @@ Exact touchpoints:
 - `packages/exo-core/src/exo/runner.py`: current MCP queue draining is unconditional and must become flag-aware
 - `packages/exo-distributed/src/exo/distributed/events.py`: `_EVENT_TYPE_MAP` currently omits `mcp_progress`
 - `packages/exo-distributed/src/exo/distributed/temporal.py`: current Temporal activity collects only `TextEvent` and silently drops progress and tool-result events
-- `packages/exo-web/src/exo_web/services/agent_runtime.py`: current streaming bridge only forwards text and usage to callers
 
 Decision: `emit_mcp_progress` is purely an emission toggle. It is not a tool behavior toggle and it must not change the tool call/result contract.
 
@@ -272,9 +260,9 @@ Behavior notes:
 
 These are explicit non-goals for implementation stories that depend on this memo.
 
-- Reject planner-history mixing. Planner prompts, planner tool calls, and planner tool results must not be appended to executor message history and must not be persisted into `agent_plans`.
+- Reject planner-history mixing. Planner prompts, planner tool calls, and planner tool results must not be appended to executor message history.
 - Reject raw tool-kwarg pollution from injected fields. Injected schema-only fields are captured separately and never passed into `tool.execute(**kwargs)`.
-- Reject parallel-subagent counts above `7`. Validation belongs in core agent construction, deserialization, Exo Web create/update, and per-call runtime checks.
+- Reject parallel-subagent counts above `7`. Validation belongs in core agent construction, deserialization, and per-call runtime checks.
 - Reject `hitl_tools` names that are not present on the agent. Save-time and deserialize-time validation should fail fast.
 
 ## Implementation Order For Follow-On Stories
@@ -283,6 +271,5 @@ These are explicit non-goals for implementation stories that depend on this memo
 2. Add planner pre-pass, budget-awareness enforcement, and injected-arg splitting in core runner/parsing.
 3. Add tool-result metadata and approval-aware tool execution in core types and agent execution.
 4. Bring distributed worker, event transport, and Temporal execution to parity, including `mcp_progress`.
-5. Add Exo Web DB columns, CRUD models, runtime wiring, approval storage, and editor validation.
 
 This order minimizes interface churn because every later story can depend on one serialized agent contract and one tool-result metadata shape.

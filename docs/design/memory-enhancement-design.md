@@ -180,8 +180,7 @@ class EncryptedMemoryStore:
   acceptable — sensitive data that warrants encryption shouldn't be keyword-searchable.
   Vector search still works if embeddings are computed pre-encryption.
 - Fernet uses AES-128-CBC. Agent-core uses AES-256. Fernet is simpler, well-tested,
-  and sufficient for at-rest encryption. The `cryptography` package is already an
-  indirect dependency via exo-web.
+  and sufficient for at-rest encryption.
 
 ---
 
@@ -423,9 +422,8 @@ The `category` filter is supported but rarely used for short-term data.
 
 ## 9. Dependencies
 
-- **cryptography** — already an indirect dependency via exo-web's Fernet usage.
-  `EncryptedMemoryStore` uses the same `cryptography.fernet.Fernet` class. No new
-  dependency added.
+- **cryptography** — `EncryptedMemoryStore` uses `cryptography.fernet.Fernet`. No new
+  dependency added (already a transitive dependency).
 - No other new dependencies.
 
 ---
