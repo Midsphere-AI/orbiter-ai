@@ -81,7 +81,7 @@ async def call_runner(
             provider,
             max_retries=max_retries,
         )
-        output = await agent.run(
+        output = await agent._run(
             planned_input,
             messages=planned_messages,
             provider=provider,

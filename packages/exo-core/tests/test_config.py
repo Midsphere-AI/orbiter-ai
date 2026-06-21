@@ -4,7 +4,6 @@ import pytest
 from pydantic import ValidationError
 
 from exo.config import (
-    AgentConfig,
     ModelConfig,
     RunConfig,
     TaskConfig,
@@ -100,114 +99,6 @@ class TestModelConfig:
         restored = ModelConfig.model_validate(data)
         assert restored == mc
         assert restored.context_window_tokens == 128000
-
-
-# --- AgentConfig ---
-
-
-class TestAgentConfig:
-    def test_defaults(self) -> None:
-        ac = AgentConfig(name="test")
-        assert ac.name == "test"
-        assert ac.model == "openai:gpt-4o-mini"
-        assert ac.instructions == ""
-        assert ac.temperature == 1.0
-        assert ac.max_tokens is None
-        assert ac.max_steps == 10
-        assert ac.planning_enabled is False
-        assert ac.planning_model is None
-        assert ac.planning_instructions == ""
-        assert ac.budget_awareness is None
-        assert ac.hitl_tools == []
-        assert ac.emit_mcp_progress is True
-        assert ac.injected_tool_args == {}
-        assert ac.allow_parallel_subagents is False
-        assert ac.max_parallel_subagents == 3
-
-    def test_create(self) -> None:
-        ac = AgentConfig(
-            name="researcher",
-            model="anthropic:claude-sonnet-4-20250514",
-            instructions="You research things.",
-            temperature=0.7,
-            max_tokens=4096,
-            max_steps=20,
-            planning_enabled=True,
-            planning_model="openai:gpt-4o-mini",
-            planning_instructions="Plan first.",
-            budget_awareness="limit:70",
-            hitl_tools=["deploy_service"],
-            emit_mcp_progress=False,
-            injected_tool_args={"ui_request_id": "Opaque request id"},
-            allow_parallel_subagents=True,
-            max_parallel_subagents=4,
-        )
-        assert ac.name == "researcher"
-        assert ac.model == "anthropic:claude-sonnet-4-20250514"
-        assert ac.max_tokens == 4096
-        assert ac.planning_enabled is True
-        assert ac.planning_model == "openai:gpt-4o-mini"
-        assert ac.budget_awareness == "limit:70"
-        assert ac.hitl_tools == ["deploy_service"]
-        assert ac.emit_mcp_progress is False
-        assert ac.injected_tool_args == {"ui_request_id": "Opaque request id"}
-        assert ac.allow_parallel_subagents is True
-        assert ac.max_parallel_subagents == 4
-
-    def test_missing_name(self) -> None:
-        with pytest.raises(ValidationError):
-            AgentConfig()  # type: ignore[call-arg]
-
-    def test_frozen(self) -> None:
-        ac = AgentConfig(name="test")
-        with pytest.raises(ValidationError):
-            ac.name = "changed"  # type: ignore[misc]
-
-    def test_temperature_bounds(self) -> None:
-        AgentConfig(name="t", temperature=0.0)  # lower bound OK
-        AgentConfig(name="t", temperature=2.0)  # upper bound OK
-        with pytest.raises(ValidationError):
-            AgentConfig(name="t", temperature=-0.1)
-        with pytest.raises(ValidationError):
-            AgentConfig(name="t", temperature=2.1)
-
-    def test_max_steps_ge_one(self) -> None:
-        AgentConfig(name="t", max_steps=1)  # should not raise
-        with pytest.raises(ValidationError):
-            AgentConfig(name="t", max_steps=0)
-        with pytest.raises(ValidationError):
-            AgentConfig(name="t", max_steps=-1)
-
-    def test_roundtrip(self) -> None:
-        ac = AgentConfig(
-            name="bot",
-            temperature=0.5,
-            max_steps=5,
-            planning_enabled=True,
-            planning_model="openai:gpt-4o-mini",
-            budget_awareness="per-message",
-            hitl_tools=["search"],
-            injected_tool_args={"run_origin": "Surface label"},
-            allow_parallel_subagents=True,
-            max_parallel_subagents=2,
-        )
-        data = ac.model_dump()
-        restored = AgentConfig.model_validate(data)
-        assert restored == ac
-
-    def test_invalid_planning_model_raises(self) -> None:
-        with pytest.raises(ValidationError):
-            AgentConfig(name="planner", planning_model="openai:")
-
-    def test_invalid_budget_awareness_raises(self) -> None:
-        with pytest.raises(ValidationError):
-            AgentConfig(name="budget", budget_awareness="limit:abc")
-        with pytest.raises(ValidationError):
-            AgentConfig(name="budget", budget_awareness="limit:101")
-
-    def test_invalid_max_parallel_subagents_raises(self) -> None:
-        with pytest.raises(ValidationError):
-            AgentConfig(name="parallel", max_parallel_subagents=8)
 
 
 # --- TaskConfig ---

@@ -66,7 +66,7 @@ async def prepare_planned_execution(
         getattr(agent, "name", ""),
         planner_model,
     )
-    planner_output = await planner_agent.run(
+    planner_output = await planner_agent._run(
         input,
         messages=messages,
         provider=planner_provider,
@@ -135,11 +135,9 @@ def _build_planner_agent(agent: Any, planner_model: str, planner_instructions: s
         human_input_handler=getattr(agent, "_human_input_handler", None),
         emit_mcp_progress=getattr(agent, "emit_mcp_progress", True),
         injected_tool_args=dict(getattr(agent, "injected_tool_args", {})),
-        allow_parallel_subagents=getattr(agent, "allow_parallel_subagents", False),
-        max_parallel_subagents=getattr(agent, "max_parallel_subagents", 3),
-        memory=None,
+        store=False,
         context=getattr(agent, "context", None),
-        allow_self_spawn=allow_self_spawn,
+        subagents=allow_self_spawn,
         max_spawn_depth=getattr(agent, "max_spawn_depth", 3),
         max_spawn_children=getattr(agent, "max_spawn_children", 4),
         # Propagate PTC settings so the planner sees the same filtered

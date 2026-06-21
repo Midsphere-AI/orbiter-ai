@@ -14,6 +14,7 @@ from exo.guardrail.types import (  # pyright: ignore[reportMissingImports]
     RiskAssessment,
     RiskLevel,
 )
+from exo.hooks import HookPoint
 
 # Default patterns targeting common prompt-injection and jailbreak phrases.
 # Each tuple is ``(compiled_regex, risk_level, description)``.
@@ -145,14 +146,20 @@ class UserInputGuardrail(BaseGuardrail):
         extra_patterns: Extra patterns added on top of defaults.
         backend: Explicit backend override.  When provided, *patterns*
             and *extra_patterns* are ignored.
-        events: Hook point names to monitor.  Defaults to
-            ``["pre_llm_call"]``.
+        events: Hook points to monitor.  Each entry may be a
+            :class:`~exo.hooks.HookPoint` enum member (recommended) or a
+            plain string.  Defaults to ``[HookPoint.PRE_LLM_CALL]``.
 
     Example::
+
+        from exo.hooks import HookPoint
 
         guard = UserInputGuardrail()
         guard.attach(agent)
         # Agent will now block prompt-injection attempts automatically.
+
+        # Monitor additional hook points:
+        guard = UserInputGuardrail(events=[HookPoint.PRE_LLM_CALL, HookPoint.PRE_TOOL_CALL])
     """
 
     def __init__(
@@ -161,11 +168,11 @@ class UserInputGuardrail(BaseGuardrail):
         patterns: list[tuple[str, RiskLevel, str]] | None = None,
         extra_patterns: list[tuple[str, RiskLevel, str]] | None = None,
         backend: GuardrailBackend | None = None,
-        events: list[str] | None = None,
+        events: list[HookPoint | str] | None = None,
     ) -> None:
         if backend is None:
             backend = PatternBackend(patterns=patterns, extra_patterns=extra_patterns)
-        super().__init__(backend=backend, events=events or ["pre_llm_call"])
+        super().__init__(backend=backend, events=events or [HookPoint.PRE_LLM_CALL])
 
 
 # ---------------------------------------------------------------------------

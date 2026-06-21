@@ -49,9 +49,11 @@ from exo.observability.semconv import (  # pyright: ignore[reportMissingImports]
 )
 from exo.ptc import PTC_TOOL_NAME
 from exo.types import (
+    EVENT_TYPES,
     AssistantMessage,
     ContextEvent,
     ErrorEvent,
+    EventType,
     MCPProgressEvent,
     Message,
     MessageContent,
@@ -134,7 +136,7 @@ class _RunCallable:
         provider: ModelProvider | None = None,
         max_steps: int | None = None,
         detailed: bool = False,
-        event_types: set[str] | None = None,
+        event_types: set[EventType | str] | None = None,
         conversation_id: str | None = None,
     ) -> AsyncIterator[StreamEvent]:
         return _stream(
@@ -253,7 +255,7 @@ async def _stream(
     provider: ModelProvider | None = None,
     max_steps: int | None = None,
     detailed: bool = False,
-    event_types: set[str] | None = None,
+    event_types: set[EventType | str] | None = None,
     conversation_id: str | None = None,
 ) -> AsyncIterator[StreamEvent]:
     """Stream agent execution, yielding events in real-time.
@@ -292,6 +294,19 @@ async def _stream(
         ``StatusEvent``.  ``ErrorEvent`` is yielded on errors
         regardless of the *detailed* flag.
     """
+    # Validate event_types eagerly so a typo fails loudly instead of
+    # silently yielding nothing (use the EventType enum for autocomplete).
+    if event_types is not None:
+        unknown = {str(e) for e in event_types} - EVENT_TYPES
+        if unknown:
+            from exo.agent import AgentError
+
+            raise AgentError(
+                f"Unknown event_types {sorted(unknown)}. "
+                f"Valid event types are: {sorted(EVENT_TYPES)}. "
+                f"Tip: use the EventType enum (from exo) for autocomplete."
+            )
+
     resolved = provider or _resolve_provider(agent)
 
     # Track total events emitted for metrics (only recorded when detailed=True).

@@ -68,8 +68,8 @@ class TestAgentToDict:
         assert data["hitl_tools"] == []
         assert data["emit_mcp_progress"] is True
         assert data["injected_tool_args"] == {}
-        assert data["allow_parallel_subagents"] is False
-        assert data["max_parallel_subagents"] == 3
+        assert "allow_parallel_subagents" not in data
+        assert "max_parallel_subagents" not in data
         assert "tools" not in data
         assert "handoffs" not in data
         assert "output_type" not in data
@@ -86,8 +86,6 @@ class TestAgentToDict:
             hitl_tools=["search"],
             emit_mcp_progress=False,
             injected_tool_args={"ui_request_id": "Opaque request id"},
-            allow_parallel_subagents=True,
-            max_parallel_subagents=4,
         )
         data = agent.to_dict()
         assert data["planning_enabled"] is True
@@ -97,8 +95,6 @@ class TestAgentToDict:
         assert data["hitl_tools"] == ["search"]
         assert data["emit_mcp_progress"] is False
         assert data["injected_tool_args"] == {"ui_request_id": "Opaque request id"}
-        assert data["allow_parallel_subagents"] is True
-        assert data["max_parallel_subagents"] == 4
 
     def test_with_tools(self) -> None:
         """Agent with tools serializes tool paths."""
@@ -211,8 +207,7 @@ class TestAgentFromDict:
         assert agent.hitl_tools == []
         assert agent.emit_mcp_progress is True
         assert agent.injected_tool_args == {}
-        assert agent.allow_parallel_subagents is False
-        assert agent.max_parallel_subagents == 3
+        assert not hasattr(agent, "allow_parallel_subagents")
 
     def test_with_all_fields(self) -> None:
         """from_dict() reconstructs agent with all scalar fields."""
@@ -245,6 +240,7 @@ class TestAgentFromDict:
             "hitl_tools": ["search"],
             "emit_mcp_progress": False,
             "injected_tool_args": {"ui_request_id": "Opaque request id"},
+            # Legacy no-op keys must be tolerated (silently ignored) by from_dict.
             "allow_parallel_subagents": True,
             "max_parallel_subagents": 4,
         }
@@ -256,8 +252,7 @@ class TestAgentFromDict:
         assert agent.hitl_tools == ["search"]
         assert agent.emit_mcp_progress is False
         assert agent.injected_tool_args == {"ui_request_id": "Opaque request id"}
-        assert agent.allow_parallel_subagents is True
-        assert agent.max_parallel_subagents == 4
+        assert not hasattr(agent, "allow_parallel_subagents")
 
     def test_with_tools_from_path(self) -> None:
         """from_dict() resolves tool paths to actual tools."""
@@ -305,12 +300,6 @@ class TestAgentFromDict:
         with pytest.raises(AgentError, match="hitl_tools contains unknown tool names"):
             Agent.from_dict(data)
 
-    def test_max_parallel_subagents_above_limit_raises(self) -> None:
-        """Parallel-subagent limits above seven are rejected."""
-        data = {"name": "bot", "max_parallel_subagents": 8}
-        with pytest.raises(ValueError, match="max_parallel_subagents"):
-            Agent.from_dict(data)
-
 
 # ---------------------------------------------------------------------------
 # Round-trip tests
@@ -346,8 +335,6 @@ class TestAgentRoundTrip:
             hitl_tools=["search"],
             emit_mcp_progress=False,
             injected_tool_args={"ui_request_id": "Opaque request id"},
-            allow_parallel_subagents=True,
-            max_parallel_subagents=4,
         )
         data = original.to_dict()
         reconstructed = Agent.from_dict(data)
@@ -365,8 +352,6 @@ class TestAgentRoundTrip:
         assert reconstructed.hitl_tools == original.hitl_tools
         assert reconstructed.emit_mcp_progress is original.emit_mcp_progress
         assert reconstructed.injected_tool_args == original.injected_tool_args
-        assert reconstructed.allow_parallel_subagents is original.allow_parallel_subagents
-        assert reconstructed.max_parallel_subagents == original.max_parallel_subagents
         assert set(reconstructed.tools.keys()) == set(original.tools.keys())
         assert set(reconstructed.handoffs.keys()) == set(original.handoffs.keys())
         assert reconstructed.output_type is original.output_type

@@ -109,8 +109,6 @@ def _build_agent(name: str, spec: dict[str, Any]) -> Any:
         "bare_tools",
         "emit_mcp_progress",
         "injected_tool_args",
-        "allow_parallel_subagents",
-        "max_parallel_subagents",
         # PTC settings — forwarded so YAML-defined agents can enable PTC.
         "ptc",
         "ptc_timeout",

@@ -29,7 +29,6 @@ from exo.config import (
     parse_model_string,
     validate_budget_awareness,
     validate_injected_tool_args,
-    validate_max_parallel_subagents,
     validate_max_spawn_children,
     validate_planning_model,
 )
@@ -58,6 +57,7 @@ _log = get_logger(__name__)
 # Sentinels: distinguish "not provided" (auto-create) from explicit None (disable)
 _MEMORY_UNSET: Any = object()
 _CONTEXT_UNSET: Any = object()
+_SPAWN_UNSET: Any = object()
 
 
 # ---------------------------------------------------------------------------
@@ -257,8 +257,13 @@ def _make_context_from_mode(mode: Any) -> Any:
             cfg = ContextConfig(limit=100, overflow="summarize")
         elif mode_str == "navigator":
             cfg = ContextConfig(limit=10, overflow="summarize", cache=True)
-        else:  # copilot (default)
+        elif mode_str == "copilot":
             cfg = ContextConfig()
+        else:
+            raise AgentError(
+                f"Unknown context_mode {mode!r}. "
+                f"Valid modes are 'pilot', 'copilot', or 'navigator'."
+            )
         return CtxClass(task_id="__default__", config=cfg)
     except ImportError:
         return None
@@ -741,17 +746,15 @@ class Agent:
         human_input_handler: HumanInputHandler | None = None,
         emit_mcp_progress: bool = True,
         injected_tool_args: dict[str, str] | None = None,
-        allow_parallel_subagents: bool = False,
-        max_parallel_subagents: int = 3,
-        store: MemoryStore | str | bool | None = _MEMORY_UNSET,
+        store: MemoryStore | AgentMemory | str | bool | None = _MEMORY_UNSET,
         memory: AgentMemory | MemoryStore | None = _MEMORY_UNSET,
         context_mode: Literal["pilot", "copilot", "navigator"] | None = _CONTEXT_UNSET,
         context: Context | ContextConfig | None = _CONTEXT_UNSET,
         context_limit: int | None = None,
         overflow: str | None = None,
         cache: bool | None = None,
-        allow_self_spawn: bool = True,
         subagents: bool | None = None,
+        allow_self_spawn: bool = _SPAWN_UNSET,
         max_spawn_depth: int = 3,
         max_spawn_children: int = 4,
         ptc: bool = False,
@@ -779,14 +782,25 @@ class Agent:
         self.budget_awareness = validate_budget_awareness(budget_awareness)
         self.emit_mcp_progress = emit_mcp_progress
         self.injected_tool_args = validate_injected_tool_args(injected_tool_args)
-        # Deprecated no-op flags — stored for backward compat / serialization round-trips;
-        # they have never influenced agent behaviour and will be removed in a future release.
-        self.allow_parallel_subagents: bool = allow_parallel_subagents
-        self.max_parallel_subagents: int = validate_max_parallel_subagents(max_parallel_subagents)
         normalized_hitl_tools = _normalize_hitl_tools(hitl_tools)
         self.bare_tools: bool = bare_tools
-        # Self-spawn: on by default; subagents= convenience flag overrides allow_self_spawn.
-        _effective_self_spawn = allow_self_spawn if subagents is None else bool(subagents)
+        # Self-spawn: on by default. ``subagents=`` is the canonical knob;
+        # ``allow_self_spawn=`` is a deprecated alias kept for backward compat.
+        if allow_self_spawn is not _SPAWN_UNSET:
+            import warnings
+
+            warnings.warn(
+                "Agent(allow_self_spawn=...) is deprecated; use subagents= instead "
+                "(subagents=False disables the spawn_self tool).",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+        if subagents is not None:
+            _effective_self_spawn = bool(subagents)
+        elif allow_self_spawn is not _SPAWN_UNSET:
+            _effective_self_spawn = bool(allow_self_spawn)
+        else:
+            _effective_self_spawn = True
         self.allow_self_spawn: bool = _effective_self_spawn
         self.max_spawn_depth: int = max_spawn_depth
         self.max_spawn_children: int = validate_max_spawn_children(max_spawn_children)
@@ -813,11 +827,23 @@ class Agent:
                 self._tool_resolver = tool_resolver
         # ---- Memory resolution ------------------------------------------------
         # Priority: store= > memory= > auto-create
-        # `store=` is the new batteries-included shorthand; `memory=` is legacy.
+        # `store=` is the single recommended knob; `memory=` is a deprecated alias.
         if store is not _MEMORY_UNSET and memory is not _MEMORY_UNSET:
             raise AgentError(
                 "Cannot combine 'store' and 'memory' kwargs. "
-                "Use 'store=' for the recommended shorthand, or 'memory=' for legacy usage."
+                "Use 'store=' — it accepts everything 'memory=' did "
+                "(an AgentMemory/MemoryStore instance, 'sqlite', 'memory', a path, "
+                "or False to disable)."
+            )
+        if memory is not _MEMORY_UNSET:
+            import warnings
+
+            warnings.warn(
+                "Agent(memory=...) is deprecated; use store= instead. "
+                "store= accepts an AgentMemory/MemoryStore instance, 'sqlite', "
+                "'memory', a '.db' path, or False to disable.",
+                DeprecationWarning,
+                stacklevel=2,
             )
         if store is not _MEMORY_UNSET:
             # Resolve store= shorthand
@@ -841,8 +867,21 @@ class Agent:
                 except ImportError:
                     resolved_memory = None
             elif isinstance(store, str):
+                # A string store must be a filesystem path to a SQLite db, not a
+                # backend name. Reject bare words (e.g. store="redis") that would
+                # otherwise be silently written as a file of that name.
+                if "/" not in store and "\\" not in store and "." not in store:
+                    raise AgentError(
+                        f"Unknown store {store!r}. Use store='sqlite' (temp file), "
+                        f"store='memory' (in-process), a '.db' path for a durable "
+                        f"SQLite file, or pass a MemoryStore/AgentMemory instance. "
+                        f"To disable memory use store=False."
+                    )
                 # Treat as a durable SQLite path
                 resolved_memory = _make_default_memory(db_path=store)
+            elif hasattr(store, "short_term") and hasattr(store, "long_term"):
+                # Already an AgentMemory — use it directly (memory= passthrough).
+                resolved_memory = store
             else:
                 # Assume it's a MemoryStore instance — wrap in AgentMemory
                 try:
@@ -1344,9 +1383,9 @@ class Agent:
                             max_steps=parent.max_steps,
                             temperature=parent.temperature,
                             max_tokens=parent.max_tokens,
-                            memory=child_memory,
+                            store=child_memory,
                             context=child_context,
-                            allow_self_spawn=False,
+                            subagents=False,
                             # Inherit PTC settings so the child re-registers
                             # its own PTCTool and the schema filter hides
                             # PTC-eligible tools from the child's LLM call.
@@ -1835,12 +1874,52 @@ class Agent:
         max_retries: int = 3,
         conversation_id: str | None = None,
     ) -> AgentOutput:
+        """Deprecated. Use the top-level ``run(agent, ...)`` instead.
+
+        ``run(agent, "...")`` (from ``exo``) is now the single, recommended
+        way to execute an agent.  It returns a :class:`RunResult` with the
+        full message history, aggregated usage, and step count — whereas this
+        method returns only the final :class:`AgentOutput`.
+
+        This shim is kept for backward compatibility and delegates to the
+        internal :meth:`_run` engine.  It emits a :class:`DeprecationWarning`.
+        """
+        import warnings
+
+        warnings.warn(
+            "Agent.run() is deprecated; use the top-level run(agent, ...) "
+            "from `exo` instead (it returns a RunResult with history, usage, "
+            "and step count).",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return await self._run(
+            input,
+            messages=messages,
+            provider=provider,
+            max_retries=max_retries,
+            conversation_id=conversation_id,
+        )
+
+    async def _run(
+        self,
+        input: MessageContent,
+        *,
+        messages: Sequence[Message] | None = None,
+        provider: Any = None,
+        max_retries: int = 3,
+        conversation_id: str | None = None,
+    ) -> AgentOutput:
         """Execute the agent's LLM-tool loop with retry logic.
 
-        Builds the message list, calls the LLM, and if tool calls are
-        returned, executes them in parallel, feeds results back, and
-        re-calls the LLM. The loop continues until a text-only response
-        is produced or ``max_steps`` is reached.
+        Internal engine driving a single agent run.  Builds the message
+        list, calls the LLM, and if tool calls are returned, executes them
+        in parallel, feeds results back, and re-calls the LLM.  The loop
+        continues until a text-only response is produced or ``max_steps``
+        is reached.
+
+        Public callers should use the top-level ``run(agent, ...)`` which
+        wraps this with state tracking and returns a :class:`RunResult`.
 
         Args:
             input: User query — a string or list of ContentBlock objects.
@@ -2473,8 +2552,6 @@ class Agent:
             "hitl_tools": list(self.hitl_tools),
             "emit_mcp_progress": self.emit_mcp_progress,
             "injected_tool_args": dict(self.injected_tool_args),
-            "allow_parallel_subagents": self.allow_parallel_subagents,
-            "max_parallel_subagents": self.max_parallel_subagents,
             "allow_self_spawn": self.allow_self_spawn,
             "max_spawn_depth": self.max_spawn_depth,
             "max_spawn_children": self.max_spawn_children,
@@ -2554,9 +2631,7 @@ class Agent:
             hitl_tools=data.get("hitl_tools"),
             emit_mcp_progress=data.get("emit_mcp_progress", True),
             injected_tool_args=data.get("injected_tool_args"),
-            allow_parallel_subagents=data.get("allow_parallel_subagents", False),
-            max_parallel_subagents=data.get("max_parallel_subagents", 3),
-            allow_self_spawn=data.get("allow_self_spawn", True),
+            subagents=data.get("allow_self_spawn", True),
             max_spawn_depth=data.get("max_spawn_depth", 3),
             max_spawn_children=data.get("max_spawn_children", 4),
             ptc=data.get("ptc", False),

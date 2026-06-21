@@ -28,10 +28,15 @@ from exo.parallel import (
 from exo.runner import run
 from exo.swarm import Swarm
 from exo.token_counter import TokenCounter, count_tokens
-from exo.tool import FunctionTool, Tool, tool
+
+# FunctionTool is intentionally not re-exported at the top level: use the
+# @tool decorator for functions, or the Tool ABC for custom tools. It remains
+# importable from exo.tool for advanced/back-compat use.
+from exo.tool import Tool, tool
 from exo.tool_context import ToolContext
 from exo.tool_result import tool_error, tool_ok
 from exo.types import (
+    EVENT_TYPES,
     AgentOutput,
     AssistantMessage,
     AudioBlock,
@@ -39,6 +44,7 @@ from exo.types import (
     ContextEvent,
     DocumentBlock,
     ErrorEvent,
+    EventType,
     ExoError,
     HITLApprovalEvent,
     ImageDataBlock,
@@ -67,6 +73,7 @@ from exo.types import (
 )
 
 __all__: list[str] = [
+    "EVENT_TYPES",
     "Agent",
     "AgentError",
     "AgentOutput",
@@ -77,8 +84,8 @@ __all__: list[str] = [
     "ContextEvent",
     "DocumentBlock",
     "ErrorEvent",
+    "EventType",
     "ExoError",
-    "FunctionTool",
     "HITLApprovalEvent",
     "HookManager",
     "HookPoint",

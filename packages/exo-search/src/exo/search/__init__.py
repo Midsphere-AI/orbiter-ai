@@ -23,12 +23,12 @@ from exo.types import StreamEvent
 from .config import SearchConfig
 from .conversation import ConversationManager
 from .pipeline import run_search_pipeline, stream_search_pipeline
-from .types import PipelineEvent, ResearchMode, SearchResponse
+from .types import PipelineEvent, ResearchMode, SearchResponse, SearchSource
 
 
 async def search(
     query: str,
-    mode: str = "balanced",
+    mode: ResearchMode | str = "balanced",
     chat_history: list[tuple[str, str]] | None = None,
     config: SearchConfig | None = None,
 ) -> str:
@@ -44,7 +44,7 @@ async def search(
 
 async def stream(
     query: str,
-    mode: str = "balanced",
+    mode: ResearchMode | str = "balanced",
     chat_history: list[tuple[str, str]] | None = None,
     config: SearchConfig | None = None,
 ) -> AsyncIterator[PipelineEvent | StreamEvent | SearchResponse]:
@@ -74,7 +74,7 @@ async def stream(
 
 async def search_with_details(
     query: str,
-    mode: str = "balanced",
+    mode: ResearchMode | str = "balanced",
     chat_history: list[tuple[str, str]] | None = None,
     config: SearchConfig | None = None,
 ) -> SearchResponse:
@@ -93,6 +93,7 @@ __all__: list[str] = [
     "ResearchMode",
     "SearchConfig",
     "SearchResponse",
+    "SearchSource",
     "search",
     "search_with_details",
     "stream",

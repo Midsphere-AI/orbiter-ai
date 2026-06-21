@@ -16,6 +16,23 @@ class ResearchMode(StrEnum):
     DEEP = "deep"
 
 
+class SearchSource(StrEnum):
+    """Known source identifiers for ``SearchConfig.sources``.
+
+    Pass these (or their string equivalents) to ``SearchConfig.sources``::
+
+        cfg = SearchConfig(sources=[SearchSource.WEB, SearchSource.ACADEMIC])
+        # or equivalently:
+        cfg = SearchConfig(sources=["web", "academic"])
+
+    Unknown strings raise ``ValueError`` at config construction time.
+    """
+
+    WEB = "web"
+    ACADEMIC = "academic"
+    DISCUSSIONS = "discussions"
+
+
 class Classification(BaseModel):
     """Exo Search's classifier output labels."""
 

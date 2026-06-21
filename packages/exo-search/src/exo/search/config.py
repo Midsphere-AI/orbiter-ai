@@ -7,7 +7,11 @@ from dataclasses import dataclass, field
 
 from exo.observability.logging import get_logger  # pyright: ignore[reportMissingImports]
 
+from .types import SearchSource
+
 _log = get_logger(__name__)
+
+_VALID_SOURCES: frozenset[str] = frozenset(s.value for s in SearchSource)
 
 
 @dataclass
@@ -71,6 +75,27 @@ class SearchConfig:
             self.jina_api_key = os.environ.get("JINA_API_KEY", "")
         if not self.serper_api_key:
             self.serper_api_key = os.environ.get("SERPER_API_KEY", "")
+
+        # Validate sources — accept strings or SearchSource enum values, but fail
+        # loudly on unknown entries so typos (e.g. "web,academic" as one string,
+        # or "Discussions" with wrong case) don't silently yield zero results.
+        normalized: list[str] = []
+        bad: list[str] = []
+        for s in self.sources:
+            low = str(s).lower()
+            if low in _VALID_SOURCES:
+                normalized.append(low)
+            else:
+                bad.append(str(s))
+        if bad:
+            valid_list = ", ".join(sorted(_VALID_SOURCES))
+            raise ValueError(
+                f"Unknown search source(s): {bad!r}. "
+                f"Valid sources are: {valid_list}. "
+                f"Example: SearchConfig(sources=['web', 'academic'])"
+            )
+        self.sources = normalized
+
         _log.debug(
             "config model=%s fast=%s search=%s",
             self.model,

@@ -20,6 +20,9 @@ if TYPE_CHECKING:
 _BLOCKING_LEVELS = frozenset({RiskLevel.HIGH, RiskLevel.CRITICAL})
 
 
+_VALID_HOOK_POINT_VALUES: frozenset[str] = frozenset(hp.value for hp in HookPoint)
+
+
 class BaseGuardrail:
     """A guardrail that registers itself as hooks on an Agent's HookManager.
 
@@ -27,12 +30,20 @@ class BaseGuardrail:
         backend: Detection backend.  Must not be ``None`` — passing ``None``
             raises ``ValueError`` at construction time to prevent silent
             no-op guardrails from giving false assurance.
-        events: Hook point names (e.g. ``["pre_llm_call"]``) to monitor.
-            Only these events will have hooks registered.
+        events: Hook points to monitor.  Each entry may be a
+            :class:`~exo.hooks.HookPoint` enum member (recommended —
+            enables auto-complete and catches typos at construction time)
+            or a plain string for backward compatibility.  Only these
+            events will have hooks registered.
 
     Example::
 
+        from exo.hooks import HookPoint
+
         backend = MyDetectionBackend()
+        # Preferred: use HookPoint enum for discoverability
+        guard = BaseGuardrail(backend=backend, events=[HookPoint.PRE_LLM_CALL])
+        # Plain strings still work for backward compatibility
         guard = BaseGuardrail(backend=backend, events=["pre_llm_call"])
         guard.attach(agent)
         # ... agent runs, guardrail hooks fire automatically
@@ -42,7 +53,7 @@ class BaseGuardrail:
     def __init__(
         self,
         backend: GuardrailBackend | None = None,
-        events: list[str] | None = None,
+        events: list[HookPoint | str] | None = None,
     ) -> None:
         if backend is None:
             raise ValueError(
@@ -51,7 +62,22 @@ class BaseGuardrail:
                 "assurance of protection. Supply a GuardrailBackend instance instead."
             )
         self.backend = backend
-        self.events = events or []
+
+        # Normalize each entry to its string value and validate eagerly so
+        # typos surface immediately rather than silently at attach() time.
+        normalized: list[str] = []
+        for entry in events or []:
+            value = entry.value if isinstance(entry, HookPoint) else entry
+            if value not in _VALID_HOOK_POINT_VALUES:
+                valid = ", ".join(sorted(_VALID_HOOK_POINT_VALUES))
+                raise ValueError(
+                    f"Unknown hook point: {value!r}. "
+                    f"Valid hook points are: {valid}. "
+                    f"Use HookPoint.<NAME> for auto-complete, e.g. HookPoint.PRE_LLM_CALL."
+                )
+            normalized.append(value)
+        self.events: list[str] = normalized
+
         # Track hooks per agent so detach can remove exactly the right ones.
         self._hooks: dict[int, dict[HookPoint, Hook]] = {}
 

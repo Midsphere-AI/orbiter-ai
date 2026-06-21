@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from enum import StrEnum
 from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, Field
@@ -211,6 +212,15 @@ class AgentOutput(BaseModel):
     tool_calls: list[ToolCall] = Field(default_factory=list)
     usage: Usage = Field(default_factory=Usage)
 
+    @property
+    def output(self) -> str:
+        """Alias for :attr:`text` — mirrors :attr:`RunResult.output`.
+
+        Lets the same attribute name work whether you hold an
+        ``AgentOutput`` or a ``RunResult``.
+        """
+        return self.text
+
 
 class ActionModel(BaseModel):
     """A parsed tool action ready for execution.
@@ -247,6 +257,15 @@ class RunResult(BaseModel):
     messages: list[Message] = Field(default_factory=list)
     usage: Usage = Field(default_factory=Usage)
     steps: int = Field(default=0, ge=0)
+
+    @property
+    def text(self) -> str:
+        """Alias for :attr:`output` — mirrors :attr:`AgentOutput.text`.
+
+        Lets the same attribute name work whether you hold a
+        ``RunResult`` or an ``AgentOutput``.
+        """
+        return self.output
 
 
 class TextEvent(BaseModel):
@@ -581,3 +600,37 @@ StreamEvent = (
     | RalphStopEvent
     | HITLApprovalEvent
 )
+
+
+class EventType(StrEnum):
+    """Discriminator values for every :data:`StreamEvent` type.
+
+    Use these for the ``event_types`` filter of ``run.stream`` so a typo
+    fails loudly instead of silently yielding nothing::
+
+        async for ev in run.stream(agent, "hi", event_types={EventType.TEXT}):
+            ...
+
+    Plain strings still work; this enum just makes the valid set
+    discoverable via autocomplete.
+    """
+
+    TEXT = "text"
+    TOOL_CALL = "tool_call"
+    TOOL_CALL_DELTA = "tool_call_delta"
+    STEP = "step"
+    TOOL_RESULT = "tool_result"
+    REASONING = "reasoning"
+    ERROR = "error"
+    STATUS = "status"
+    USAGE = "usage"
+    MCP_PROGRESS = "mcp_progress"
+    CONTEXT = "context"
+    MESSAGE_INJECTED = "message_injected"
+    RALPH_ITERATION = "ralph_iteration"
+    RALPH_STOP = "ralph_stop"
+    HITL_APPROVAL = "hitl_approval"
+
+
+#: The set of all valid ``event_types`` filter values (string form).
+EVENT_TYPES: frozenset[str] = frozenset(e.value for e in EventType)

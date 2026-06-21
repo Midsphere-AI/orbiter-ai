@@ -18,7 +18,7 @@ Usage::
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Sequence
-from typing import Any
+from typing import Any, Literal
 
 from exo._internal.call_runner import call_runner
 from exo._internal.graph import GraphError, parse_flow_dsl, topological_sort
@@ -29,6 +29,9 @@ from exo.tool import Tool, ToolError
 from exo.types import ExoError, Message, RunResult, StatusEvent, StreamEvent
 
 _log = get_logger(__name__)
+
+SwarmMode = Literal["workflow", "handoff", "team"]
+_VALID_SWARM_MODES: frozenset[str] = frozenset(("workflow", "handoff", "team"))
 
 # Sentinel to distinguish "not provided" from explicit None
 _SWARM_CONTEXT_UNSET: object = object()
@@ -62,7 +65,7 @@ class Swarm:
         *,
         agents: list[Any],
         flow: str | None = None,
-        mode: str = "workflow",
+        mode: SwarmMode = "workflow",
         max_handoffs: int = 10,
         context_mode: Any = _SWARM_CONTEXT_UNSET,
         context_limit: int | None = None,
@@ -72,6 +75,11 @@ class Swarm:
     ) -> None:
         if not agents:
             raise SwarmError("Swarm requires at least one agent")
+
+        if mode not in _VALID_SWARM_MODES:
+            raise SwarmError(
+                f"Unknown swarm mode {mode!r}. Valid modes are 'workflow', 'handoff', or 'team'."
+            )
 
         self.mode = mode
         self.max_handoffs = max_handoffs

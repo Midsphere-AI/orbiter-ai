@@ -22,7 +22,34 @@ from .tools.contradiction_detector import detect_contradictions
 from .tools.embeddings import rerank_search_results
 from .tools.searxng import configure_search_keys
 from .tools.web_fetcher import enrich_results
-from .types import ClassifierOutput, PipelineEvent, SearchResponse, SearchResult, Source
+from .types import (
+    ClassifierOutput,
+    PipelineEvent,
+    ResearchMode,
+    SearchResponse,
+    SearchResult,
+    Source,
+)
+
+_VALID_MODES: frozenset[str] = frozenset(m.value for m in ResearchMode)
+
+
+def _normalize_mode(mode: str) -> str:
+    """Normalize and validate a mode string.
+
+    Accepts ``ResearchMode`` enum values or plain strings (case-insensitive).
+    Raises ``ValueError`` with a teaching message on unknown modes.
+    """
+    low = mode.lower()
+    if low in _VALID_MODES:
+        return low
+    valid_list = ", ".join(sorted(_VALID_MODES))
+    raise ValueError(
+        f"Unknown search mode: {mode!r}. "
+        f"Valid modes are: {valid_list}. "
+        f"Example: search('query', mode='balanced')"
+    )
+
 
 _log = get_logger(__name__)
 
@@ -56,6 +83,7 @@ async def run_search_pipeline(
     4. Run writer with context from research
     5. Run suggestion generator
     """
+    mode = _normalize_mode(mode)
     cfg = config or SearchConfig()
     history = chat_history or []
     configure_search_keys(cfg.serper_api_key, cfg.jina_api_key, cfg.searxng_url)
@@ -301,6 +329,7 @@ async def stream_search_pipeline(
                       and writer (TextEvent for each token)
         SearchResponse — final complete response as the last item
     """
+    mode = _normalize_mode(mode)
     cfg = config or SearchConfig()
     history = chat_history or []
     configure_search_keys(cfg.serper_api_key, cfg.jina_api_key, cfg.searxng_url)

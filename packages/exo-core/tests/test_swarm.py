@@ -315,14 +315,10 @@ class TestSwarmEdgeCases:
         assert result.usage.output_tokens == 10
 
     async def test_unsupported_mode_raises(self) -> None:
-        """Unsupported swarm mode raises SwarmError."""
+        """Unsupported swarm mode raises SwarmError at construction time."""
         a = Agent(name="a")
-        swarm = Swarm(agents=[a], mode="invalid")
-
-        provider = _make_provider([AgentOutput(text="ok")])
-
-        with pytest.raises(SwarmError, match="Unsupported swarm mode"):
-            await swarm.run("test", provider=provider)
+        with pytest.raises(SwarmError, match="Unknown swarm mode"):
+            Swarm(agents=[a], mode="invalid")  # type: ignore[arg-type]
 
     async def test_workflow_messages_passed_through(self) -> None:
         """Prior messages are forwarded to agents in workflow."""
@@ -1276,16 +1272,10 @@ class TestSwarmStreamTeam:
 
 class TestSwarmStreamUnsupportedMode:
     async def test_unsupported_mode_raises(self) -> None:
-        """Streaming with unsupported mode raises SwarmError."""
+        """Constructing a swarm with an unsupported mode raises SwarmError."""
         a = Agent(name="a")
-        swarm = Swarm(agents=[a], mode="invalid")
-
-        chunks = [_FakeStreamChunk(delta="ok")]
-        provider = _make_stream_provider([chunks])
-
-        with pytest.raises(SwarmError, match="Unsupported swarm mode"):
-            async for _ in run.stream(swarm, "test", provider=provider):
-                pass
+        with pytest.raises(SwarmError, match="Unknown swarm mode"):
+            Swarm(agents=[a], mode="invalid")  # type: ignore[arg-type]
 
 
 # ---------------------------------------------------------------------------

@@ -243,11 +243,9 @@ class TestAttachDetach:
         assert hooks[0] is existing_hook
 
     def test_invalid_event_raises(self) -> None:
-        agent = Agent(name="bot")
-        guard = BaseGuardrail(backend=SafeBackend(), events=["not_a_real_event"])
-
+        # Invalid events are now caught eagerly at construction time, not at attach().
         with pytest.raises(ValueError, match="Unknown hook point"):
-            guard.attach(agent)
+            BaseGuardrail(backend=SafeBackend(), events=["not_a_real_event"])
 
 
 # ---------------------------------------------------------------------------

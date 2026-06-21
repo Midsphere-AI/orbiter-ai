@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field
 
 
 def parse_model_string(model: str) -> tuple[str, str]:
@@ -114,23 +114,6 @@ def validate_injected_tool_args(value: Mapping[str, str] | None) -> dict[str, st
     return normalized
 
 
-def validate_max_parallel_subagents(value: int) -> int:
-    """Validate the per-call parallel sub-agent cap.
-
-    Args:
-        value: Maximum number of child jobs allowed in one parallel call.
-
-    Returns:
-        The validated limit.
-
-    Raises:
-        ValueError: If the limit falls outside ``1..7``.
-    """
-    if 1 <= value <= 7:
-        return value
-    raise ValueError("max_parallel_subagents must be between 1 and 7")
-
-
 def validate_max_spawn_children(value: int) -> int:
     """Validate the per-call spawn children cap.
 
@@ -173,76 +156,6 @@ class ModelConfig(BaseModel):
     max_retries: int = Field(default=3, ge=0)
     timeout: float = Field(default=30.0, gt=0)
     context_window_tokens: int | None = None
-
-
-class AgentConfig(BaseModel):
-    """Configuration for an Agent.
-
-    Args:
-        name: Unique identifier for the agent.
-        model: Model string in ``"provider:model_name"`` format.
-        instructions: System prompt for the agent.
-        temperature: LLM sampling temperature.
-        max_tokens: Maximum output tokens per LLM call.
-        max_steps: Maximum LLM-tool round-trips.
-        planning_enabled: Whether to run a planner phase before execution.
-        planning_model: Optional planner model override.
-        planning_instructions: Optional planner-only instructions.
-        budget_awareness: Context-budget handling mode.
-        hitl_tools: Tool names that require human approval before execution.
-        bare_tools: Suppress auto-registered helper tools (retrieve_artifact, context tools).
-        emit_mcp_progress: Whether MCP progress events are emitted.
-        injected_tool_args: Schema-only tool arguments exposed to the model.
-        allow_parallel_subagents: Whether the parallel-subagent tool is enabled.
-        max_parallel_subagents: Maximum child jobs per parallel-subagent call.
-    """
-
-    model_config = {"frozen": True}
-
-    name: str
-    model: str = "openai:gpt-4o-mini"
-    instructions: str = ""
-    temperature: float = Field(default=1.0, ge=0.0, le=2.0)
-    max_tokens: int | None = None
-    max_steps: int = Field(default=10, ge=1)
-    planning_enabled: bool = False
-    planning_model: str | None = None
-    planning_instructions: str = ""
-    budget_awareness: str | None = None
-    hitl_tools: list[str] = Field(default_factory=list)
-    bare_tools: bool = False
-    emit_mcp_progress: bool = True
-    injected_tool_args: dict[str, str] = Field(default_factory=dict)
-    allow_parallel_subagents: bool = False
-    max_parallel_subagents: int = 3
-
-    @field_validator("planning_model")
-    @classmethod
-    def _validate_planning_model(cls, value: str | None) -> str | None:
-        return validate_planning_model(value)
-
-    @field_validator("budget_awareness")
-    @classmethod
-    def _validate_budget_awareness(cls, value: str | None) -> str | None:
-        return validate_budget_awareness(value)
-
-    @field_validator("hitl_tools")
-    @classmethod
-    def _validate_hitl_tools(cls, value: list[str]) -> list[str]:
-        for tool_name in value:
-            if not isinstance(tool_name, str) or not tool_name.strip():
-                raise ValueError("hitl_tools entries must be non-empty strings")
-        return list(value)
-
-    @field_validator("injected_tool_args")
-    @classmethod
-    def _validate_injected_tool_args(cls, value: dict[str, str]) -> dict[str, str]:
-        return validate_injected_tool_args(value)
-
-    @field_validator("max_parallel_subagents")
-    @classmethod
-    def _validate_max_parallel_subagents(cls, value: int) -> int:
-        return validate_max_parallel_subagents(value)
 
 
 class TaskConfig(BaseModel):
