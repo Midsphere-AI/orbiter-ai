@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from contextlib import AsyncExitStack
+from dataclasses import dataclass, field
 from datetime import timedelta
 from enum import StrEnum
 from typing import Any
@@ -30,10 +31,40 @@ class MCPTransport(StrEnum):
     STREAMABLE_HTTP = "streamable_http"
 
 
+@dataclass(frozen=True)
+class StdioConfig:
+    """Grouped configuration for stdio transport.
+
+    Args:
+        command: Executable to launch.
+        args: Command-line arguments.
+        env: Extra environment variables.
+        cwd: Working directory.
+    """
+
+    command: str
+    args: list[str] = field(default_factory=list)
+    env: dict[str, str] | None = None
+    cwd: str | None = None
+
+
+@dataclass(frozen=True)
+class HttpConfig:
+    """Grouped configuration for SSE / streamable-HTTP transports.
+
+    Args:
+        url: Server endpoint URL.
+        headers: HTTP request headers.
+    """
+
+    url: str
+    headers: dict[str, str] | None = None
+
+
 class MCPServerConfig:
     """Configuration for an MCP server connection.
 
-    Args:
+    Flat kwargs (original API, always supported):
         name: Human-readable server name.
         transport: Transport type (stdio, sse, streamable_http).
         command: Executable for stdio transport.
@@ -46,6 +77,15 @@ class MCPServerConfig:
         sse_read_timeout: SSE read timeout in seconds.
         cache_tools: Whether to cache the tools list.
         session_timeout: ClientSession read timeout in seconds.
+        large_output_tools: Tool names whose output should be treated as large.
+
+    Grouped kwargs (namespace API — populate the flat attrs above):
+        stdio: ``StdioConfig`` object grouping stdio-transport params.
+        http: ``HttpConfig`` object grouping HTTP-transport params.
+
+    Raises:
+        MCPClientError: If both a grouped config and the corresponding flat kwarg
+            are provided (e.g. ``stdio=StdioConfig(...)`` *and* ``command=...``).
     """
 
     __slots__ = (
@@ -69,6 +109,7 @@ class MCPServerConfig:
         name: str,
         transport: MCPTransport | str = MCPTransport.STDIO,
         *,
+        # --- flat kwargs (original API) ---
         command: str | None = None,
         args: list[str] | None = None,
         env: dict[str, str] | None = None,
@@ -80,7 +121,35 @@ class MCPServerConfig:
         cache_tools: bool = False,
         session_timeout: float | None = 120.0,
         large_output_tools: list[str] | None = None,
+        # --- grouped namespace kwargs ---
+        stdio: StdioConfig | None = None,
+        http: HttpConfig | None = None,
     ) -> None:
+        # Conflict detection — disallow mixing grouped + flat for the same concern
+        if stdio is not None:
+            _stdio_flat = {"command": command, "args": args, "env": env, "cwd": cwd}
+            _conflicting = [k for k, v in _stdio_flat.items() if v is not None]
+            if _conflicting:
+                raise MCPClientError(
+                    f"Server '{name}': cannot mix stdio= with flat kwarg(s) "
+                    f"{_conflicting!r}; use one style or the other."
+                )
+            command = stdio.command
+            args = list(stdio.args)
+            env = stdio.env
+            cwd = stdio.cwd
+
+        if http is not None:
+            _http_flat = {"url": url, "headers": headers}
+            _conflicting_http = [k for k, v in _http_flat.items() if v is not None]
+            if _conflicting_http:
+                raise MCPClientError(
+                    f"Server '{name}': cannot mix http= with flat kwarg(s) "
+                    f"{_conflicting_http!r}; use one style or the other."
+                )
+            url = http.url
+            headers = http.headers
+
         self.name = name
         self.transport = MCPTransport(transport)
         self.command = command
@@ -94,6 +163,24 @@ class MCPServerConfig:
         self.cache_tools = cache_tools
         self.session_timeout = session_timeout
         self.large_output_tools: list[str] = list(large_output_tools) if large_output_tools else []
+
+    # ------------------------------------------------------------------
+    # Grouped read accessors (namespace view, never overwrite flat attrs)
+    # ------------------------------------------------------------------
+
+    @property
+    def stdio_config(self) -> StdioConfig | None:
+        """Return a ``StdioConfig`` view of the stdio params, or ``None`` if no command is set."""
+        if self.command is None:
+            return None
+        return StdioConfig(command=self.command, args=list(self.args), env=self.env, cwd=self.cwd)
+
+    @property
+    def http_config(self) -> HttpConfig | None:
+        """Return an ``HttpConfig`` view of the HTTP params, or ``None`` if no URL is set."""
+        if self.url is None:
+            return None
+        return HttpConfig(url=self.url, headers=self.headers)
 
     def validate(self) -> None:
         """Validate config fields for the chosen transport."""

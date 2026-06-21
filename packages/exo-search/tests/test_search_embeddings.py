@@ -189,9 +189,7 @@ class TestBuildEmbedder:
         embedder = _build_embedder()
         assert isinstance(embedder, OpenAIEmbeddings)
 
-    def test_vertex_requires_both_project_and_token(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_vertex_requires_both_project_and_token(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("GEMINI_API_KEY", raising=False)
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)
         monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "my-project")
@@ -236,9 +234,7 @@ class TestRerankSearchResults:
         result = await rerank_search_results("query", [])
         assert result == []
 
-    async def test_keyword_fallback_when_no_provider(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    async def test_keyword_fallback_when_no_provider(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("GEMINI_API_KEY", raising=False)
         monkeypatch.delenv("GOOGLE_CLOUD_PROJECT", raising=False)
         monkeypatch.delenv("GOOGLE_CLOUD_ACCESS_TOKEN", raising=False)
@@ -261,8 +257,8 @@ class TestRerankSearchResults:
 
         # Simulate embeddings: query is most similar to r2
         query_vec = [1.0, 0.0]
-        r1_vec = [0.0, 1.0]   # orthogonal — low similarity
-        r2_vec = [0.9, 0.1]   # close to query — high similarity
+        r1_vec = [0.0, 1.0]  # orthogonal — low similarity
+        r2_vec = [0.9, 0.1]  # close to query — high similarity
 
         mock_embedder = AsyncMock()
         mock_embedder.embed_batch = AsyncMock(return_value=[query_vec, r1_vec, r2_vec])

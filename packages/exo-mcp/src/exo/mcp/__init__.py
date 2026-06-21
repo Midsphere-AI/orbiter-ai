@@ -3,11 +3,13 @@
 __version__: str = "0.1.0"
 
 from exo.mcp.client import (  # pyright: ignore[reportMissingImports]
+    HttpConfig,
     MCPClient,
     MCPClientError,
     MCPServerConfig,
     MCPServerConnection,
     MCPTransport,
+    StdioConfig,
 )
 from exo.mcp.execution import (  # pyright: ignore[reportMissingImports]
     MCPExecutionError,
@@ -39,6 +41,7 @@ from exo.mcp.vault import (  # pyright: ignore[reportMissingImports]
 )
 
 __all__: list[str] = [
+    "HttpConfig",
     "MCPClient",
     "MCPClientError",
     "MCPExecutionError",
@@ -50,6 +53,7 @@ __all__: list[str] = [
     "MCPToolWrapper",
     "MCPTransport",
     "MCPTransportError",
+    "StdioConfig",
     "Vault",
     "VaultError",
     "convert_mcp_tools",

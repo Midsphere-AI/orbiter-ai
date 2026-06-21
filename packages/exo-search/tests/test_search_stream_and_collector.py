@@ -77,9 +77,7 @@ class TestCollectedResultsContextVar:
 
         async def populate_then_wait() -> list[dict]:
             clear_collected_results()
-            _collected_results_var.set(
-                [{"url": "https://keeper.com", "title": "Keep me"}]
-            )
+            _collected_results_var.set([{"url": "https://keeper.com", "title": "Keep me"}])
             await barrier.wait()
             return get_collected_results()
 
@@ -119,8 +117,7 @@ class TestStreamAsyncGenerator:
         """stream('q') must NOT return a coroutine (which would require await)."""
         result = stream("test query")
         assert not asyncio.iscoroutine(result), (
-            "stream() must not return a bare coroutine — "
-            "callers use 'async for', not 'await'"
+            "stream() must not return a bare coroutine — callers use 'async for', not 'await'"
         )
         # Clean up the unawaited generator
         result.aclose()

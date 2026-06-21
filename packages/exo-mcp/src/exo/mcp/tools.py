@@ -495,5 +495,3 @@ async def load_tools_from_connection(
     )
     logger.debug("Loaded %d tools from server '%s'", len(tools), connection.name)
     return tools
-
-

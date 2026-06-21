@@ -4,6 +4,7 @@ from __future__ import annotations
 
 __version__: str = "0.1.0"
 
+from exo.distributed._redis_config import RedisConfig  # pyright: ignore[reportMissingImports]
 from exo.distributed.alerts import (
     register_distributed_alerts,  # pyright: ignore[reportMissingImports]
 )
@@ -46,6 +47,7 @@ __all__: list[str] = [
     "CancellationToken",
     "EventPublisher",
     "EventSubscriber",
+    "RedisConfig",
     "TaskBroker",
     "TaskHandle",
     "TaskPayload",

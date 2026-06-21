@@ -19,6 +19,7 @@ from exo.distributed._propagation import (  # pyright: ignore[reportMissingImpor
     BaggagePropagator,
     DictCarrier,
 )
+from exo.distributed._redis_config import RedisConfig  # pyright: ignore[reportMissingImports]
 from exo.distributed.broker import TaskBroker  # pyright: ignore[reportMissingImports]
 from exo.distributed.cancel import CancellationToken  # pyright: ignore[reportMissingImports]
 from exo.distributed.events import EventPublisher  # pyright: ignore[reportMissingImports]
@@ -101,19 +102,35 @@ class Worker:
     5. Updates task status in :class:`TaskStore`.
     6. Publishes a heartbeat to Redis periodically.
 
+    **Grouped constructor** (preferred for new code)::
+
+        from exo.distributed import Worker, RedisConfig
+
+        worker = Worker(redis=RedisConfig(url="redis://localhost:6379"))
+
+    **Flat constructor** (backward-compatible, always works)::
+
+        worker = Worker("redis://localhost:6379", queue_name="exo:tasks")
+
     Args:
-        redis_url: Redis connection URL.
+        redis_url: Redis connection URL.  Mutually exclusive with *redis=*.
         worker_id: Unique worker identifier. Auto-generated if not provided.
         concurrency: Number of concurrent task executions (default 1).
         queue_name: Redis Streams queue name (default ``"exo:tasks"``).
+            Mutually exclusive with *redis=*.
         heartbeat_ttl: TTL in seconds for the heartbeat key (default 30).
+            Mutually exclusive with *redis=*.
         executor: Execution backend — ``"local"`` for direct execution or
             ``"temporal"`` for durable Temporal workflows.
+        redis: Grouped Redis connection config (:class:`RedisConfig`).
+            When provided, supplies *redis_url*, *queue_name*, and
+            *heartbeat_ttl* together.  Raises :exc:`ValueError` if any of
+            the flat counterparts are also explicitly set.
     """
 
     def __init__(
         self,
-        redis_url: str,
+        redis_url: str = "",
         *,
         worker_id: str | None = None,
         concurrency: int = 1,
@@ -121,18 +138,52 @@ class Worker:
         heartbeat_ttl: int = 30,
         executor: Literal["local", "temporal"] = "local",
         provider_factory: Callable[[str], Any] | None = None,
+        redis: RedisConfig | None = None,
     ) -> None:
-        self._redis_url = redis_url
+        # --- grouped vs flat resolution ---
+        if redis is not None:
+            # Detect explicit conflicts with the flat counterparts.
+            # We can only detect positional redis_url if it was given as non-empty;
+            # keyword conflicts are checked individually.
+            if redis_url:
+                raise ValueError(
+                    "Cannot specify both 'redis=' and 'redis_url='. "
+                    "Use RedisConfig(url=...) or the flat 'redis_url=' kwarg, not both."
+                )
+            if queue_name != "exo:tasks":
+                raise ValueError(
+                    "Cannot specify both 'redis=' and 'queue_name='. "
+                    "Set queue_name via RedisConfig(queue_name=...) instead."
+                )
+            if heartbeat_ttl != 30:
+                raise ValueError(
+                    "Cannot specify both 'redis=' and 'heartbeat_ttl='. "
+                    "Set heartbeat_ttl via RedisConfig(heartbeat_ttl=...) instead."
+                )
+            resolved_url = redis.url
+            resolved_queue = redis.queue_name
+            resolved_ttl = redis.heartbeat_ttl
+        else:
+            if not redis_url:
+                raise ValueError(
+                    "A Redis URL is required. Pass redis_url='redis://...' "
+                    "or redis=RedisConfig(url='redis://...')."
+                )
+            resolved_url = redis_url
+            resolved_queue = queue_name
+            resolved_ttl = heartbeat_ttl
+
+        self._redis_url = resolved_url
         self._worker_id = worker_id or _generate_worker_id()
         self._concurrency = concurrency
-        self._queue_name = queue_name
-        self._heartbeat_ttl = heartbeat_ttl
+        self._queue_name = resolved_queue
+        self._heartbeat_ttl = resolved_ttl
         self._executor_type = executor
         self._provider_factory = provider_factory
 
-        self._broker = TaskBroker(redis_url, queue_name=queue_name)
-        self._store = TaskStore(redis_url)
-        self._publisher = EventPublisher(redis_url)
+        self._broker = TaskBroker(resolved_url, queue_name=resolved_queue)
+        self._store = TaskStore(resolved_url)
+        self._publisher = EventPublisher(resolved_url)
         self._temporal_executor: TemporalExecutor | None = None
 
         if executor == "temporal":
@@ -165,6 +216,20 @@ class Worker:
     @property
     def tasks_failed(self) -> int:
         return self._tasks_failed
+
+    @property
+    def redis_config(self) -> RedisConfig:
+        """Return the active Redis connection settings as a :class:`RedisConfig`.
+
+        Provides a grouped read-only view of the connection parameters
+        regardless of whether the worker was constructed with flat kwargs or
+        the ``redis=RedisConfig(...)`` shorthand.
+        """
+        return RedisConfig(
+            url=self._redis_url,
+            queue_name=self._queue_name,
+            heartbeat_ttl=self._heartbeat_ttl,
+        )
 
     async def start(self) -> None:
         """Enter the claim-execute loop until shutdown is signalled.

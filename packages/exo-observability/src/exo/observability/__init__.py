@@ -19,8 +19,11 @@ __version__: str = "0.1.0"
 # Eager imports: core symbols that cover 90 % of use-cases
 # ---------------------------------------------------------------------------
 from exo.observability.config import (  # pyright: ignore[reportMissingImports]
+    LoggingConfig,
+    MetricsConfig,
     ObservabilityConfig,
     TraceBackend,
+    TracingConfig,
     configure,
     get_config,
 )
@@ -170,6 +173,9 @@ __all__: list[str] = [
     # config (eager)
     "ObservabilityConfig",
     "TraceBackend",
+    "LoggingConfig",
+    "TracingConfig",
+    "MetricsConfig",
     "configure",
     "get_config",
     # logging (eager)

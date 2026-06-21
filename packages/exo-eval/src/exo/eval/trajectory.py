@@ -23,11 +23,93 @@ class TrajectoryError(ExoError):
     """Error during trajectory operations."""
 
 
+# ---------------------------------------------------------------------------
+# SAR namespace dataclasses — grouped views over TrajectoryItem fields.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class TrajectoryState:
+    """State namespace for a trajectory step (what the agent observed).
+
+    Args:
+        input: The user / task input text for this step.
+        messages: Full message history as a sequence of dicts.
+        context: Arbitrary context dict (e.g. retrieved documents, env vars).
+    """
+
+    input: str = ""
+    messages: tuple[dict[str, Any], ...] = ()
+    context: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class TrajectoryAction:
+    """Action namespace for a trajectory step (what the agent did).
+
+    Args:
+        output: The assistant's text output / final answer.
+        tool_calls: Sequence of tool-call dicts issued during this step.
+    """
+
+    output: str = ""
+    tool_calls: tuple[dict[str, Any], ...] = ()
+
+
+@dataclass(frozen=True)
+class TrajectoryReward:
+    """Reward namespace for a trajectory step (how well the agent did).
+
+    Args:
+        score: Numeric score assigned by an evaluator (None if not yet scored).
+        status: Terminal status string, e.g. ``"success"`` or ``"failure"``.
+        metadata: Arbitrary scorer / evaluator metadata.
+    """
+
+    score: float | None = None
+    status: str = "success"
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+# ---------------------------------------------------------------------------
+# Sentinel to detect "caller passed the flat field explicitly"
+# ---------------------------------------------------------------------------
+_MISSING: Any = object()
+
+
 @dataclass(frozen=True, slots=True)
 class TrajectoryItem:
     """A single step in an agent execution trajectory.
 
     Follows the State-Action-Reward (SAR) pattern.
+
+    **Two equivalent construction styles** (do not mix both for the same
+    field — a ``ValueError`` is raised if you do):
+
+    *Flat (original, always backward-compatible):*
+
+    .. code-block:: python
+
+        item = TrajectoryItem(input="hi", output="hello", score=1.0)
+
+    *Grouped (new namespace style):*
+
+    .. code-block:: python
+
+        item = TrajectoryItem(
+            state=TrajectoryState(input="hi"),
+            action=TrajectoryAction(output="hello"),
+            reward=TrajectoryReward(score=1.0),
+        )
+
+    **Read accessors** — inspect a grouped view of any item regardless of how
+    it was constructed:
+
+    .. code-block:: python
+
+        item.state_view   # TrajectoryState
+        item.action_view  # TrajectoryAction
+        item.reward_view  # TrajectoryReward
     """
 
     id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
@@ -46,6 +128,100 @@ class TrajectoryItem:
     score: float | None = None
     status: str = "success"
     metadata: dict[str, Any] = field(default_factory=dict)
+    # --- grouped namespace params (optional; exploded into flat fields above) ---
+    # NOTE: kept out of repr/compare/hash so they are transparent to callers.
+    state: TrajectoryState | None = field(default=None, repr=False, compare=False, hash=False)
+    action: TrajectoryAction | None = field(default=None, repr=False, compare=False, hash=False)
+    reward: TrajectoryReward | None = field(default=None, repr=False, compare=False, hash=False)
+
+    def __post_init__(self) -> None:
+        """Explode grouped namespace params into flat canonical fields."""
+        if self.state is not None:
+            ns = self.state
+            # Conflict check: raise if the caller also set the flat field explicitly.
+            # We detect "explicitly set" by comparing to the class-level default.
+            if self.input != "" and self.input != ns.input:
+                raise ValueError(
+                    "Cannot specify both 'state=TrajectoryState(input=...)' and "
+                    "'input=...' with different values — use one style."
+                )
+            if self.messages != () and self.messages != ns.messages:
+                raise ValueError(
+                    "Cannot specify both 'state=TrajectoryState(messages=...)' and "
+                    "'messages=...' with different values — use one style."
+                )
+            if self.context != {} and self.context != ns.context:
+                raise ValueError(
+                    "Cannot specify both 'state=TrajectoryState(context=...)' and "
+                    "'context=...' with different values — use one style."
+                )
+            object.__setattr__(self, "input", ns.input)
+            object.__setattr__(self, "messages", ns.messages)
+            object.__setattr__(self, "context", ns.context)
+
+        if self.action is not None:
+            ns = self.action
+            if self.output != "" and self.output != ns.output:
+                raise ValueError(
+                    "Cannot specify both 'action=TrajectoryAction(output=...)' and "
+                    "'output=...' with different values — use one style."
+                )
+            if self.tool_calls != () and self.tool_calls != ns.tool_calls:
+                raise ValueError(
+                    "Cannot specify both 'action=TrajectoryAction(tool_calls=...)' and "
+                    "'tool_calls=...' with different values — use one style."
+                )
+            object.__setattr__(self, "output", ns.output)
+            object.__setattr__(self, "tool_calls", ns.tool_calls)
+
+        if self.reward is not None:
+            ns = self.reward
+            if self.score is not None and self.score != ns.score:
+                raise ValueError(
+                    "Cannot specify both 'reward=TrajectoryReward(score=...)' and "
+                    "'score=...' with different values — use one style."
+                )
+            if self.status != "success" and self.status != ns.status:
+                raise ValueError(
+                    "Cannot specify both 'reward=TrajectoryReward(status=...)' and "
+                    "'status=...' with different values — use one style."
+                )
+            if self.metadata != {} and self.metadata != ns.metadata:
+                raise ValueError(
+                    "Cannot specify both 'reward=TrajectoryReward(metadata=...)' and "
+                    "'metadata=...' with different values — use one style."
+                )
+            object.__setattr__(self, "score", ns.score)
+            object.__setattr__(self, "status", ns.status)
+            object.__setattr__(self, "metadata", ns.metadata)
+
+    # --- grouped read accessors ---
+
+    @property
+    def state_view(self) -> TrajectoryState:
+        """Read-only grouped view of the State fields."""
+        return TrajectoryState(
+            input=self.input,
+            messages=self.messages,
+            context=self.context,
+        )
+
+    @property
+    def action_view(self) -> TrajectoryAction:
+        """Read-only grouped view of the Action fields."""
+        return TrajectoryAction(
+            output=self.output,
+            tool_calls=self.tool_calls,
+        )
+
+    @property
+    def reward_view(self) -> TrajectoryReward:
+        """Read-only grouped view of the Reward fields."""
+        return TrajectoryReward(
+            score=self.score,
+            status=self.status,
+            metadata=self.metadata,
+        )
 
     def to_dict(self) -> dict[str, Any]:
         """Serialise to a plain dict."""

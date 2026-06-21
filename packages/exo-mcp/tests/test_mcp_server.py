@@ -417,4 +417,3 @@ class TestRegisterMethods:
         inst = EmptySrv()
         names = _register_methods(inst, mock_mcp)
         assert names == []
-

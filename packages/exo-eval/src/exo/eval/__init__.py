@@ -37,10 +37,13 @@ from exo.eval.scorers import (  # pyright: ignore[reportMissingImports]
 )
 from exo.eval.trajectory import (  # pyright: ignore[reportMissingImports]
     DefaultStrategy,
+    TrajectoryAction,
     TrajectoryDataset,
     TrajectoryError,
     TrajectoryExtractor,
     TrajectoryItem,
+    TrajectoryReward,
+    TrajectoryState,
     TrajectoryStrategy,
 )
 from exo.eval.trajectory_scorers import (  # pyright: ignore[reportMissingImports]
@@ -101,10 +104,13 @@ __all__: list[str] = [
     "Scorer",
     "ScorerResult",
     "TimeCostScorer",
+    "TrajectoryAction",
     "TrajectoryDataset",
     "TrajectoryError",
     "TrajectoryExtractor",
     "TrajectoryItem",
+    "TrajectoryReward",
+    "TrajectoryState",
     "TrajectoryStrategy",
     "TrajectoryValidator",
     "get_scorer",

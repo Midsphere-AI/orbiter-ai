@@ -109,8 +109,67 @@ class AgentCard(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+class BindConfig(BaseModel):
+    """Where the A2A server listens — host, port, and base path.
+
+    Pass as ``ServingConfig(bind=BindConfig(host="0.0.0.0", port=8080))`` to
+    group bind parameters as a single namespace, or keep using the flat kwargs
+    ``host=``, ``port=``, ``endpoint=`` — both spellings work identically.
+    """
+
+    model_config = {"frozen": True}
+
+    host: str = Field(default="localhost", description="Bind host")
+    port: int = Field(default=0, description="Bind port (0 = auto; see ServingConfig docstring)")
+    endpoint: str = Field(default="/", description="Base URL path")
+
+
+class AdvertiseConfig(BaseModel):
+    """Protocol advertisement parameters sent in the agent card.
+
+    Pass as ``ServingConfig(advertise=AdvertiseConfig(streaming=True, version="1.0"))`` to
+    group advertisement parameters as a single namespace, or keep using the flat kwargs
+    ``streaming=``, ``version=``, ``transports=``, ``input_modes=``, ``output_modes=`` —
+    both spellings work identically.
+    """
+
+    model_config = {"frozen": True}
+
+    streaming: bool = Field(default=False, description="Enable streaming")
+    version: str = Field(default="0.0.1", description="Advertised version")
+    transports: tuple[TransportMode, ...] = Field(
+        default=(TransportMode.JSONRPC,), description="Enabled transports"
+    )
+    input_modes: tuple[str, ...] = Field(default=("text",), description="Accepted input formats")
+    output_modes: tuple[str, ...] = Field(default=("text",), description="Produced output formats")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_sequences(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            for key in ("transports", "input_modes", "output_modes"):
+                val = data.get(key)
+                if isinstance(val, list):
+                    data = {**data, key: tuple(val)}
+        return data
+
+
 class ServingConfig(BaseModel):
     """Server-side configuration for publishing an agent via A2A.
+
+    Flat kwargs (``host``, ``port``, ``endpoint``, ``streaming``, ``version``,
+    ``skills``, ``input_modes``, ``output_modes``, ``transports``, ``extra``) keep
+    working exactly as before.
+
+    **Grouped namespaces (additive sugar):** you may pass ``bind=BindConfig(...)``
+    and/or ``advertise=AdvertiseConfig(...)`` instead of individual flat kwargs.
+    Grouped and flat kwargs for the same field must not be combined — a
+    ``ValueError`` is raised if both are present.
+
+    Read-accessor properties ``cfg.bind_config`` and ``cfg.advertise_config``
+    return view objects (note: ``bind`` and ``advertise`` are not property names
+    because they are not stored as flat fields and would clash with the validator
+    logic; the accessors use ``_config`` suffixes).
 
     .. warning:: Ephemeral ports (``port=0``)
 
@@ -140,13 +199,77 @@ class ServingConfig(BaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def _coerce_sequences(cls, data: Any) -> Any:
-        if isinstance(data, dict):
-            for key in ("skills", "input_modes", "output_modes", "transports"):
-                val = data.get(key)
-                if isinstance(val, list):
-                    data = {**data, key: tuple(val)}
+    def _coerce_and_expand_namespaces(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+
+        data = dict(data)  # shallow copy so we can mutate
+
+        # --- Expand BindConfig namespace ---
+        bind_obj = data.pop("bind", None)
+        if bind_obj is not None:
+            if not isinstance(bind_obj, BindConfig):
+                bind_obj = BindConfig.model_validate(bind_obj)
+            _bind_flat = {
+                "host": bind_obj.host,
+                "port": bind_obj.port,
+                "endpoint": bind_obj.endpoint,
+            }
+            for key, val in _bind_flat.items():
+                if key in data:
+                    raise ValueError(
+                        f"ServingConfig: cannot set both 'bind' namespace and flat field {key!r}; "
+                        f"use one or the other."
+                    )
+                data[key] = val
+
+        # --- Expand AdvertiseConfig namespace ---
+        advertise_obj = data.pop("advertise", None)
+        if advertise_obj is not None:
+            if not isinstance(advertise_obj, AdvertiseConfig):
+                advertise_obj = AdvertiseConfig.model_validate(advertise_obj)
+            _adv_flat = {
+                "streaming": advertise_obj.streaming,
+                "version": advertise_obj.version,
+                "transports": advertise_obj.transports,
+                "input_modes": advertise_obj.input_modes,
+                "output_modes": advertise_obj.output_modes,
+            }
+            for key, val in _adv_flat.items():
+                if key in data:
+                    raise ValueError(
+                        f"ServingConfig: cannot set both 'advertise' namespace and flat field {key!r}; "
+                        f"use one or the other."
+                    )
+                data[key] = val
+
+        # --- Coerce lists to tuples ---
+        for key in ("skills", "input_modes", "output_modes", "transports"):
+            val = data.get(key)
+            if isinstance(val, list):
+                data[key] = tuple(val)
+
         return data
+
+    # ------------------------------------------------------------------
+    # Read-accessor views
+    # ------------------------------------------------------------------
+
+    @property
+    def bind_config(self) -> BindConfig:
+        """Return a :class:`BindConfig` view of the bind-related fields."""
+        return BindConfig(host=self.host, port=self.port, endpoint=self.endpoint)
+
+    @property
+    def advertise_config(self) -> AdvertiseConfig:
+        """Return an :class:`AdvertiseConfig` view of the advertisement fields."""
+        return AdvertiseConfig(
+            streaming=self.streaming,
+            version=self.version,
+            transports=self.transports,
+            input_modes=self.input_modes,
+            output_modes=self.output_modes,
+        )
 
 
 class ClientConfig(BaseModel):

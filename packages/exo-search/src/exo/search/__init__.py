@@ -20,7 +20,15 @@ except Exception:
 
 from exo.types import StreamEvent
 
-from .config import SearchConfig
+from .config import (
+    ResearchConfig,
+    RevisionConfig,
+    SearchConfig,
+    SearchModels,
+    SearchSources,
+    VerificationConfig,
+    WriterConfig,
+)
 from .conversation import ConversationManager
 from .pipeline import run_search_pipeline, stream_search_pipeline
 from .types import PipelineEvent, ResearchMode, SearchResponse, SearchSource
@@ -90,10 +98,16 @@ async def search_with_details(
 __all__: list[str] = [
     "ConversationManager",
     "PipelineEvent",
+    "ResearchConfig",
     "ResearchMode",
+    "RevisionConfig",
     "SearchConfig",
+    "SearchModels",
     "SearchResponse",
     "SearchSource",
+    "SearchSources",
+    "VerificationConfig",
+    "WriterConfig",
     "search",
     "search_with_details",
     "stream",

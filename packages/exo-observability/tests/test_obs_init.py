@@ -108,6 +108,7 @@ class TestLazyImports:
 
         assert HealthRegistry is not None
 
+
 # ── Sub-module imports ────────────────────────────────────────────────────
 
 
@@ -238,6 +239,7 @@ class TestAllCompleteness:
 
         tracing = {"NullSpan", "SpanLike", "extract_metadata", "traced", "span", "aspan"}
         assert tracing.issubset(set(obs.__all__))
+
 
 # ── Lazy loading behavior ────────────────────────────────────────────────
 

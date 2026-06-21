@@ -21,10 +21,11 @@ from __future__ import annotations
 import json
 import os
 import re
-from dataclasses import dataclass, field
+from dataclasses import InitVar, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from exo.mcp.client import HttpConfig, StdioConfig  # pyright: ignore[reportMissingImports]
 from exo.types import ExoError  # pyright: ignore[reportMissingImports]
 
 _ENV_PATTERN = re.compile(r"\$\{([^}:]+)\}")
@@ -38,7 +39,27 @@ class MCPConfigError(ExoError):
 
 @dataclass
 class ServerEntry:
-    """Configuration for a single MCP server."""
+    """Configuration for a single MCP server.
+
+    Flat kwargs (original API, always supported):
+        name: Human-readable server name.
+        transport: Transport type string (``"stdio"``, ``"sse"``, ``"streamable_http"``).
+        command: Executable for stdio transport.
+        args: Command-line arguments for stdio transport.
+        env: Extra environment variables for stdio transport.
+        cwd: Working directory for stdio transport.
+        url: Server URL for HTTP-based transports.
+        headers: HTTP request headers for HTTP-based transports.
+        timeout: Connection timeout in seconds.
+
+    Grouped kwargs (namespace API — populate the flat attrs above):
+        stdio: :class:`~exo.mcp.client.StdioConfig` grouping stdio-transport params.
+        http: :class:`~exo.mcp.client.HttpConfig` grouping HTTP-transport params.
+
+    Raises:
+        MCPConfigError: If both a grouped config and the corresponding flat kwarg
+            are provided simultaneously.
+    """
 
     name: str
     transport: str = "stdio"
@@ -49,6 +70,57 @@ class ServerEntry:
     url: str | None = None
     headers: dict[str, str] | None = None
     timeout: float = 30.0
+    # InitVar fields for grouped namespace kwargs (not stored as attrs)
+    stdio: InitVar[StdioConfig | None] = None
+    http: InitVar[HttpConfig | None] = None
+
+    def __post_init__(self, stdio: StdioConfig | None, http: HttpConfig | None) -> None:
+        if stdio is not None:
+            _stdio_flat = {
+                "command": self.command,
+                "args": self.args or None,
+                "env": self.env,
+                "cwd": self.cwd,
+            }
+            _conflicting = [k for k, v in _stdio_flat.items() if v is not None]
+            if _conflicting:
+                raise MCPConfigError(
+                    f"Server '{self.name}': cannot mix stdio= with flat kwarg(s) "
+                    f"{_conflicting!r}; use one style or the other."
+                )
+            self.command = stdio.command
+            self.args = list(stdio.args)
+            self.env = stdio.env
+            self.cwd = stdio.cwd
+
+        if http is not None:
+            _http_flat = {"url": self.url, "headers": self.headers}
+            _conflicting_http = [k for k, v in _http_flat.items() if v is not None]
+            if _conflicting_http:
+                raise MCPConfigError(
+                    f"Server '{self.name}': cannot mix http= with flat kwarg(s) "
+                    f"{_conflicting_http!r}; use one style or the other."
+                )
+            self.url = http.url
+            self.headers = http.headers
+
+    # ------------------------------------------------------------------
+    # Grouped read accessors (namespace view)
+    # ------------------------------------------------------------------
+
+    @property
+    def stdio_config(self) -> StdioConfig | None:
+        """Return a :class:`StdioConfig` view of the stdio params, or ``None`` if no command."""
+        if self.command is None:
+            return None
+        return StdioConfig(command=self.command, args=list(self.args), env=self.env, cwd=self.cwd)
+
+    @property
+    def http_config(self) -> HttpConfig | None:
+        """Return an :class:`HttpConfig` view of the HTTP params, or ``None`` if no URL."""
+        if self.url is None:
+            return None
+        return HttpConfig(url=self.url, headers=self.headers)
 
     def validate(self) -> None:
         """Validate transport-specific requirements."""
