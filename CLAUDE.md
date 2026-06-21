@@ -136,29 +136,15 @@ The `_internal/` subpackage is the engine room. Understanding the call chain is 
 
 ---
 
-## Audit & Ongoing Work
+## Parallel Sub-agents
 
-An 83-finding audit report lives at `audit.md`. It covers Bugs & Security, Logical Issues, Non-Completeness, Inconsistencies, and Duplications across all packages.
+For multi-file work across multiple packages, use the `Agent` tool with several concurrent `general-purpose` sub-agents — one per package. This pattern cuts wall-clock time by ~3x. Prefer **sonnet** sub-agents (`model: sonnet`) for mechanical, well-scoped refactors. Always run the affected package's tests (and a final full `uv run pytest`) after a fan-out to catch cross-package breakage.
 
-### Approach: Parallel Sub-agents
+## DX Simplification — COMPLETE
 
-For multi-file work across multiple packages, use `Agent` tool with multiple concurrent `general-purpose` sub-agents — one per package. This pattern cuts wall-clock time by ~3x. Prefer **sonnet** sub-agents (`model: sonnet`) for the DX work below.
+The rookie-friendly DX overhaul (Tiers 0–3) is **done** on branch `chore/distribution-cleanup`: typed entrypoints + top-level re-exports + teaching errors (Tier 0), one-obvious-way cleanups (Tier 1), aliased vocabulary renames (Tier 2), and the per-concern namespace refactor (Tier 3). Old spellings are kept as deprecated aliases throughout; the suite stays green. The original audit lives at `namespace-dx-audit.md` (historical reference). `audit.md` holds the earlier 83-finding report.
 
-## DX Simplification Plan ("start" trigger)
-
-**When the user says "start" (with no other context), begin executing this plan.** Goal: make Exo's DX *extremely simple — usable by programming rookies*. Remove overlapping/duplicate features, cut choices, fix how choices are made.
-
-**The plan lives in `namespace-dx-audit.md` at repo root** (two parts, all findings carry `file:line`):
-- **Part 1** — constructor param bloat → group into namespaces (`Agent.context`, `Agent.memory`, `Agent.planner`, `Agent.tools`, `Agent.subagents`, `Agent.ptc`, `Agent.guardrails`). Worst offenders: `Agent.__init__` (41 params), `SearchConfig` (~28), `MCPServerConfig`+`ServerEntry` (13/9), `TrajectoryItem` (13), `ServingConfig` (10), `ObservabilityConfig` (9), `Swarm` (9).
-- **Part 2** — broader friction: pervasive `Any` typing kills autocomplete; jargon (`ptc`/`Neuron`/`Ralph`/`Rail`/`HITL`/`context_mode="pilot"`); stringly-typed silent failures; leaky top-level exports; choice overload (`run()` vs `agent.run()` return-type split, `store=` vs `memory=`, dead no-op params, diverged `AgentConfig`); hello-world friction + non-teaching errors.
-
-**Execution order — ship tiers sequentially, each independently green (~5,950 tests, `uv run pytest`); keep old spellings as deprecated aliases:**
-- **Tier 0 (do first; ~1 session, parallel-friendly, low risk, mostly additive):** kill `Any` on the hot path (`run`/`run.sync`/`run.stream` via typed Protocol; `Agent(store/memory/context/context_mode)`; `agent`/`provider`); re-export first-5-minutes API at top level (`RunResult`, `Usage`, streaming events, `AgentError`, `HookPoint`, message types; memory backends at `exo.memory`); README/docstrings lead with the `run.sync` 3-liner + flip default model to `gpt-4o-mini`; teaching errors (re-raise the swallowed provider `ModelError` in `runner.py:898`; validate `tools`/`model` types; don't retry 401s).
-- **Tier 1:** one obvious way — make `agent.run()` private (unify `RunResult`/`AgentOutput`); collapse `store=`/`memory=`; delete no-op `allow_parallel_subagents`/`max_parallel_subagents` + diverged `AgentConfig`; `Literal`/enum the silent strings; drop `FunctionTool` from public exports.
-- **Tier 2:** vocabulary renames (aliased): `ptc`→`batch_tools`, `Neuron`→`PromptSection`, `Ralph`→`Refinement*`, `Rail`→`Guard`, `hitl_tools`→`approval_tools`, `context_mode` values→size words; standardize `instructions`/`model`/vector-store names.
-- **Tier 3:** Part 1 namespace refactor — `Agent` first (establishes the `*Config` types reused everywhere), then fan out the other 7 config classes (`SearchConfig`, `MCPServerConfig`+`ServerEntry`, `ObservabilityConfig`, `ServingConfig`, `TrajectoryItem`, `Worker`/`RedisConfig`).
-
-**Why multiple sessions:** sub-agents parallelize independent files, but Tier 1/3 core changes serialize on `agent.py`/`runner.py` and each tier gates on a green test run + failure triage in the main context. Tier 0 ≈ this session; Tiers 1–3 ≈ one focused session each.
+**Namespace pattern (Tier 3), in case you extend it:** bloated flat constructors accept grouped `*Config` objects *additively* — every flat kwarg still works, the grouped config "explodes" into the flat state, passing both a config and a conflicting flat kwarg raises, and the resolved config is exposed as a read attribute. See `packages/exo-core/src/exo/namespaces.py` + `Agent.__init__` for the template. Deliberately-deferred low-value follow-ups (e.g. `ToolsConfig`, `ModelConfig` model-string collapse, `HTTPEmbeddings` schema grouping, wiring `RedisConfig` into TaskBroker/TaskStore/EventPublisher) are tracked in auto-memory, not here.
 
 ## graphify
 
