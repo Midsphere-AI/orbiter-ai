@@ -1,15 +1,15 @@
-"""Hybrid swarm — parallel groups, serial groups, and nested swarms.
+"""Hybrid swarm — parallel groups, workflow chaining, and nested swarms.
 
 Shows advanced orchestration: a ``ParallelGroup`` runs agents
-concurrently, a ``SerialGroup`` chains them, and a ``SwarmNode``
-nests one swarm inside another.
+concurrently, a workflow-mode ``Swarm`` chains them sequentially, and a
+``SwarmNode`` nests one swarm inside another.
 
 Usage:
     export OPENAI_API_KEY=sk-...
     uv run python examples/quickstart/hybrid_swarm.py
 """
 
-from exo import Agent, ParallelGroup, SerialGroup, Swarm, SwarmNode, run
+from exo import Agent, ParallelGroup, Swarm, SwarmNode, run
 
 # --- Parallel research stage ------------------------------------------------
 # Two researchers run concurrently; their outputs are joined.
@@ -32,7 +32,7 @@ research_group = ParallelGroup(
 )
 
 # --- Serial editing stage ---------------------------------------------------
-# Draft then polish, sequentially.
+# Draft then polish, sequentially — a workflow-mode Swarm chains them.
 
 drafter = Agent(
     name="drafter",
@@ -46,7 +46,10 @@ editor = Agent(
     instructions="Polish the article for clarity and brevity.",
 )
 
-edit_pipeline = SerialGroup(name="editing", agents=[drafter, editor])
+edit_pipeline = SwarmNode(
+    swarm=Swarm(agents=[drafter, editor], flow="drafter >> editor", mode="workflow"),
+    name="editing",
+)
 
 # --- Outer swarm: research (parallel) >> editing (serial) -------------------
 

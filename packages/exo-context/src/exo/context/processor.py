@@ -8,23 +8,16 @@ The :class:`ProcessorPipeline` collects processors and fires them by event.
 Processors are called sequentially in registration order for a given event.
 
 Built-in processors:
-- SummarizeProcessor    — ``pre_llm_call``: marks context for summarization
-  when history exceeds the configured threshold.
 - ToolResultOffloader   — ``post_tool_call``: offloads large tool results to
   workspace when they exceed a size threshold.
-- MessageOffloader      — ``pre_llm_call``: replaces oversized messages with
-  ``[[OFFLOAD: handle=<id>]]`` markers to keep context within budget.
 - DialogueCompressor    — ``pre_llm_call``: compresses long tool-call chains
   into concise summaries.
-- RoundWindowProcessor  — ``pre_llm_call``: keeps the last *N* conversation
-  rounds (user → assistant, including tool calls) plus all system messages.
 """
 
 from __future__ import annotations
 
 import contextlib
 import logging
-import uuid
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from typing import Any
@@ -176,45 +169,6 @@ class ProcessorPipeline:
 # ── Built-in processors ─────────────────────────────────────────────
 
 
-class SummarizeProcessor(ContextProcessor):
-    """Marks context for summarization when history exceeds a threshold.
-
-    Fires on ``"pre_llm_call"``.  Checks the ``history`` list in
-    ``ctx.state`` against ``ctx.config.summary_threshold``.  When
-    exceeded, sets ``needs_summary=True`` in state and stores the
-    excess messages under ``summary_candidates``.
-
-    Parameters
-    ----------
-    name:
-        Processor name.  Default ``"summarize"``.
-    """
-
-    def __init__(self, *, name: str = "summarize") -> None:
-        super().__init__("pre_llm_call", name=name)
-
-    async def process(self, ctx: Context, payload: dict[str, Any]) -> None:
-        history: list[dict[str, Any]] | None = ctx.state.get("history")
-        if not history:
-            return
-
-        threshold = ctx.config.summary_threshold
-        if len(history) <= threshold:
-            return
-
-        # Mark for summarization and store candidates
-        ctx.state.set("needs_summary", True)
-        # Candidates are the oldest messages beyond the threshold
-        excess_count = len(history) - threshold
-        ctx.state.set("summary_candidates", history[:excess_count])
-        logger.debug(
-            "summarization triggered: %d messages exceed threshold %d, %d candidates",
-            len(history),
-            threshold,
-            excess_count,
-        )
-
-
 class ToolResultOffloader(ContextProcessor):
     """Offloads large tool results to workspace.
 
@@ -292,70 +246,6 @@ class ToolResultOffloader(ContextProcessor):
         )
 
 
-class MessageOffloader(ContextProcessor):
-    """Replaces oversized messages with ``[[OFFLOAD: handle=<id>]]`` markers.
-
-    Fires on ``"pre_llm_call"``.  Scans ``ctx.state['history']`` and replaces
-    any user, assistant, or tool message whose content exceeds
-    ``max_message_size`` characters with a short marker.  The original content
-    is stored in ``ctx.state['offloaded_messages']`` keyed by handle ID so it
-    can be recovered later (e.g. via a reload tool).
-
-    System messages are never offloaded.
-
-    Parameters
-    ----------
-    max_message_size:
-        Maximum character length per message before offloading.  Default 10000.
-    name:
-        Processor name.  Default ``"message_offloader"``.
-    """
-
-    __slots__ = ("_event", "_max_message_size", "_name")
-
-    def __init__(self, *, max_message_size: int = 10000, name: str = "message_offloader") -> None:
-        super().__init__("pre_llm_call", name=name)
-        self._max_message_size = max_message_size
-
-    @property
-    def max_message_size(self) -> int:
-        """Maximum message content size before offloading."""
-        return self._max_message_size
-
-    async def process(self, ctx: Context, payload: dict[str, Any]) -> None:
-        history: list[dict[str, Any]] | None = ctx.state.get("history")
-        if not history:
-            return
-
-        offloaded: dict[str, str] = ctx.state.get("offloaded_messages") or {}
-        count = 0
-
-        for msg in history:
-            role = msg.get("role") if isinstance(msg, dict) else getattr(msg, "role", None)
-            if role == "system":
-                continue
-
-            content = msg.get("content") if isinstance(msg, dict) else getattr(msg, "content", None)
-            if content is None:
-                continue
-            content_str = str(content)
-            if len(content_str) <= self._max_message_size:
-                continue
-
-            handle_id = uuid.uuid4().hex[:12]
-            offloaded[handle_id] = content_str
-            marker = f"[[OFFLOAD: handle={handle_id}]]"
-            if isinstance(msg, dict):
-                msg["content"] = marker
-            else:
-                msg.content = marker  # type: ignore[attr-defined]
-            count += 1
-
-        ctx.state.set("offloaded_messages", offloaded)
-        if count:
-            logger.debug("MessageOffloader: offloaded %d oversized messages", count)
-
-
 class DialogueCompressor(ContextProcessor):
     """Compresses long tool-call chains into concise summaries.
 
@@ -369,35 +259,25 @@ class DialogueCompressor(ContextProcessor):
     min_tool_chain_length:
         Minimum number of tool-call/result message pairs before compression
         is triggered.  Default ``3``.
-    model:
-        Optional model identifier for LLM-based summarization.  When
-        ``None``, uses simple concatenation fallback.
     name:
         Processor name.  Default ``"dialogue_compressor"``.
     """
 
-    __slots__ = ("_event", "_min_tool_chain_length", "_model", "_name")
+    __slots__ = ("_event", "_min_tool_chain_length", "_name")
 
     def __init__(
         self,
         *,
         min_tool_chain_length: int = 3,
-        model: str | None = None,
         name: str = "dialogue_compressor",
     ) -> None:
         super().__init__("pre_llm_call", name=name)
         self._min_tool_chain_length = min_tool_chain_length
-        self._model = model
 
     @property
     def min_tool_chain_length(self) -> int:
         """Minimum chain length before compression."""
         return self._min_tool_chain_length
-
-    @property
-    def model(self) -> str | None:
-        """Model identifier for LLM summarization, or ``None``."""
-        return self._model
 
     async def process(self, ctx: Context, payload: dict[str, Any]) -> None:
         history: list[Any] | None = ctx.state.get("history")
@@ -494,71 +374,3 @@ class DialogueCompressor(ContextProcessor):
         )
 
 
-class RoundWindowProcessor(ContextProcessor):
-    """Keeps the last *N* conversation rounds plus all system messages.
-
-    Fires on ``"pre_llm_call"``.  A *round* is a user message followed by
-    everything up to (but not including) the next user message — typically
-    an assistant reply and any interleaved tool-call/tool-result messages.
-
-    System messages are always preserved regardless of windowing.
-
-    Parameters
-    ----------
-    max_rounds:
-        Maximum number of conversation rounds to retain.  Default ``20``.
-    name:
-        Processor name.  Default ``"round_window"``.
-    """
-
-    __slots__ = ("_event", "_max_rounds", "_name")
-
-    def __init__(self, *, max_rounds: int = 20, name: str = "round_window") -> None:
-        super().__init__("pre_llm_call", name=name)
-        self._max_rounds = max_rounds
-
-    @property
-    def max_rounds(self) -> int:
-        """Maximum number of conversation rounds to retain."""
-        return self._max_rounds
-
-    async def process(self, ctx: Context, payload: dict[str, Any]) -> None:
-        history: list[Any] | None = ctx.state.get("history")
-        if not history:
-            return
-
-        system_msgs: list[Any] = []
-        rounds: list[list[Any]] = []
-        current_round: list[Any] = []
-
-        for msg in history:
-            role = msg.get("role") if isinstance(msg, dict) else getattr(msg, "role", None)
-
-            if role == "system":
-                system_msgs.append(msg)
-                continue
-
-            if role == "user":
-                if current_round:
-                    rounds.append(current_round)
-                current_round = [msg]
-            else:
-                current_round.append(msg)
-
-        if current_round:
-            rounds.append(current_round)
-
-        if len(rounds) <= self._max_rounds:
-            return
-
-        kept_rounds = rounds[-self._max_rounds :]
-        result: list[Any] = list(system_msgs)
-        for rnd in kept_rounds:
-            result.extend(rnd)
-
-        history[:] = result
-        logger.debug(
-            "RoundWindowProcessor: windowed from %d to %d rounds",
-            len(rounds),
-            self._max_rounds,
-        )

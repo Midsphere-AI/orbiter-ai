@@ -6,13 +6,11 @@ from typing import Any
 
 import pytest
 
-from exo.context.config import ContextConfig  # pyright: ignore[reportMissingImports]
 from exo.context.context import Context  # pyright: ignore[reportMissingImports]
 from exo.context.processor import (  # pyright: ignore[reportMissingImports]
     ContextProcessor,
     ProcessorError,
     ProcessorPipeline,
-    SummarizeProcessor,
     ToolResultOffloader,
 )
 
@@ -238,69 +236,6 @@ class TestPipelineFire:
         assert len(proc_after.calls) == 0
 
 
-# ── SummarizeProcessor tests ────────────────────────────────────────
-
-
-class TestSummarizeProcessor:
-    def test_defaults(self) -> None:
-        proc = SummarizeProcessor()
-        assert proc.event == "pre_llm_call"
-        assert proc.name == "summarize"
-
-    async def test_no_history(self) -> None:
-        proc = SummarizeProcessor()
-        ctx = _make_ctx()
-        await proc.process(ctx, {})
-        assert ctx.state.get("needs_summary") is None
-
-    async def test_history_below_threshold(self) -> None:
-        proc = SummarizeProcessor()
-        config = ContextConfig(summary_threshold=10)
-        ctx = Context("test", config=config)
-        history = [{"role": "user", "content": f"msg {i}"} for i in range(5)]
-        ctx.state.set("history", history)
-        await proc.process(ctx, {})
-        assert ctx.state.get("needs_summary") is None
-
-    async def test_history_at_threshold(self) -> None:
-        proc = SummarizeProcessor()
-        config = ContextConfig(summary_threshold=5)
-        ctx = Context("test", config=config)
-        history = [{"role": "user", "content": f"msg {i}"} for i in range(5)]
-        ctx.state.set("history", history)
-        await proc.process(ctx, {})
-        assert ctx.state.get("needs_summary") is None
-
-    async def test_history_exceeds_threshold(self) -> None:
-        proc = SummarizeProcessor()
-        config = ContextConfig(summary_threshold=3)
-        ctx = Context("test", config=config)
-        history = [{"role": "user", "content": f"msg {i}"} for i in range(7)]
-        ctx.state.set("history", history)
-        await proc.process(ctx, {})
-        assert ctx.state.get("needs_summary") is True
-        candidates = ctx.state.get("summary_candidates")
-        assert len(candidates) == 4  # 7 - 3 = 4 excess
-        assert candidates[0]["content"] == "msg 0"
-        assert candidates[3]["content"] == "msg 3"
-
-    async def test_with_pipeline(self) -> None:
-        pipeline = ProcessorPipeline()
-        pipeline.register(SummarizeProcessor())
-        config = ContextConfig(summary_threshold=2)
-        ctx = Context("test", config=config)
-        ctx.state.set(
-            "history",
-            [
-                {"role": "user", "content": "a"},
-                {"role": "assistant", "content": "b"},
-                {"role": "user", "content": "c"},
-            ],
-        )
-        await pipeline.fire("pre_llm_call", ctx)
-        assert ctx.state.get("needs_summary") is True
-
-
 # ── ToolResultOffloader tests ────────────────────────────────────────
 
 
@@ -425,23 +360,9 @@ class TestProcessorIntegration:
     async def test_full_lifecycle(self) -> None:
         """Simulate a full lifecycle with both built-in processors."""
         pipeline = ProcessorPipeline()
-        pipeline.register(SummarizeProcessor())
         pipeline.register(ToolResultOffloader(max_size=15))
 
-        config = ContextConfig(summary_threshold=2)
-        ctx = Context("lifecycle-test", config=config)
-        ctx.state.set(
-            "history",
-            [
-                {"role": "user", "content": "hi"},
-                {"role": "assistant", "content": "hello"},
-                {"role": "user", "content": "search for X"},
-            ],
-        )
-
-        # Pre-LLM: should trigger summarization
-        await pipeline.fire("pre_llm_call", ctx)
-        assert ctx.state.get("needs_summary") is True
+        ctx = Context("lifecycle-test")
 
         # Post-tool: should trigger offloading
         payload: dict[str, Any] = {

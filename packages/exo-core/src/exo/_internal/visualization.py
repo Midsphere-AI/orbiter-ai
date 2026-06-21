@@ -7,7 +7,7 @@ agents and flow topology.  Node shapes reflect type:
 - BranchNode: ``{name}`` (diamond / rhombus)
 - LoopNode: ``{{name}}`` (hexagon)
 - SwarmNode: ``[[name]]`` (subroutine)
-- ParallelGroup / SerialGroup: ``subgraph`` containing member nodes
+- ParallelGroup: ``subgraph`` containing member nodes
 """
 
 from __future__ import annotations

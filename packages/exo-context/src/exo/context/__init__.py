@@ -7,10 +7,8 @@ from exo.context.checkpoint import (  # pyright: ignore[reportMissingImports]
     CheckpointStore,
 )
 from exo.context.config import (  # pyright: ignore[reportMissingImports]
-    AutomationMode,
     ContextConfig,
     OverflowStrategy,
-    make_config,
 )
 from exo.context.context import (  # pyright: ignore[reportMissingImports]
     Context,
@@ -30,10 +28,7 @@ from exo.context.neuron import (  # pyright: ignore[reportMissingImports]
 from exo.context.processor import (  # pyright: ignore[reportMissingImports]
     ContextProcessor,
     DialogueCompressor,
-    MessageOffloader,
     ProcessorPipeline,
-    RoundWindowProcessor,
-    SummarizeProcessor,
     ToolResultOffloader,
 )
 from exo.context.prompt_builder import (  # pyright: ignore[reportMissingImports]
@@ -54,7 +49,6 @@ from exo.context.workspace import (  # pyright: ignore[reportMissingImports]
 
 __all__: list[str] = [
     "ArtifactType",
-    "AutomationMode",
     "Checkpoint",
     "CheckpointStore",
     "Context",
@@ -65,13 +59,10 @@ __all__: list[str] = [
     "ContextWindowHook",
     "ContextWindowInfo",
     "DialogueCompressor",
-    "MessageOffloader",
     "Neuron",
     "OverflowStrategy",
     "ProcessorPipeline",
     "PromptBuilder",
-    "RoundWindowProcessor",
-    "SummarizeProcessor",
     "TokenTracker",
     "ToolResultOffloader",
     "Workspace",
@@ -80,6 +71,5 @@ __all__: list[str] = [
     "get_file_tools",
     "get_knowledge_tools",
     "get_planning_tools",
-    "make_config",
     "neuron_registry",
 ]

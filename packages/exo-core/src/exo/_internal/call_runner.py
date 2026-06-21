@@ -8,12 +8,12 @@ repeatedly produces the same tool calls without making progress.
 
 from __future__ import annotations
 
-import asyncio
 from collections.abc import Sequence
 from typing import Any
 
 from exo._internal.message_builder import build_messages
 from exo._internal.planner import prepare_planned_execution
+from exo._internal.run_helpers import resolve_instructions
 from exo._internal.state import RunState
 from exo.observability.logging import get_logger  # pyright: ignore[reportMissingImports]
 from exo.types import (
@@ -99,15 +99,7 @@ async def call_runner(
         _check_loop(state, output, loop_threshold)
 
         # Build final message list for the result
-        instr: str = ""
-        raw_instr = agent.instructions
-        if callable(raw_instr):
-            if asyncio.iscoroutinefunction(raw_instr):
-                instr = str(await raw_instr(agent.name))
-            else:
-                instr = str(raw_instr(agent.name))
-        elif raw_instr:
-            instr = str(raw_instr)
+        instr = await resolve_instructions(agent)
         final_messages = build_messages(
             instr,
             list(planned_messages) if planned_messages else [],

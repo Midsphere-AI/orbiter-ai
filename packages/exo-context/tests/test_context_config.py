@@ -1,12 +1,13 @@
-"""Tests for ContextConfig and make_config factory."""
+"""Tests for ContextConfig — simplified public API and derived internal thresholds."""
+
+from __future__ import annotations
 
 import pytest
 from pydantic import ValidationError
 
 from exo.context.config import (  # pyright: ignore[reportMissingImports]
-    AutomationMode,
     ContextConfig,
-    make_config,
+    OverflowStrategy,
 )
 
 # ── Defaults ──────────────────────────────────────────────────────────
@@ -15,64 +16,113 @@ from exo.context.config import (  # pyright: ignore[reportMissingImports]
 class TestContextConfigDefaults:
     def test_default_values(self) -> None:
         cfg = ContextConfig()
-        assert cfg.mode == AutomationMode.COPILOT
-        assert cfg.history_rounds == 20
-        assert cfg.summary_threshold == 10
-        assert cfg.offload_threshold == 50
-        assert cfg.enable_retrieval is False
+        assert cfg.limit == 20
+        assert cfg.overflow == OverflowStrategy.SUMMARIZE
+        assert cfg.keep_recent == 5
+        assert cfg.token_pressure == 0.8
+        assert cfg.cache is False
         assert cfg.neuron_names == ()
         assert cfg.extra == {}
-        assert cfg.token_budget_trigger == 0.8
-
-    def test_token_budget_trigger_default(self) -> None:
-        cfg = ContextConfig()
-        assert cfg.token_budget_trigger == 0.8
-
-    def test_token_budget_trigger_custom(self) -> None:
-        cfg = ContextConfig(token_budget_trigger=0.5)
-        assert cfg.token_budget_trigger == 0.5
-
-    def test_token_budget_trigger_out_of_range(self) -> None:
-        with pytest.raises(ValidationError):
-            ContextConfig(token_budget_trigger=1.5)
 
     def test_frozen(self) -> None:
         cfg = ContextConfig()
         with pytest.raises(ValidationError):
-            cfg.mode = AutomationMode.PILOT  # type: ignore[misc]
+            cfg.limit = 99  # type: ignore[misc]
 
-    def test_mode_string_coercion(self) -> None:
-        cfg = ContextConfig(mode="navigator")  # type: ignore[arg-type]
-        assert cfg.mode == AutomationMode.NAVIGATOR
+    def test_overflow_string_coercion(self) -> None:
+        cfg = ContextConfig(overflow="truncate")  # type: ignore[arg-type]
+        assert cfg.overflow == OverflowStrategy.TRUNCATE
+
+    def test_token_pressure_default(self) -> None:
+        cfg = ContextConfig()
+        assert cfg.token_pressure == 0.8
+
+    def test_token_pressure_custom(self) -> None:
+        cfg = ContextConfig(token_pressure=0.5)
+        assert cfg.token_pressure == 0.5
+
+    def test_token_pressure_out_of_range(self) -> None:
+        with pytest.raises(ValidationError):
+            ContextConfig(token_pressure=1.5)
+
+    def test_cache_true(self) -> None:
+        cfg = ContextConfig(cache=True)
+        assert cfg.cache is True
+
+
+# ── Derived internal thresholds ───────────────────────────────────────
+
+
+class TestDerivedThresholds:
+    """Assert that internal windowing thresholds are correctly derived from public fields.
+
+    These are the thresholds actually used by the context windowing engine.
+    """
+
+    def test_default_config_internal_thresholds(self) -> None:
+        """ContextConfig() → same windowing values as the old default ContextConfig()."""
+        cfg = ContextConfig()
+        # history_rounds == limit == 20
+        assert cfg._history_rounds == 20
+        # summary_threshold == limit == 20 (old new-API path also set this to limit)
+        assert cfg._summary_threshold == 20
+        # offload_threshold == max(limit, limit*2.5) == max(20,50) == 50
+        assert cfg._offload_threshold == 50
+        # token_budget_trigger == token_pressure == 0.8
+        assert cfg._token_budget_trigger == 0.8
+        # enable_snapshots == cache == False
+        assert cfg._enable_snapshots is False
+
+    def test_custom_limit_30_truncate(self) -> None:
+        """ContextConfig(limit=30, overflow='truncate') — truncate thresholds are high."""
+        cfg = ContextConfig(limit=30, overflow="truncate")
+        assert cfg._history_rounds == 30
+        assert cfg._summary_threshold == 10_000
+        assert cfg._offload_threshold == 10_000
+
+    def test_overflow_none_thresholds(self) -> None:
+        """overflow='none' sets all windowing thresholds to 10_000 (effectively disabled)."""
+        cfg = ContextConfig(limit=20, overflow="none")
+        assert cfg._history_rounds == 10_000
+        assert cfg._summary_threshold == 10_000
+        assert cfg._offload_threshold == 10_000
+
+    def test_overflow_hook_thresholds(self) -> None:
+        """overflow='hook' disables built-in cascade — all thresholds are 10_000."""
+        cfg = ContextConfig(overflow="hook")
+        assert cfg._history_rounds == 10_000
+        assert cfg._summary_threshold == 10_000
+        assert cfg._offload_threshold == 10_000
+
+    def test_summarize_offload_scales_with_limit(self) -> None:
+        """Offload threshold = max(limit, int(limit * 2.5)) for summarize strategy."""
+        cfg = ContextConfig(limit=40, overflow="summarize")
+        assert cfg._offload_threshold == max(40, int(40 * 2.5))  # == 100
+
+    def test_cache_maps_to_enable_snapshots(self) -> None:
+        cfg = ContextConfig(cache=True)
+        assert cfg._enable_snapshots is True
+
+    def test_token_pressure_maps_to_budget_trigger(self) -> None:
+        cfg = ContextConfig(token_pressure=0.6)
+        assert cfg._token_budget_trigger == 0.6
 
 
 # ── Validation ────────────────────────────────────────────────────────
 
 
 class TestContextConfigValidation:
-    def test_history_rounds_positive(self) -> None:
-        with pytest.raises(ValidationError, match="history_rounds"):
-            ContextConfig(history_rounds=0)
+    def test_limit_positive(self) -> None:
+        with pytest.raises(ValidationError, match="limit"):
+            ContextConfig(limit=0)
 
-    def test_summary_threshold_positive(self) -> None:
-        with pytest.raises(ValidationError, match="summary_threshold"):
-            ContextConfig(summary_threshold=0)
+    def test_keep_recent_positive(self) -> None:
+        with pytest.raises(ValidationError, match="keep_recent"):
+            ContextConfig(keep_recent=0)
 
-    def test_offload_threshold_positive(self) -> None:
-        with pytest.raises(ValidationError, match="offload_threshold"):
-            ContextConfig(offload_threshold=0)
-
-    def test_summary_must_be_lte_offload(self) -> None:
-        with pytest.raises(ValueError, match=r"summary_threshold.*must be <= offload_threshold"):
-            ContextConfig(summary_threshold=60, offload_threshold=50)
-
-    def test_summary_equals_offload_ok(self) -> None:
-        cfg = ContextConfig(summary_threshold=50, offload_threshold=50)
-        assert cfg.summary_threshold == cfg.offload_threshold
-
-    def test_invalid_mode(self) -> None:
+    def test_invalid_overflow(self) -> None:
         with pytest.raises(ValidationError):
-            ContextConfig(mode="invalid")  # type: ignore[arg-type]
+            ContextConfig(overflow="invalid")  # type: ignore[arg-type]
 
 
 # ── Neuron names ──────────────────────────────────────────────────────
@@ -111,60 +161,23 @@ class TestExtra:
 
 class TestSerialization:
     def test_model_dump(self) -> None:
-        cfg = ContextConfig(mode="pilot", neuron_names=["a", "b"])  # type: ignore[arg-type]
+        cfg = ContextConfig(limit=30, neuron_names=["a", "b"])  # type: ignore[arg-type]
         d = cfg.model_dump()
-        assert d["mode"] == "pilot"
+        assert d["limit"] == 30
         assert d["neuron_names"] == ("a", "b")
 
     def test_model_dump_json(self) -> None:
         cfg = ContextConfig()
         json_str = cfg.model_dump_json()
-        assert '"copilot"' in json_str
+        assert '"summarize"' in json_str
 
     def test_roundtrip(self) -> None:
         original = ContextConfig(
-            mode="navigator",
-            history_rounds=5,
-            enable_retrieval=True,
+            limit=15,
+            overflow="truncate",
+            cache=True,
             neuron_names=["system", "task"],  # type: ignore[arg-type]
         )
         d = original.model_dump()
         restored = ContextConfig(**d)
         assert restored == original
-
-
-# ── make_config factory ──────────────────────────────────────────────
-
-
-class TestMakeConfig:
-    def test_pilot_defaults(self) -> None:
-        cfg = make_config("pilot")
-        assert cfg.mode == AutomationMode.PILOT
-        assert cfg.history_rounds == 100
-        assert cfg.summary_threshold == 100
-        assert cfg.offload_threshold == 100
-        assert cfg.enable_retrieval is False
-
-    def test_copilot_defaults(self) -> None:
-        cfg = make_config("copilot")
-        assert cfg.mode == AutomationMode.COPILOT
-        assert cfg.history_rounds == 20
-        assert cfg.summary_threshold == 10
-        assert cfg.offload_threshold == 50
-
-    def test_navigator_defaults(self) -> None:
-        cfg = make_config("navigator")
-        assert cfg.mode == AutomationMode.NAVIGATOR
-        assert cfg.history_rounds == 10
-        assert cfg.summary_threshold == 5
-        assert cfg.offload_threshold == 20
-        assert cfg.enable_retrieval is True
-
-    def test_override_presets(self) -> None:
-        cfg = make_config("navigator", history_rounds=50)
-        assert cfg.mode == AutomationMode.NAVIGATOR
-        assert cfg.history_rounds == 50
-
-    def test_enum_input(self) -> None:
-        cfg = make_config(AutomationMode.PILOT)
-        assert cfg.mode == AutomationMode.PILOT

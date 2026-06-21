@@ -13,6 +13,12 @@ from pydantic import BaseModel
 
 from exo._internal.message_builder import build_messages
 from exo._internal.output_parser import OutputParseError, parse_response, parse_tool_arguments
+from exo._internal.run_helpers import (
+    check_token_budget_pressure,
+    drain_ephemeral_messages,
+    drain_injected_messages,
+    resolve_instructions,
+)
 from exo.config import (
     parse_model_string,
     validate_budget_awareness,
@@ -127,40 +133,45 @@ def _drain_task_loop_queue(queue: TaskLoopQueue, messages: list) -> None:  # typ
 
 
 
-def _make_default_long_term() -> Any:
+def _make_default_long_term(db_path: str | None = None) -> Any:
     """Create the default long-term memory store.
 
-    Tries ChromaVectorMemoryStore (semantic search) when chromadb is importable.
-    Falls back to SQLiteMemoryStore with a warning when chromadb is not installed.
+    Returns a :class:`SQLiteMemoryStore` using a per-call temp file when
+    *db_path* is ``None``, or the given path for durable on-disk storage.
+    The SQLite file is created lazily on first use — no disk I/O at
+    construction time.
+
+    Args:
+        db_path: Explicit path for the SQLite database.  When ``None``
+            a fresh temp file path is generated (the file is created on
+            first use, not here).
     """
-    try:
-        import chromadb as _chromadb  # noqa: F401  # pyright: ignore[reportMissingImports]
+    import tempfile
 
-        from exo.memory.backends.vector import (  # pyright: ignore[reportMissingImports]
-            ChromaVectorMemoryStore,
-            OpenAIEmbeddingProvider,
-        )
+    from exo.memory.backends.sqlite import (  # pyright: ignore[reportMissingImports]
+        SQLiteMemoryStore,
+    )
 
-        return ChromaVectorMemoryStore(OpenAIEmbeddingProvider())
-    except ImportError:
-        _log.warning(
-            "chromadb not installed; falling back to keyword search. "
-            "Install with: pip install chromadb"
-        )
-        from exo.memory.backends.sqlite import (
-            SQLiteMemoryStore,  # pyright: ignore[reportMissingImports]
-        )
-
-        return SQLiteMemoryStore()
+    if db_path is None:
+        # Build a path inside a new temp directory; the file itself is not
+        # created here — SQLiteMemoryStore opens the connection on first use.
+        tmp_dir = tempfile.mkdtemp(prefix="exo_agent_")
+        db_path = f"{tmp_dir}/memory.db"
+    return SQLiteMemoryStore(db_path)
 
 
-def _make_default_memory() -> Any:
-    """Try to create a default AgentMemory. Returns None if exo-memory is not installed."""
+def _make_default_memory(db_path: str | None = None) -> Any:
+    """Try to create a default AgentMemory. Returns None if exo-memory is not installed.
+
+    Args:
+        db_path: Optional SQLite database path for durable long-term memory.
+            When ``None``, a temp-dir path is used (file created on first use).
+    """
     try:
         from exo.memory.base import AgentMemory  # pyright: ignore[reportMissingImports]
         from exo.memory.short_term import ShortTermMemory  # pyright: ignore[reportMissingImports]
 
-        return AgentMemory(short_term=ShortTermMemory(), long_term=_make_default_long_term())
+        return AgentMemory(short_term=ShortTermMemory(), long_term=_make_default_long_term(db_path))
     except ImportError:
         return None
 
@@ -215,27 +226,34 @@ async def _inject_long_term_knowledge(
 
 
 def _make_default_context() -> Any:
-    """Try to create a default Context(mode='copilot'). Returns None if not installed."""
+    """Try to create a default Context. Returns None if exo-context is not installed."""
     try:
-        from exo.context.config import make_config  # pyright: ignore[reportMissingImports]
+        from exo.context.config import ContextConfig  # pyright: ignore[reportMissingImports]
         from exo.context.context import Context as CtxClass  # pyright: ignore[reportMissingImports]
 
-        cfg = make_config("copilot")
+        cfg = ContextConfig()
         return CtxClass(task_id="__default__", config=cfg)
     except ImportError:
         return None
 
 
 def _make_context_from_mode(mode: Any) -> Any:
-    """Create a Context from a mode string or AutomationMode enum.
+    """Create a Context from a mode string.
 
+    Accepted modes: "pilot", "copilot", "navigator".
     Returns None if exo-context is not installed.
     """
     try:
-        from exo.context.config import make_config  # pyright: ignore[reportMissingImports]
+        from exo.context.config import ContextConfig  # pyright: ignore[reportMissingImports]
         from exo.context.context import Context as CtxClass  # pyright: ignore[reportMissingImports]
 
-        cfg = make_config(mode)
+        mode_str = str(mode).lower()
+        if mode_str == "pilot":
+            cfg = ContextConfig(limit=100, overflow="summarize")
+        elif mode_str == "navigator":
+            cfg = ContextConfig(limit=10, overflow="summarize", cache=True)
+        else:  # copilot (default)
+            cfg = ContextConfig()
         return CtxClass(task_id="__default__", config=cfg)
     except ImportError:
         return None
@@ -373,9 +391,9 @@ async def _apply_context_windowing(
     # Resolve config attrs: supports both Context (has .config) and ContextConfig directly
     _cfg = getattr(context, "config", context)
     overflow_strategy: str = getattr(_cfg, "overflow", "summarize")
-    history_rounds: int = getattr(_cfg, "history_rounds", 20)
-    summary_threshold: int = getattr(_cfg, "summary_threshold", 10)
-    offload_threshold: int = getattr(_cfg, "offload_threshold", 50)
+    history_rounds: int = getattr(_cfg, "_history_rounds", getattr(_cfg, "history_rounds", 20))
+    summary_threshold: int = getattr(_cfg, "_summary_threshold", getattr(_cfg, "summary_threshold", 10))
+    offload_threshold: int = getattr(_cfg, "_offload_threshold", getattr(_cfg, "offload_threshold", 50))
     keep_recent_cfg: int = getattr(_cfg, "keep_recent", 5)
 
     actions: list[_ContextAction] = []
@@ -661,14 +679,27 @@ class Agent:
             human approval before executing. Defaults to ``None`` (no gate).
         emit_mcp_progress: Whether MCP progress events should be emitted.
         injected_tool_args: Schema-only tool arguments exposed to the LLM.
-        allow_parallel_subagents: Enables the future parallel-subagent tool
-            contract without changing current defaults.
-        max_parallel_subagents: Maximum child jobs allowed per parallel
-            sub-agent call.
-        memory: Optional memory store for persistent memory across sessions.
+        store: Memory store shorthand (batteries-included convenience).  Takes
+            precedence over *memory* when both are supplied (raises if both are
+            non-sentinel values).  Accepted values:
+
+            - ``"sqlite"`` (default): SQLite in a per-agent temp directory;
+              lazily created on first use — no disk I/O at construction time.
+            - ``"<path>.db"`` / any string ending in ``.db``: durable SQLite at
+              that path.
+            - ``"memory"``: in-process :class:`ShortTermMemory` only (no file).
+            - a :class:`MemoryStore` instance: use it directly as the long-term
+              store.
+            - ``False`` / ``None``: disable memory entirely.
+        memory: Legacy memory kwarg.  Accepts an :class:`AgentMemory` (or any
+            memory store), ``None`` to disable, or the sentinel default to
+            auto-create.  When *store* is also provided they must not conflict.
         context: Optional context engine for hierarchical state and prompt building.
-        allow_self_spawn: When ``True``, automatically adds a ``spawn_self(task)``
-            tool that lets the agent spin up copies of itself for parallel sub-tasks.
+        allow_self_spawn: When ``True`` (default), automatically adds a
+            ``spawn_self(tasks)`` tool that lets the agent spin up copies of
+            itself for parallel sub-tasks.  Set ``subagents=False`` to disable.
+        subagents: Convenience flag that overrides *allow_self_spawn*.  Pass
+            ``subagents=False`` to disable the ``spawn_self`` tool.
         max_spawn_depth: Maximum recursive spawn depth (default 3). When a spawned
             agent's depth equals or exceeds this value, ``spawn_self`` returns an
             error string instead of spawning.
@@ -703,13 +734,15 @@ class Agent:
         injected_tool_args: dict[str, str] | None = None,
         allow_parallel_subagents: bool = False,
         max_parallel_subagents: int = 3,
+        store: Any = _MEMORY_UNSET,
         memory: Any = _MEMORY_UNSET,
         context_mode: Any = _CONTEXT_UNSET,
         context: Any = _CONTEXT_UNSET,
         context_limit: int | None = None,
         overflow: str | None = None,
         cache: bool | None = None,
-        allow_self_spawn: bool = False,
+        allow_self_spawn: bool = True,
+        subagents: bool | None = None,
         max_spawn_depth: int = 3,
         max_spawn_children: int = 4,
         ptc: bool = False,
@@ -737,12 +770,15 @@ class Agent:
         self.budget_awareness = validate_budget_awareness(budget_awareness)
         self.emit_mcp_progress = emit_mcp_progress
         self.injected_tool_args = validate_injected_tool_args(injected_tool_args)
-        self.allow_parallel_subagents = allow_parallel_subagents
-        self.max_parallel_subagents = validate_max_parallel_subagents(max_parallel_subagents)
+        # Deprecated no-op flags — stored for backward compat / serialization round-trips;
+        # they have never influenced agent behaviour and will be removed in a future release.
+        self.allow_parallel_subagents: bool = allow_parallel_subagents
+        self.max_parallel_subagents: int = validate_max_parallel_subagents(max_parallel_subagents)
         normalized_hitl_tools = _normalize_hitl_tools(hitl_tools)
         self.bare_tools: bool = bare_tools
-        # Self-spawn: opt-in parallel sub-task spawning
-        self.allow_self_spawn: bool = allow_self_spawn
+        # Self-spawn: on by default; subagents= convenience flag overrides allow_self_spawn.
+        _effective_self_spawn = allow_self_spawn if subagents is None else bool(subagents)
+        self.allow_self_spawn: bool = _effective_self_spawn
         self.max_spawn_depth: int = max_spawn_depth
         self.max_spawn_children: int = validate_max_spawn_children(max_spawn_children)
         self.ptc: bool = ptc
@@ -766,12 +802,58 @@ class Agent:
                 self._tool_resolver = DictToolResolver(tool_resolver)
             else:
                 self._tool_resolver = tool_resolver
-        # Auto-create AgentMemory when not explicitly specified; None disables memory
-        if memory is _MEMORY_UNSET:
+        # ---- Memory resolution ------------------------------------------------
+        # Priority: store= > memory= > auto-create
+        # `store=` is the new batteries-included shorthand; `memory=` is legacy.
+        if store is not _MEMORY_UNSET and memory is not _MEMORY_UNSET:
+            raise AgentError(
+                "Cannot combine 'store' and 'memory' kwargs. "
+                "Use 'store=' for the recommended shorthand, or 'memory=' for legacy usage."
+            )
+        if store is not _MEMORY_UNSET:
+            # Resolve store= shorthand
+            resolved_memory: Any
+            if store is False or store is None:
+                resolved_memory = None
+            elif store == "sqlite":
+                resolved_memory = _make_default_memory()
+            elif store == "memory":
+                # In-process only: ShortTermMemory as both short and long term
+                try:
+                    from exo.memory.base import AgentMemory  # pyright: ignore[reportMissingImports]
+                    from exo.memory.short_term import (
+                        ShortTermMemory,  # pyright: ignore[reportMissingImports]
+                    )
+
+                    resolved_memory = AgentMemory(
+                        short_term=ShortTermMemory(),
+                        long_term=ShortTermMemory(),
+                    )
+                except ImportError:
+                    resolved_memory = None
+            elif isinstance(store, str):
+                # Treat as a durable SQLite path
+                resolved_memory = _make_default_memory(db_path=store)
+            else:
+                # Assume it's a MemoryStore instance — wrap in AgentMemory
+                try:
+                    from exo.memory.base import AgentMemory  # pyright: ignore[reportMissingImports]
+                    from exo.memory.short_term import (
+                        ShortTermMemory,  # pyright: ignore[reportMissingImports]
+                    )
+
+                    resolved_memory = AgentMemory(short_term=ShortTermMemory(), long_term=store)
+                except ImportError:
+                    resolved_memory = None
+            memory = resolved_memory
+            self._memory_is_auto: bool = False
+        elif memory is _MEMORY_UNSET:
+            # Auto-create: SQLite in a temp dir (lazy — no I/O at construction)
             memory = _make_default_memory()
-            self._memory_is_auto: bool = True
+            self._memory_is_auto = True
         else:
             self._memory_is_auto = False
+        # -----------------------------------------------------------------------
         self.memory: Any = memory
         self.conversation_id: str | None = None
         # Resolve context: new shorthand params → context_mode → context → default.
@@ -853,6 +935,10 @@ class Agent:
         # Lock for asyncio-safe runtime mutations (add_tool, add_mcp_server, add_handoff)
         self._tools_lock: asyncio.Lock = asyncio.Lock()
 
+        # Task loop queue: external callers push ABORT/STEER/FOLLOWUP events here;
+        # the run loop drains this queue before each LLM call.
+        self.task_loop_queue: TaskLoopQueue = TaskLoopQueue()
+
         # Queue for live message injection into a running agent
         self._injected_messages: asyncio.Queue[str] = asyncio.Queue()
 
@@ -862,8 +948,8 @@ class Agent:
         # Queue for tool-emitted streaming events (drained by run.stream())
         self._event_queue: asyncio.Queue = asyncio.Queue()
 
-        # Auto-register spawn_self tool when opt-in self-spawn is enabled
-        if allow_self_spawn:
+        # Auto-register spawn_self tool when self-spawn is enabled
+        if _effective_self_spawn:
             self._register_tool(self._make_spawn_self_tool())
 
         self.hitl_tools = normalized_hitl_tools
@@ -1385,7 +1471,7 @@ class Agent:
         if self._memory_persistence is None or conversation_id is None or self.context is None:
             return
         _cfg = getattr(self.context, "config", self.context)
-        if not getattr(_cfg, "enable_snapshots", False):
+        if not getattr(_cfg, "_enable_snapshots", getattr(_cfg, "enable_snapshots", False)):
             return
         try:
             # Append the final assistant message to snapshot if available.
@@ -1777,14 +1863,7 @@ class Agent:
     ) -> AgentOutput:
         """Inner run implementation; called by :meth:`run` after provider setup."""
         # Resolve instructions (may be async callable)
-        raw_instr = self.instructions
-        if callable(raw_instr):
-            if asyncio.iscoroutinefunction(raw_instr):
-                instructions = await raw_instr(self.name)
-            else:
-                instructions = raw_instr(self.name)
-        else:
-            instructions = raw_instr
+        instructions = await resolve_instructions(self)
 
         # ---- Skills: inject catalog of available skills ----
         if self._skill_registry is not None:
@@ -1824,7 +1903,7 @@ class Agent:
             _ctx_cfg = getattr(self.context, "config", self.context) if self.context else None
             if (
                 _ctx_cfg is not None
-                and getattr(_ctx_cfg, "enable_snapshots", False)
+                and getattr(_ctx_cfg, "_enable_snapshots", getattr(_ctx_cfg, "enable_snapshots", False))
                 and not messages  # external messages invalidate snapshot
             ):
                 try:
@@ -1934,27 +2013,18 @@ class Agent:
                         msg_list, _last_input, _context_window_tokens
                     )
 
+            # ---- Drain TaskLoopQueue (ABORT / STEER / FOLLOWUP events) ----
+            if self.task_loop_queue:
+                _drain_task_loop_queue(self.task_loop_queue, msg_list)
+
             # ---- Drain injected messages ----
-            while not self._injected_messages.empty():
-                try:
-                    _injected = self._injected_messages.get_nowait()
-                    msg_list.append(UserMessage(content=_injected))
-                    _log.debug("injected message into step %d: %.50s...", _step, _injected)
-                except asyncio.QueueEmpty:
-                    break
+            drain_injected_messages(self, msg_list)
 
             # ---- Drain ephemeral messages (visible for this call only) ----
             # Ephemerals are collected into a separate batch and concatenated
             # for the LLM call.  msg_list itself is never mutated, keeping the
             # message history append-only (preserves KV-cache prefix).
-            _ephemeral_batch: list[Message] = []
-            while not self._ephemeral_messages.empty():
-                try:
-                    _ephemeral_batch.append(self._ephemeral_messages.get_nowait())
-                    _log.debug("ephemeral message into step %d", _step)
-                except asyncio.QueueEmpty:
-                    break
-
+            _ephemeral_batch = drain_ephemeral_messages(self)
             _call_messages = msg_list + _ephemeral_batch if _ephemeral_batch else msg_list
             output = await self._call_llm(_call_messages, tool_schemas, provider, max_retries)
 
@@ -2012,24 +2082,19 @@ class Agent:
             # Apply context windowing every step (CONTEXT_WINDOW hook fires each turn).
             # Token budget check sets force_summarize for aggressive compression.
             if self.context is not None:
-                _force_summarize = False
-                if (
-                    _token_tracker is not None
-                    and _context_window_tokens
-                    and output.usage.input_tokens > 0
-                ):
-                    _fill_ratio = output.usage.input_tokens / _context_window_tokens
-                    _ctx_cfg = getattr(self.context, "config", self.context)
-                    _trigger = getattr(_ctx_cfg, "token_budget_trigger", 0.8)
-                    if _fill_ratio > _trigger:
-                        _log.info(
-                            "token budget trigger: %.0f%% full (%d/%d tokens), forcing context reduction on '%s'",
-                            100.0 * _fill_ratio,
-                            output.usage.input_tokens,
-                            _context_window_tokens,
-                            self.name,
-                        )
-                        _force_summarize = True
+                _force_summarize, _fill_ratio, _trigger = check_token_budget_pressure(
+                    output.usage.input_tokens if _token_tracker is not None else 0,
+                    _context_window_tokens,
+                    self.context,
+                )
+                if _force_summarize:
+                    _log.info(
+                        "token budget trigger: %.0f%% full (%d/%d tokens), forcing context reduction on '%s'",
+                        100.0 * _fill_ratio,
+                        output.usage.input_tokens,
+                        _context_window_tokens,
+                        self.name,
+                    )
                 msg_list, _ = await _apply_context_windowing(
                     msg_list,
                     self.context,
@@ -2455,7 +2520,7 @@ class Agent:
             injected_tool_args=data.get("injected_tool_args"),
             allow_parallel_subagents=data.get("allow_parallel_subagents", False),
             max_parallel_subagents=data.get("max_parallel_subagents", 3),
-            allow_self_spawn=data.get("allow_self_spawn", False),
+            allow_self_spawn=data.get("allow_self_spawn", True),
             max_spawn_depth=data.get("max_spawn_depth", 3),
             max_spawn_children=data.get("max_spawn_children", 4),
             ptc=data.get("ptc", False),

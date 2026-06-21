@@ -37,13 +37,31 @@ def _mock_provider(content: str = "done") -> AsyncMock:
 
 
 class TestSelfSpawnInit:
-    def test_allow_self_spawn_false_by_default(self) -> None:
-        """Default agent has no spawn_self tool."""
+    def test_allow_self_spawn_true_by_default(self) -> None:
+        """Default agent has spawn_self tool (allow_self_spawn=True by default)."""
         agent = Agent(name="bot", memory=None, context=None)
+        assert "spawn_self" in agent.tools
+        assert agent.allow_self_spawn is True
+
+    def test_allow_self_spawn_false_disables_tool(self) -> None:
+        """allow_self_spawn=False removes spawn_self tool."""
+        agent = Agent(name="bot", memory=None, context=None, allow_self_spawn=False)
         assert "spawn_self" not in agent.tools
         assert agent.allow_self_spawn is False
 
-    def test_allow_self_spawn_true_adds_tool(self) -> None:
+    def test_subagents_false_disables_spawn_self(self) -> None:
+        """subagents=False convenience flag disables spawn_self."""
+        agent = Agent(name="bot", memory=None, context=None, subagents=False)
+        assert "spawn_self" not in agent.tools
+        assert agent.allow_self_spawn is False
+
+    def test_subagents_true_enables_spawn_self(self) -> None:
+        """subagents=True convenience flag enables spawn_self."""
+        agent = Agent(name="bot", memory=None, context=None, subagents=True)
+        assert "spawn_self" in agent.tools
+        assert agent.allow_self_spawn is True
+
+    def test_allow_self_spawn_explicit_true_adds_tool(self) -> None:
         """allow_self_spawn=True registers a spawn_self tool."""
         agent = Agent(name="bot", memory=None, context=None, allow_self_spawn=True)
         assert "spawn_self" in agent.tools

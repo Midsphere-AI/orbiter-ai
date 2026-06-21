@@ -689,7 +689,7 @@ class Swarm:
         """Execute agents sequentially, chaining output→input.
 
         Supports regular agents, group nodes (``ParallelGroup``,
-        ``SerialGroup``), ``BranchNode`` (conditional routing), and
+        ``ParallelGroup``), ``BranchNode`` (conditional routing), and
         ``LoopNode`` (iteration).  Groups have an ``is_group`` attribute
         and their own ``run()`` method.
 

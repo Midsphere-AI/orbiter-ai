@@ -52,8 +52,12 @@ class TestAgentCreation:
         assert agent.instructions == ""
         # retrieve_artifact is always auto-registered (needed for threshold-based offloading)
         assert "retrieve_artifact" in agent.tools
+        # spawn_self is auto-registered by default (allow_self_spawn=True)
+        assert "spawn_self" in agent.tools
         # 7 context tools are auto-loaded when context is active (default)
-        _CONTEXT_TOOL_NAMES = {
+        auto_tool_names = {
+            "retrieve_artifact",
+            "spawn_self",
             "add_todo",
             "complete_todo",
             "get_todo",
@@ -62,9 +66,7 @@ class TestAgentCreation:
             "search_knowledge",
             "read_file",
         }
-        non_auto = [
-            k for k in agent.tools if k != "retrieve_artifact" and k not in _CONTEXT_TOOL_NAMES
-        ]
+        non_auto = [k for k in agent.tools if k not in auto_tool_names]
         assert len(non_auto) == 0
         assert agent.handoffs == {}
         assert agent.output_type is None
@@ -111,8 +113,8 @@ class TestAgentCreation:
         assert agent.provider_name == "anthropic"
         assert agent.model_name == "claude-sonnet-4-20250514"
         assert agent.instructions == "Research things."
-        # 2 user tools + retrieve_artifact + 7 context tools (auto-loaded)
-        assert len(agent.tools) == 10
+        # 2 user tools + retrieve_artifact + spawn_self + 7 context tools (auto-loaded)
+        assert len(agent.tools) == 11
         assert agent.output_type is ReportOutput
         assert agent.max_steps == 20
         assert agent.temperature == 0.7
@@ -180,8 +182,8 @@ class TestToolRegistration:
     def test_get_tool_schemas(self) -> None:
         agent = Agent(name="bot", tools=[greet])
         schemas = agent.get_tool_schemas()
-        # greet + retrieve_artifact + 7 context tools (auto-loaded)
-        assert len(schemas) == 9
+        # greet + retrieve_artifact + spawn_self + 7 context tools (auto-loaded)
+        assert len(schemas) == 10
         names = {s["function"]["name"] for s in schemas}
         assert "greet" in names
         assert schemas[0]["type"] == "function"
@@ -615,8 +617,8 @@ class TestAgentRun:
 
         call_args = provider.complete.call_args
         assert call_args[1]["tools"] is not None
-        # greet + retrieve_artifact + 7 context tools (auto-loaded)
-        assert len(call_args[1]["tools"]) == 9
+        # greet + retrieve_artifact + spawn_self + 7 context tools (auto-loaded)
+        assert len(call_args[1]["tools"]) == 10
 
 
 # ---------------------------------------------------------------------------
@@ -1041,8 +1043,8 @@ class TestAgentEdgeCases:
 
         schemas = agent.get_tool_schemas()
 
-        # greet + retrieve_artifact + 7 context tools; handoff should not appear
-        assert len(schemas) == 9
+        # greet + retrieve_artifact + spawn_self + 7 context tools; handoff should not appear
+        assert len(schemas) == 10
         names = [s["function"]["name"] for s in schemas]
         assert "greet" in names
         assert "helper" not in names
@@ -1407,13 +1409,10 @@ class TestLongTermKnowledgeInjection:
 
 
 class TestDefaultLongTermCreation:
-    """Tests for _make_default_long_term() chromadb auto-selection and warning."""
+    """Tests for _make_default_long_term() — always SQLite, no chromadb dependency."""
 
-    def test_chromadb_warning_when_not_installed(self, monkeypatch: Any, caplog: Any) -> None:
-        """When chromadb is not importable, warn and fall back to SQLiteMemoryStore."""
-        import logging
-        import sys
-
+    def test_default_long_term_is_sqlite(self) -> None:
+        """Default long-term store is SQLiteMemoryStore in a temp dir."""
         try:
             from exo.memory.backends.sqlite import (
                 SQLiteMemoryStore,  # pyright: ignore[reportMissingImports]
@@ -1423,16 +1422,29 @@ class TestDefaultLongTermCreation:
 
         from exo.agent import _make_default_long_term  # pyright: ignore[reportMissingImports]
 
-        # Block chromadb import so the function falls back to SQLiteMemoryStore
-        monkeypatch.setitem(sys.modules, "chromadb", None)  # type: ignore[arg-type]
-
-        with caplog.at_level(logging.WARNING, logger="exo.agent"):
-            store = _make_default_long_term()
-
+        store = _make_default_long_term()
         assert isinstance(store, SQLiteMemoryStore)
-        assert any("chromadb not installed" in rec.message for rec in caplog.records), (
-            f"Expected chromadb warning, got: {[r.message for r in caplog.records]}"
-        )
+        # Path should be inside a temp directory (lazy — file not created yet)
+        import os
+
+        assert store.db_path.endswith("memory.db")
+        assert not os.path.exists(store.db_path), "SQLite file should not be created at construction"
+
+    def test_default_long_term_with_explicit_path(self, tmp_path: Any) -> None:
+        """Explicit db_path is respected."""
+        try:
+            from exo.memory.backends.sqlite import (
+                SQLiteMemoryStore,  # pyright: ignore[reportMissingImports]
+            )
+        except ImportError:
+            pytest.skip("exo-memory not installed")
+
+        from exo.agent import _make_default_long_term  # pyright: ignore[reportMissingImports]
+
+        db_file = str(tmp_path / "custom.db")
+        store = _make_default_long_term(db_path=db_file)
+        assert isinstance(store, SQLiteMemoryStore)
+        assert store.db_path == db_file
 
 
 # ---------------------------------------------------------------------------
@@ -1590,11 +1602,11 @@ class TestAgentHistoryPersistence:
 
 class TestAgentContextDefaults:
     def test_auto_creates_copilot_context(self) -> None:
-        """Agent with no context params auto-creates Context wrapping ContextConfig(mode='copilot')."""
+        """Agent with no context params auto-creates Context wrapping ContextConfig defaults."""
         try:
             from exo.context.config import (  # pyright: ignore[reportMissingImports]
-                AutomationMode,
                 ContextConfig,
+                OverflowStrategy,
             )
             from exo.context.context import Context  # pyright: ignore[reportMissingImports]
         except ImportError:
@@ -1603,7 +1615,8 @@ class TestAgentContextDefaults:
         agent = Agent(name="bot")
         assert isinstance(agent.context, Context)
         assert isinstance(agent.context.config, ContextConfig)
-        assert agent.context.config.mode == AutomationMode.COPILOT
+        assert agent.context.config.overflow == OverflowStrategy.SUMMARIZE
+        assert agent.context.config.limit == 20
         assert agent._context_is_auto is True
 
     def test_context_none_disables_context(self) -> None:
@@ -1619,12 +1632,9 @@ class TestAgentContextDefaults:
         assert agent._context_is_auto is False
 
     def test_context_mode_pilot(self) -> None:
-        """Agent(context_mode='pilot') creates Context wrapping ContextConfig(mode='pilot')."""
+        """Agent(context_mode='pilot') creates Context wrapping ContextConfig(limit=100)."""
         try:
-            from exo.context.config import (  # pyright: ignore[reportMissingImports]
-                AutomationMode,
-                ContextConfig,
-            )
+            from exo.context.config import ContextConfig  # pyright: ignore[reportMissingImports]
             from exo.context.context import Context  # pyright: ignore[reportMissingImports]
         except ImportError:
             pytest.skip("exo-context not installed")
@@ -1632,16 +1642,13 @@ class TestAgentContextDefaults:
         agent = Agent(name="bot", context_mode="pilot")
         assert isinstance(agent.context, Context)
         assert isinstance(agent.context.config, ContextConfig)
-        assert agent.context.config.mode == AutomationMode.PILOT
+        assert agent.context.config.limit == 100
         assert agent._context_is_auto is False
 
     def test_context_mode_navigator(self) -> None:
-        """Agent(context_mode='navigator') creates Context wrapping ContextConfig(mode='navigator')."""
+        """Agent(context_mode='navigator') creates Context wrapping ContextConfig(limit=10, cache=True)."""
         try:
-            from exo.context.config import (  # pyright: ignore[reportMissingImports]
-                AutomationMode,
-                ContextConfig,
-            )
+            from exo.context.config import ContextConfig  # pyright: ignore[reportMissingImports]
             from exo.context.context import Context  # pyright: ignore[reportMissingImports]
         except ImportError:
             pytest.skip("exo-context not installed")
@@ -1649,38 +1656,33 @@ class TestAgentContextDefaults:
         agent = Agent(name="bot", context_mode="navigator")
         assert isinstance(agent.context, Context)
         assert isinstance(agent.context.config, ContextConfig)
-        assert agent.context.config.mode == AutomationMode.NAVIGATOR
+        assert agent.context.config.limit == 10
+        assert agent.context.config.cache is True
 
     def test_explicit_context_takes_precedence_over_context_mode(self) -> None:
         """When context= is given, it takes precedence over context_mode."""
         try:
-            from exo.context.config import (  # pyright: ignore[reportMissingImports]
-                AutomationMode,
-                ContextConfig,
-                make_config,
-            )
+            from exo.context.config import ContextConfig  # pyright: ignore[reportMissingImports]
         except ImportError:
             pytest.skip("exo-context not installed")
 
-        custom_ctx = make_config("navigator")
+        custom_ctx = ContextConfig(limit=10, overflow="summarize", cache=True)
         agent = Agent(name="bot", context=custom_ctx, context_mode="pilot")
         assert isinstance(agent.context, ContextConfig)
-        assert agent.context.mode == AutomationMode.NAVIGATOR
+        assert agent.context.limit == 10
+        assert agent.context.cache is True
 
     def test_explicit_context_config_accepted(self) -> None:
         """Agent(context=ContextConfig(...)) uses the provided config directly."""
         try:
-            from exo.context.config import (  # pyright: ignore[reportMissingImports]
-                AutomationMode,
-                ContextConfig,
-            )
+            from exo.context.config import ContextConfig  # pyright: ignore[reportMissingImports]
         except ImportError:
             pytest.skip("exo-context not installed")
 
-        cfg = ContextConfig(mode="pilot", history_rounds=50)
+        cfg = ContextConfig(limit=50)
         agent = Agent(name="bot", context=cfg)
         assert agent.context is cfg
-        assert agent.context.history_rounds == 50
+        assert agent.context.limit == 50
         assert agent._context_is_auto is False
 
     def test_auto_context_not_raised_in_to_dict(self) -> None:

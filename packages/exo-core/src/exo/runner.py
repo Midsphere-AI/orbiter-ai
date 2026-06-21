@@ -25,6 +25,12 @@ from exo._internal.call_runner import call_runner
 from exo._internal.message_builder import build_messages
 from exo._internal.output_parser import OutputParseError, parse_tool_arguments
 from exo._internal.planner import prepare_planned_execution
+from exo._internal.run_helpers import (
+    check_token_budget_pressure,
+    drain_ephemeral_messages,
+    resolve_instructions,
+)
+from exo.agent import TaskLoopAbort, _drain_task_loop_queue  # pyright: ignore[reportMissingImports]
 from exo.hooks import HookPoint
 from exo.observability.logging import get_logger  # pyright: ignore[reportMissingImports]
 from exo.observability.metrics import (  # pyright: ignore[reportMissingImports]
@@ -100,15 +106,6 @@ async def run(
         getattr(agent, "name", "?"),
         type(resolved_provider).__name__ if resolved_provider else None,
     )
-
-    # Detect Harness: delegate to its own run() method
-    if hasattr(agent, "is_harness"):
-        return await agent.run(
-            input,
-            messages=messages,
-            provider=resolved_provider,
-            max_retries=max_retries,
-        )
 
     # Detect Swarm: delegate to its own run() method
     if hasattr(agent, "flow_order"):
@@ -247,19 +244,6 @@ async def _stream(
             else:
                 _collector.add_counter(METRIC_STREAM_EVENTS_EMITTED, float(count), attrs)
 
-    # Detect Harness: delegate to its stream() method
-    if hasattr(agent, "is_harness"):
-        async for event in agent.stream(
-            input,
-            messages=messages,
-            provider=resolved,
-            detailed=detailed,
-            max_steps=max_steps,
-            event_types=event_types,
-        ):
-            yield event
-        return
-
     # Detect Swarm: delegate to its stream() method
     if hasattr(agent, "flow_order"):
         async for event in agent.stream(
@@ -289,15 +273,7 @@ async def _stream(
     steps = max_steps if max_steps is not None else agent.max_steps
 
     # Resolve instructions (may be async callable)
-    instr: str = ""
-    raw_instr = agent.instructions
-    if callable(raw_instr):
-        if asyncio.iscoroutinefunction(raw_instr):
-            instr = str(await raw_instr(agent.name))
-        else:
-            instr = str(raw_instr(agent.name))
-    elif raw_instr:
-        instr = str(raw_instr)
+    instr = await resolve_instructions(agent)
 
     # ---- Memory: load history and persist user input before streaming ----
     history: list[Message] = list(messages) if messages else []
@@ -325,7 +301,7 @@ async def _stream(
         # ---- Snapshot load ----
         _agent_ctx = getattr(agent, "context", None)
         _snap_cfg = getattr(_agent_ctx, "config", _agent_ctx) if _agent_ctx else None
-        if _snap_cfg is not None and getattr(_snap_cfg, "enable_snapshots", False) and not messages:
+        if _snap_cfg is not None and getattr(_snap_cfg, "_enable_snapshots", getattr(_snap_cfg, "enable_snapshots", False)) and not messages:
             try:
                 _snap = await _persistence.load_snapshot(
                     agent_name=agent.name,
@@ -470,6 +446,24 @@ async def _stream(
                 _last_input = _traj[-1].prompt_tokens
                 msg_list = _update_system_token_info(msg_list, _last_input, _stream_context_window)  # type: ignore[possibly-undefined]
 
+        # ---- Drain TaskLoopQueue (ABORT / STEER / FOLLOWUP events) ----
+        _tlq = getattr(agent, "task_loop_queue", None)
+        if _tlq is not None and _tlq:
+            try:
+                _drain_task_loop_queue(_tlq, msg_list)
+            except TaskLoopAbort as _tlq_exc:
+                _err_ev = ErrorEvent(
+                    error=str(_tlq_exc),
+                    error_type="TaskLoopAbort",
+                    agent_name=agent.name,
+                    step_number=step_num + 1,
+                    recoverable=False,
+                )
+                if _passes_filter(_err_ev):
+                    yield _err_ev
+                _record_stream_metrics()
+                raise
+
         # ---- Drain injected messages ----
         while not agent._injected_messages.empty():
             try:
@@ -485,13 +479,7 @@ async def _stream(
         # Ephemerals are collected into a separate batch and concatenated
         # for the LLM call.  msg_list itself is never mutated, keeping the
         # message history append-only (preserves KV-cache prefix).
-        _ephemeral_batch: list[Message] = []
-        while not agent._ephemeral_messages.empty():
-            try:
-                _ephemeral_batch.append(agent._ephemeral_messages.get_nowait())
-            except asyncio.QueueEmpty:
-                break
-
+        _ephemeral_batch = drain_ephemeral_messages(agent)
         _call_messages = msg_list + _ephemeral_batch if _ephemeral_batch else msg_list
 
         if detailed:
@@ -789,40 +777,33 @@ async def _stream(
             # Apply context windowing every step (CONTEXT_WINDOW hook fires each turn).
             # Token budget check sets force_summarize for aggressive compression.
             if _agent_context is not None:
-                _force_summarize = False
-                if (
-                    _stream_token_tracker is not None
-                    and _stream_context_window
-                    and step_usage.input_tokens > 0
-                ):
-                    _fill_ratio = step_usage.input_tokens / _stream_context_window
-                    _cfg_r = getattr(_agent_context, "config", _agent_context)
-                    _trigger = getattr(
-                        _cfg_r, "token_pressure", getattr(_cfg_r, "token_budget_trigger", 0.8)
+                _force_summarize, _fill_ratio, _trigger = check_token_budget_pressure(
+                    step_usage.input_tokens if _stream_token_tracker is not None else 0,
+                    _stream_context_window,
+                    _agent_context,
+                )
+                if _force_summarize:
+                    _log.info(
+                        "stream token budget trigger: %.0f%% full (%d/%d tokens) on '%s'",
+                        100.0 * _fill_ratio,
+                        step_usage.input_tokens,
+                        _stream_context_window,
+                        agent.name,
                     )
-                    if _fill_ratio > _trigger:
-                        _log.info(
-                            "stream token budget trigger: %.0f%% full (%d/%d tokens) on '%s'",
-                            100.0 * _fill_ratio,
-                            step_usage.input_tokens,
-                            _stream_context_window,
-                            agent.name,
-                        )
-                        _force_summarize = True
-                        _tb_ev = ContextEvent(
-                            action="token_budget",
-                            agent_name=_agent_name,
-                            before_count=len(msg_list),
-                            after_count=len(msg_list),
-                            details={
-                                "fill_ratio": _fill_ratio,
-                                "input_tokens": step_usage.input_tokens,
-                                "context_window_tokens": _stream_context_window,
-                                "trigger": _trigger,
-                            },
-                        )
-                        if _passes_filter(_tb_ev):
-                            yield _tb_ev
+                    _tb_ev = ContextEvent(
+                        action="token_budget",
+                        agent_name=_agent_name,
+                        before_count=len(msg_list),
+                        after_count=len(msg_list),
+                        details={
+                            "fill_ratio": _fill_ratio,
+                            "input_tokens": step_usage.input_tokens,
+                            "context_window_tokens": _stream_context_window,
+                            "trigger": _trigger,
+                        },
+                    )
+                    if _passes_filter(_tb_ev):
+                        yield _tb_ev
 
                 from exo.agent import (
                     _apply_context_windowing as _acw,  # pyright: ignore[reportMissingImports]
@@ -896,7 +877,7 @@ async def _save_stream_snapshot(
     if _ctx is None:
         return
     _cfg = getattr(_ctx, "config", _ctx)
-    if not getattr(_cfg, "enable_snapshots", False):
+    if not getattr(_cfg, "_enable_snapshots", getattr(_cfg, "enable_snapshots", False)):
         return
     try:
         from exo.types import AssistantMessage  # pyright: ignore[reportMissingImports]

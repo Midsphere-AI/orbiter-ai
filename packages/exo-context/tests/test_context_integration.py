@@ -8,7 +8,6 @@ from typing import Any
 
 from exo.context import (  # pyright: ignore[reportMissingImports]
     ArtifactType,
-    AutomationMode,
     Checkpoint,
     CheckpointStore,
     Context,
@@ -17,9 +16,9 @@ from exo.context import (  # pyright: ignore[reportMissingImports]
     ContextProcessor,
     ContextState,
     Neuron,
+    OverflowStrategy,
     ProcessorPipeline,
     PromptBuilder,
-    SummarizeProcessor,
     TokenTracker,
     ToolResultOffloader,
     Workspace,
@@ -27,15 +26,10 @@ from exo.context import (  # pyright: ignore[reportMissingImports]
     get_file_tools,
     get_knowledge_tools,
     get_planning_tools,
-    make_config,
     neuron_registry,
 )
 from exo.context._internal.knowledge import (  # pyright: ignore[reportMissingImports]
     KnowledgeStore,
-)
-from exo.context.tools import (  # pyright: ignore[reportMissingImports]
-    planning_tool_add,
-    planning_tool_get,
 )
 
 # ── Public API import tests ──────────────────────────────────────────
@@ -58,7 +52,6 @@ class TestPublicAPIImports:
     def test_processor_pipeline(self) -> None:
         assert ContextProcessor is not None
         assert ProcessorPipeline is not None
-        assert SummarizeProcessor is not None
         assert ToolResultOffloader is not None
 
     def test_workspace_and_artifacts(self) -> None:
@@ -69,9 +62,9 @@ class TestPublicAPIImports:
         assert Checkpoint is not None
         assert CheckpointStore is not None
 
-    def test_config_and_mode(self) -> None:
-        assert AutomationMode is not None
-        assert make_config is not None
+    def test_config_and_overflow(self) -> None:
+        assert OverflowStrategy is not None
+        assert ContextConfig is not None
 
     def test_token_tracker(self) -> None:
         assert TokenTracker is not None
@@ -120,64 +113,51 @@ class TestContextPromptBuilderE2E:
         assert "Hello" in prompt
         assert "Hi there!" in prompt
 
-    async def test_prompt_with_todos(self) -> None:
+    async def test_prompt_with_task_state(self) -> None:
         ctx = Context("task-3")
-        ctx.state.set(
-            "todos",
-            [
-                {"item": "Research topic", "done": True},
-                {"item": "Write draft", "done": False},
-            ],
-        )
+        ctx.state.set("task_input", "Research and write a draft")
 
         builder = PromptBuilder(ctx)
-        builder.add("todo")
+        builder.add("task")
         prompt = await builder.build()
 
-        assert "Research topic" in prompt
-        assert "Write draft" in prompt
+        assert "task-3" in prompt
+        assert "Research and write a draft" in prompt
 
     async def test_full_prompt_composition(self) -> None:
         ctx = Context("task-4")
-        ctx.state.set("task_id", "task-4")
-        ctx.state.set("input", "Build a web app")
-        ctx.state.set("todos", [{"item": "Setup", "done": False}])
-        ctx.state.set("facts", ["Python 3.11+", "UV package manager"])
+        ctx.state.set("task_input", "Build a web app")
 
         builder = PromptBuilder(ctx)
-        builder.add("task").add("todo").add("fact").add("system")
+        builder.add("task").add("system")
         prompt = await builder.build()
 
-        # task neuron is priority 1, todo is 2, fact is 50, system is 100
+        # task neuron is priority 1, system is 100
         parts = prompt.split("\n\n")
-        assert len(parts) >= 4
+        assert len(parts) >= 2
 
         # All content present
         assert "task-4" in prompt
-        assert "Setup" in prompt
-        assert "Python 3.11+" in prompt
+        assert "Build a web app" in prompt
 
 
 # ── Context + Processor pipeline end-to-end ──────────────────────────
 
 
+class _SetFlagProcessor(ContextProcessor):
+    """Test processor that sets a flag in context state."""
+
+    def __init__(self, event: str, key: str, value: object) -> None:
+        super().__init__(event, name="set_flag")
+        self._key = key
+        self._value = value
+
+    async def process(self, ctx: Context, payload: dict[str, Any]) -> None:
+        ctx.state.set(self._key, self._value)
+
+
 class TestContextProcessorE2E:
     """End-to-end: Context + ProcessorPipeline with built-in processors."""
-
-    async def test_summarize_processor_triggers(self) -> None:
-        config = make_config("copilot", summary_threshold=3)
-        ctx = Context("task-5", config=config)
-        ctx.state.set("history", [{"role": "user", "content": f"msg-{i}"} for i in range(5)])
-
-        pipeline = ProcessorPipeline()
-        pipeline.register(SummarizeProcessor())
-
-        await pipeline.fire("pre_llm_call", ctx)
-
-        assert ctx.state.get("needs_summary") is True
-        candidates = ctx.state.get("summary_candidates")
-        assert candidates is not None
-        assert len(candidates) == 2  # 5 - 3 = 2 excess
 
     async def test_tool_result_offloader(self) -> None:
         ctx = Context("task-6")
@@ -203,17 +183,16 @@ class TestContextProcessorE2E:
 
     async def test_multi_processor_pipeline(self) -> None:
         """Multiple processors fire in sequence for different events."""
-        config = make_config("copilot", summary_threshold=2)
-        ctx = Context("task-7", config=config)
-        ctx.state.set("history", [{"role": "user", "content": "msg"}] * 5)
+        ctx = Context("task-7")
 
+        flag_proc = _SetFlagProcessor("pre_llm_call", "pre_fired", True)
         pipeline = ProcessorPipeline()
-        pipeline.register(SummarizeProcessor())
+        pipeline.register(flag_proc)
         pipeline.register(ToolResultOffloader(max_size=10))
 
-        # Fire pre_llm_call — SummarizeProcessor triggers
+        # Fire pre_llm_call — flag processor triggers
         await pipeline.fire("pre_llm_call", ctx)
-        assert ctx.state.get("needs_summary") is True
+        assert ctx.state.get("pre_fired") is True
 
         # Fire post_tool_call — ToolResultOffloader triggers
         payload: dict[str, Any] = {"tool_result": "a" * 100, "tool_name": "t"}
@@ -274,8 +253,8 @@ class TestFullLifecycle:
     """End-to-end lifecycle: create -> populate -> process -> build prompt -> checkpoint."""
 
     async def test_full_agent_context_lifecycle(self) -> None:
-        # 1. Create context with navigator mode
-        config = make_config("navigator", summary_threshold=3)
+        # 1. Create context with navigator-equivalent settings
+        config = ContextConfig(limit=10, overflow="summarize", cache=True)
         ctx = Context("main-task", config=config)
 
         # 2. Set up workspace + knowledge store
@@ -291,17 +270,17 @@ class TestFullLifecycle:
         # 4. Set task state
         ctx.state.set("task_input", "Implement the authentication module")
         ctx.state.set(
-            "todos",
+            "subtasks",
             [
-                {"item": "Design auth schema", "done": True},
-                {"item": "Implement JWT handler", "done": False},
-                {"item": "Write tests", "done": False},
+                "Design auth schema",
+                "Implement JWT handler",
+                "Write tests",
             ],
         )
 
         # 5. Build prompt
         builder = PromptBuilder(ctx)
-        builder.add("task").add("todo").add("system")
+        builder.add("task").add("system")
         prompt = await builder.build()
 
         assert "main-task" in prompt
@@ -311,9 +290,9 @@ class TestFullLifecycle:
         # 6. Track tokens
         ctx.add_tokens({"prompt_tokens": 500, "output_tokens": 150})
 
-        # 7. Set up processor pipeline
+        # 7. Set up processor pipeline with a custom flag processor
         pipeline = ProcessorPipeline()
-        pipeline.register(SummarizeProcessor())
+        pipeline.register(_SetFlagProcessor("pre_llm_call", "needs_summary", True))
 
         # 8. Simulate history growth past threshold
         ctx.state.set("history", [{"role": "user", "content": f"Turn {i}"} for i in range(5)])
@@ -372,13 +351,17 @@ class TestFullLifecycle:
         await workspace.write("readme", "# My Project\nA framework for building agents")
 
         # Use planning tool
-        planning_tool_add.bind(ctx)
-        result = await planning_tool_add.execute(item="Read the readme")
+        planning_tools = {t.name: t for t in get_planning_tools()}
+        add_todo = planning_tools["add_todo"]
+        get_todo = planning_tools["get_todo"]
+
+        add_todo.bind(ctx)
+        result = await add_todo.execute(item="Read the readme")
         assert "Added todo" in result
 
         # Use planning tool get
-        planning_tool_get.bind(ctx)
-        result = await planning_tool_get.execute()
+        get_todo.bind(ctx)
+        result = await get_todo.execute()
         assert "Read the readme" in result
 
         # Check state was mutated
@@ -421,13 +404,12 @@ class TestCustomProcessorIntegration:
 
     async def test_mixed_processors(self) -> None:
         """Mix custom and built-in processors."""
-        config = make_config("copilot", summary_threshold=2)
-        ctx = Context("mixed-task", config=config)
-        ctx.state.set("history", [{"role": "user", "content": "msg"}] * 5)
+        ctx = Context("mixed-task")
 
+        flag_proc = _SetFlagProcessor("pre_llm_call", "needs_summary", True)
         counter = _CounterProcessor("pre_llm_call")
         pipeline = ProcessorPipeline()
-        pipeline.register(SummarizeProcessor())
+        pipeline.register(flag_proc)
         pipeline.register(counter)
 
         await pipeline.fire("pre_llm_call", ctx)
@@ -450,13 +432,13 @@ class TestAgentContextWiring:
         assert agent.context is ctx
 
     def test_agent_context_default_auto_created(self) -> None:
-        """Agent without explicit context auto-creates Context with config(mode='copilot')."""
+        """Agent without explicit context auto-creates Context with default ContextConfig."""
         from exo.agent import Agent
-        from exo.context.config import AutomationMode  # pyright: ignore[reportMissingImports]
 
         agent = Agent(name="test")
         assert isinstance(agent.context, Context)
-        assert agent.context.config.mode == AutomationMode.COPILOT
+        assert agent.context.config.overflow == OverflowStrategy.SUMMARIZE
+        assert agent.context.config.limit == 20
         assert agent._context_is_auto is True
 
     def test_agent_describe_does_not_include_context(self) -> None:
@@ -477,7 +459,7 @@ class TestAgentContextWindowing:
     """Verify Agent.run() applies history windowing and summarization per ContextConfig."""
 
     async def test_windowing_trims_old_messages(self) -> None:
-        """Messages beyond history_rounds are trimmed before the LLM call."""
+        """Messages beyond limit are trimmed before the LLM call."""
         from unittest.mock import AsyncMock
 
         from exo.agent import Agent
@@ -485,13 +467,8 @@ class TestAgentContextWindowing:
         from exo.models.types import ModelResponse  # pyright: ignore[reportMissingImports]
         from exo.types import AssistantMessage, SystemMessage, UserMessage
 
-        # Small history_rounds; high thresholds so no summarization fires
-        context = ContextConfig(
-            mode="pilot",
-            history_rounds=3,
-            summary_threshold=100,
-            offload_threshold=200,
-        )
+        # limit=3, overflow=truncate: trims to 3, no summarization
+        context = ContextConfig(limit=3, overflow="truncate")
         agent = Agent(name="windowing-test", memory=None, context=context)
 
         # Build 10 round-trips worth of history (20 messages)
@@ -511,12 +488,12 @@ class TestAgentContextWindowing:
 
         await agent.run("final-input", messages=history, provider=mock_provider)
 
-        # System message (instructions) + at most history_rounds non-system messages
+        # System message (instructions) + at most limit non-system messages
         non_system = [m for m in received if not isinstance(m, SystemMessage)]
-        assert len(non_system) <= context.history_rounds
+        assert len(non_system) <= context.limit
 
     async def test_windowing_does_not_trim_when_within_limit(self) -> None:
-        """When message count is within history_rounds, no trimming occurs."""
+        """When message count is within limit, no trimming occurs."""
         from unittest.mock import AsyncMock
 
         from exo.agent import Agent
@@ -524,12 +501,7 @@ class TestAgentContextWindowing:
         from exo.models.types import ModelResponse  # pyright: ignore[reportMissingImports]
         from exo.types import AssistantMessage, SystemMessage, UserMessage
 
-        context = ContextConfig(
-            mode="pilot",
-            history_rounds=20,
-            summary_threshold=100,
-            offload_threshold=200,
-        )
+        context = ContextConfig(limit=20, overflow="truncate")
         agent = Agent(name="no-trim-test", memory=None, context=context)
 
         # Only 2 rounds (4 messages) — well under history_rounds=20
@@ -595,13 +567,8 @@ class TestAgentContextWindowing:
         from exo.models.types import ModelResponse  # pyright: ignore[reportMissingImports]
         from exo.types import AssistantMessage, UserMessage
 
-        # summary_threshold=5 with history_rounds=100 so windowing doesn't eat summary
-        context = ContextConfig(
-            mode="pilot",
-            history_rounds=100,
-            summary_threshold=5,
-            offload_threshold=200,
-        )
+        # limit=5, overflow=summarize: summarization fires at 5 messages, window=5
+        context = ContextConfig(limit=5, overflow="summarize")
         agent = Agent(name="summary-test", memory=None, context=context)
 
         # 5 user+assistant rounds = 10 messages → hits summary_threshold=5
@@ -623,8 +590,6 @@ class TestAgentContextWindowing:
 
         # check_trigger was called (trigger.triggered=True since 10 >= 5)
         # After summarization, messages should be compressed
-        # The provider received fewer non-system messages than 11 (original 10 + 1 input)
-        first_call_msgs = provider_calls[0]
         # Summarization call uses provider.complete() too (via _ProviderSummarizer)
         # But the agent's final LLM call should have compressed messages
         # At minimum: the call succeeded
@@ -633,15 +598,18 @@ class TestAgentContextWindowing:
     async def test_offload_threshold_triggers_aggressive_trim(self) -> None:
         """When message count > offload_threshold, trim to summary_threshold."""
 
-        from exo.agent import _apply_context_windowing
-        from exo.context.config import ContextConfig  # pyright: ignore[reportMissingImports]
-        from exo.types import AssistantMessage, SystemMessage, UserMessage
+        # limit=5, overflow=summarize: _summary_threshold=5, _offload_threshold=max(5,12)=12
+        # Use a SimpleNamespace to get independent control of thresholds
+        import types as _types
 
-        context = ContextConfig(
-            mode="pilot",
+        from exo.agent import _apply_context_windowing
+        from exo.types import AssistantMessage, SystemMessage, UserMessage
+        context = _types.SimpleNamespace(
+            overflow="summarize",
             history_rounds=100,
             summary_threshold=5,
             offload_threshold=10,
+            keep_recent=2,
         )
 
         # Build 20 messages (> offload_threshold=10)
@@ -662,12 +630,8 @@ class TestAgentContextWindowing:
         from exo.context.config import ContextConfig  # pyright: ignore[reportMissingImports]
         from exo.types import AssistantMessage, SystemMessage, UserMessage
 
-        context = ContextConfig(
-            mode="pilot",
-            history_rounds=4,
-            summary_threshold=100,
-            offload_threshold=200,
-        )
+        # limit=4, overflow=truncate: _history_rounds=4, no summarization
+        context = ContextConfig(limit=4, overflow="truncate")
 
         sys_msg = SystemMessage(content="You are helpful.")
         msg_list: list[Any] = [sys_msg]
@@ -679,7 +643,7 @@ class TestAgentContextWindowing:
 
         # System message preserved
         assert result[0] is sys_msg
-        # Only last history_rounds=4 non-system messages kept
+        # Only last limit=4 non-system messages kept
         non_system = [m for m in result if not isinstance(m, SystemMessage)]
         assert len(non_system) == 4
         # They should be the most recent ones
@@ -775,12 +739,7 @@ class TestTokenTrackingIntegration:
         from exo.tool import tool
         from exo.types import SystemMessage, ToolCall, Usage
 
-        context = ContextConfig(
-            mode="pilot",
-            history_rounds=100,
-            summary_threshold=50,
-            offload_threshold=200,
-        )
+        context = ContextConfig(limit=50, overflow="summarize")
 
         @tool
         def dummy_tool() -> str:
@@ -831,14 +790,9 @@ class TestTokenTrackingIntegration:
         from exo.tool import tool
         from exo.types import AssistantMessage, SystemMessage, ToolCall, Usage, UserMessage
 
-        # Low token_budget_trigger (0.1) so even a small input_tokens fills it
-        context = ContextConfig(
-            mode="pilot",
-            history_rounds=100,
-            summary_threshold=50,  # high — would not normally trigger
-            offload_threshold=200,
-            token_budget_trigger=0.1,  # 10% fill triggers summarization
-        )
+        # Low token_pressure (0.1) so even a small input_tokens fills it
+        # limit=50, overflow=summarize: summary fires at 50 msgs (high — won't trigger normally)
+        context = ContextConfig(limit=50, overflow="summarize", token_pressure=0.1)
 
         @tool
         def action_tool() -> str:
@@ -900,14 +854,10 @@ class TestTokenTrackingIntegration:
         from exo.context.config import ContextConfig  # pyright: ignore[reportMissingImports]
         from exo.types import AssistantMessage, SystemMessage, UserMessage
 
-        context = ContextConfig(
-            mode="pilot",
-            history_rounds=100,
-            summary_threshold=50,  # high threshold — normally wouldn't trigger
-            offload_threshold=200,
-        )
+        # limit=50, overflow=summarize: _summary_threshold=50 — high, won't trigger normally
+        context = ContextConfig(limit=50, overflow="summarize")
 
-        # 4 messages (well under summary_threshold=50)
+        # 4 messages (well under _summary_threshold=50)
         msg_list = [
             SystemMessage(content="System"),
             UserMessage(content="q1"),

@@ -3,8 +3,8 @@
 import pytest
 
 from exo.context.config import (  # pyright: ignore[reportMissingImports]
-    AutomationMode,
     ContextConfig,
+    OverflowStrategy,
 )
 from exo.context.context import Context, ContextError  # pyright: ignore[reportMissingImports]
 from exo.context.state import ContextState  # pyright: ignore[reportMissingImports]
@@ -16,7 +16,7 @@ class TestContextCreation:
     def test_minimal(self) -> None:
         ctx = Context("task-1")
         assert ctx.task_id == "task-1"
-        assert ctx.config.mode == AutomationMode.COPILOT
+        assert ctx.config.overflow == OverflowStrategy.SUMMARIZE
         assert ctx.parent is None
         assert ctx.children == []
         assert ctx.token_usage == {}
@@ -26,11 +26,11 @@ class TestContextCreation:
             Context("")
 
     def test_custom_config(self) -> None:
-        cfg = ContextConfig(mode="navigator", history_rounds=5)
+        cfg = ContextConfig(limit=5, overflow="summarize")
         ctx = Context("task-2", config=cfg)
         assert ctx.config is cfg
-        assert ctx.config.mode == AutomationMode.NAVIGATOR
-        assert ctx.config.history_rounds == 5
+        assert ctx.config.overflow == OverflowStrategy.SUMMARIZE
+        assert ctx.config.limit == 5
 
     def test_custom_state(self) -> None:
         state = ContextState({"key": "value"})
@@ -103,7 +103,7 @@ class TestFork:
         assert parent.children[0] is child
 
     def test_fork_inherits_config(self) -> None:
-        cfg = ContextConfig(mode="navigator")
+        cfg = ContextConfig(limit=10, overflow="summarize", cache=True)
         parent = Context("parent", config=cfg)
         child = parent.fork("child")
         assert child.config is cfg

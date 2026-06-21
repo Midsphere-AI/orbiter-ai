@@ -248,12 +248,12 @@ class TestContextRestore:
         assert restored.token_usage == {"prompt": 100}
 
     def test_restore_with_config(self) -> None:
-        config = ContextConfig(history_rounds=5)
+        config = ContextConfig(limit=5, overflow="truncate")
         ctx = Context("main")
         cp = ctx.snapshot()
 
         restored = Context.restore(cp, config=config)
-        assert restored.config.history_rounds == 5
+        assert restored.config.limit == 5
 
     def test_restore_is_fresh_context(self) -> None:
         """Restored context is a new independent instance."""

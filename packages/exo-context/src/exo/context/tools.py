@@ -144,17 +144,6 @@ async def _get_todo(ctx: Any) -> str:
         )
 
 
-planning_tool_add = _ContextTool(
-    _add_todo, name="add_todo", description="Add a todo item to the planning checklist."
-)
-planning_tool_complete = _ContextTool(
-    _complete_todo, name="complete_todo", description="Mark a todo item as completed by index."
-)
-planning_tool_get = _ContextTool(
-    _get_todo, name="get_todo", description="Retrieve the current todo checklist."
-)
-
-
 def get_planning_tools() -> list[Tool]:
     """Return fresh planning tool instances (safe for per-agent binding)."""
     return [
@@ -287,19 +276,6 @@ async def _search_knowledge(ctx: Any, query: str, top_k: int = 5) -> str:
         )
 
 
-knowledge_tool_get = _ContextTool(
-    _get_knowledge, name="get_knowledge", description="Retrieve a knowledge artifact by name."
-)
-knowledge_tool_grep = _ContextTool(
-    _grep_knowledge,
-    name="grep_knowledge",
-    description="Search a knowledge artifact for regex matches.",
-)
-knowledge_tool_search = _ContextTool(
-    _search_knowledge, name="search_knowledge", description="Search across all knowledge artifacts."
-)
-
-
 def get_knowledge_tools() -> list[Tool]:
     """Return fresh knowledge tool instances (safe for per-agent binding)."""
     return [
@@ -368,11 +344,6 @@ async def _read_file(ctx: Any, path: str) -> str:
             f"read_file failed: {exc}",
             hint="Retry with a different file path.",
         )
-
-
-file_tool_read = _ContextTool(
-    _read_file, name="read_file", description="Read a file from the working directory."
-)
 
 
 def get_file_tools() -> list[Tool]:

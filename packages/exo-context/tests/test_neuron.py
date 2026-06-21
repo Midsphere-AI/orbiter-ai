@@ -223,8 +223,8 @@ class TestHistoryNeuron:
         assert "[assistant]: Hi there!" in result
 
     async def test_windowing(self) -> None:
-        """Only last N rounds are included based on config.history_rounds."""
-        config = ContextConfig(history_rounds=1)
+        """Only last N rounds are included based on config.limit."""
+        config = ContextConfig(limit=1, overflow="summarize")
         history = [
             {"role": "user", "content": "Old message 1"},
             {"role": "assistant", "content": "Old response 1"},
@@ -243,7 +243,7 @@ class TestHistoryNeuron:
 
     async def test_large_window(self) -> None:
         """When window is larger than history, all messages shown."""
-        config = ContextConfig(history_rounds=100)
+        config = ContextConfig(limit=100, overflow="summarize")
         history = [
             {"role": "user", "content": "Hello"},
             {"role": "assistant", "content": "Hi"},
@@ -275,8 +275,8 @@ class TestHistoryNeuron:
         assert "[tool]: Found result Y" in result
 
     async def test_windowing_boundary(self) -> None:
-        """history_rounds=2 keeps exactly 4 messages."""
-        config = ContextConfig(history_rounds=2)
+        """limit=2 keeps exactly 4 messages (2 rounds * 2 messages per round)."""
+        config = ContextConfig(limit=2, overflow="summarize")
         history = [
             {"role": "user", "content": "msg1"},
             {"role": "assistant", "content": "msg2"},

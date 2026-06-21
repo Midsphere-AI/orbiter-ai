@@ -48,10 +48,10 @@ def _mock_provider(content: str = "done", tool_calls: list[ToolCall] | None = No
 def _make_default_context() -> Any:
     """Create a default context (summarize overflow) that supports offloading."""
     try:
-        from exo.context.config import make_config  # pyright: ignore[reportMissingImports]
+        from exo.context.config import ContextConfig  # pyright: ignore[reportMissingImports]
         from exo.context.context import Context  # pyright: ignore[reportMissingImports]
 
-        config = make_config("copilot")
+        config = ContextConfig()
         return Context(task_id="test", config=config)
     except ImportError:
         pytest.skip("exo-context not installed")
@@ -495,13 +495,13 @@ class TestToolResultOffloaderLargeOutputFlag:
     @pytest.mark.asyncio
     async def test_offloader_fires_on_large_output_flag_regardless_of_size(self) -> None:
         """ToolResultOffloader offloads when large_output=True even if content is small."""
-        from exo.context.config import make_config  # pyright: ignore[reportMissingImports]
+        from exo.context.config import ContextConfig  # pyright: ignore[reportMissingImports]
         from exo.context.context import Context  # pyright: ignore[reportMissingImports]
         from exo.context.processor import (
             ToolResultOffloader,  # pyright: ignore[reportMissingImports]
         )
 
-        config = make_config("copilot")
+        config = ContextConfig()
         ctx = Context(task_id="t1", config=config)
         offloader = ToolResultOffloader(max_size=50000)
 
@@ -523,13 +523,13 @@ class TestToolResultOffloaderLargeOutputFlag:
     @pytest.mark.asyncio
     async def test_offloader_skips_small_non_large_output(self) -> None:
         """ToolResultOffloader does not fire for small results without large_output=True."""
-        from exo.context.config import make_config  # pyright: ignore[reportMissingImports]
+        from exo.context.config import ContextConfig  # pyright: ignore[reportMissingImports]
         from exo.context.context import Context  # pyright: ignore[reportMissingImports]
         from exo.context.processor import (
             ToolResultOffloader,  # pyright: ignore[reportMissingImports]
         )
 
-        config = make_config("copilot")
+        config = ContextConfig()
         ctx = Context(task_id="t1", config=config)
         offloader = ToolResultOffloader(max_size=5000)
 
@@ -546,13 +546,13 @@ class TestToolResultOffloaderLargeOutputFlag:
     @pytest.mark.asyncio
     async def test_offloader_with_artifact_id_uses_pointer_format(self) -> None:
         """When payload has artifact_id, ToolResultOffloader uses pointer format."""
-        from exo.context.config import make_config  # pyright: ignore[reportMissingImports]
+        from exo.context.config import ContextConfig  # pyright: ignore[reportMissingImports]
         from exo.context.context import Context  # pyright: ignore[reportMissingImports]
         from exo.context.processor import (
             ToolResultOffloader,  # pyright: ignore[reportMissingImports]
         )
 
-        config = make_config("copilot")
+        config = ContextConfig()
         ctx = Context(task_id="t1", config=config)
         offloader = ToolResultOffloader(max_size=5)
 
@@ -569,13 +569,13 @@ class TestToolResultOffloaderLargeOutputFlag:
     @pytest.mark.asyncio
     async def test_offloader_logs_with_artifact_id(self, caplog: pytest.LogCaptureFixture) -> None:
         """ToolResultOffloader logs the correct format including artifact_id."""
-        from exo.context.config import make_config  # pyright: ignore[reportMissingImports]
+        from exo.context.config import ContextConfig  # pyright: ignore[reportMissingImports]
         from exo.context.context import Context  # pyright: ignore[reportMissingImports]
         from exo.context.processor import (
             ToolResultOffloader,  # pyright: ignore[reportMissingImports]
         )
 
-        config = make_config("copilot")
+        config = ContextConfig()
         ctx = Context(task_id="t1", config=config)
         offloader = ToolResultOffloader(max_size=5)
 

@@ -14,17 +14,10 @@ from exo.context._internal.knowledge import (  # pyright: ignore[reportMissingIm
 from exo.context.context import Context  # pyright: ignore[reportMissingImports]
 from exo.context.tools import (  # pyright: ignore[reportMissingImports]
     _ContextTool,
-    file_tool_read,
     get_context_tools,
     get_file_tools,
     get_knowledge_tools,
     get_planning_tools,
-    knowledge_tool_get,
-    knowledge_tool_grep,
-    knowledge_tool_search,
-    planning_tool_add,
-    planning_tool_complete,
-    planning_tool_get,
 )
 from exo.context.workspace import Workspace  # pyright: ignore[reportMissingImports]
 from exo.tool import ToolError
@@ -40,10 +33,22 @@ def _ctx(state: dict[str, Any] | None = None) -> Context:
     return ctx
 
 
-def _bind(tool: _ContextTool, ctx: Context) -> _ContextTool:
-    """Create a fresh copy-like binding (bind mutates in place)."""
-    tool.bind(ctx)
-    return tool
+def _fresh_planning_tools() -> dict[str, _ContextTool]:
+    """Return a fresh dict of planning tools keyed by name."""
+    tools = get_planning_tools()
+    return {t.name: t for t in tools}  # type: ignore[return-value]
+
+
+def _fresh_knowledge_tools() -> dict[str, _ContextTool]:
+    """Return a fresh dict of knowledge tools keyed by name."""
+    tools = get_knowledge_tools()
+    return {t.name: t for t in tools}  # type: ignore[return-value]
+
+
+def _fresh_file_tools() -> dict[str, _ContextTool]:
+    """Return a fresh dict of file tools keyed by name."""
+    tools = get_file_tools()
+    return {t.name: t for t in tools}  # type: ignore[return-value]
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -55,25 +60,29 @@ class TestPlanningToolSchema:
     """Planning tools have correct schemas (no ctx param)."""
 
     def test_add_todo_schema(self) -> None:
-        schema = planning_tool_add.parameters
+        tool = _fresh_planning_tools()["add_todo"]
+        schema = tool.parameters
         assert "item" in schema["properties"]
         assert "ctx" not in schema["properties"]
         assert "item" in schema.get("required", [])
 
     def test_get_todo_schema(self) -> None:
-        schema = planning_tool_get.parameters
+        tool = _fresh_planning_tools()["get_todo"]
+        schema = tool.parameters
         assert "ctx" not in schema.get("properties", {})
         assert "required" not in schema  # no required params
 
     def test_complete_todo_schema(self) -> None:
-        schema = planning_tool_complete.parameters
+        tool = _fresh_planning_tools()["complete_todo"]
+        schema = tool.parameters
         assert "index" in schema["properties"]
         assert "ctx" not in schema["properties"]
 
     def test_tool_names(self) -> None:
-        assert planning_tool_add.name == "add_todo"
-        assert planning_tool_get.name == "get_todo"
-        assert planning_tool_complete.name == "complete_todo"
+        tools = _fresh_planning_tools()
+        assert "add_todo" in tools
+        assert "get_todo" in tools
+        assert "complete_todo" in tools
 
 
 class TestAddTodo:
@@ -81,8 +90,10 @@ class TestAddTodo:
 
     async def test_add_first_todo(self) -> None:
         ctx = _ctx()
-        _bind(planning_tool_add, ctx)
-        result = await planning_tool_add.execute(item="Write tests")
+        tools = _fresh_planning_tools()
+        add_todo = tools["add_todo"]
+        add_todo.bind(ctx)
+        result = await add_todo.execute(item="Write tests")
         assert "Write tests" in result
         todos = ctx.state.get("todos")
         assert len(todos) == 1
@@ -91,9 +102,11 @@ class TestAddTodo:
 
     async def test_add_multiple_todos(self) -> None:
         ctx = _ctx()
-        _bind(planning_tool_add, ctx)
-        await planning_tool_add.execute(item="First")
-        await planning_tool_add.execute(item="Second")
+        tools = _fresh_planning_tools()
+        add_todo = tools["add_todo"]
+        add_todo.bind(ctx)
+        await add_todo.execute(item="First")
+        await add_todo.execute(item="Second")
         todos = ctx.state.get("todos")
         assert len(todos) == 2
         assert todos[0]["item"] == "First"
@@ -105,21 +118,27 @@ class TestCompleteTodo:
 
     async def test_complete_existing(self) -> None:
         ctx = _ctx({"todos": [{"item": "Task A", "done": False}]})
-        _bind(planning_tool_complete, ctx)
-        result = await planning_tool_complete.execute(index=0)
+        tools = _fresh_planning_tools()
+        complete_todo = tools["complete_todo"]
+        complete_todo.bind(ctx)
+        result = await complete_todo.execute(index=0)
         assert "done" in result
         assert ctx.state.get("todos")[0]["done"] is True
 
     async def test_complete_invalid_index(self) -> None:
         ctx = _ctx({"todos": [{"item": "Task A", "done": False}]})
-        _bind(planning_tool_complete, ctx)
-        result = await planning_tool_complete.execute(index=5)
+        tools = _fresh_planning_tools()
+        complete_todo = tools["complete_todo"]
+        complete_todo.bind(ctx)
+        result = await complete_todo.execute(index=5)
         assert "Invalid index" in result
 
     async def test_complete_empty_list(self) -> None:
         ctx = _ctx()
-        _bind(planning_tool_complete, ctx)
-        result = await planning_tool_complete.execute(index=0)
+        tools = _fresh_planning_tools()
+        complete_todo = tools["complete_todo"]
+        complete_todo.bind(ctx)
+        result = await complete_todo.execute(index=0)
         assert "No todos" in result
 
 
@@ -128,8 +147,10 @@ class TestGetTodo:
 
     async def test_empty_todos(self) -> None:
         ctx = _ctx()
-        _bind(planning_tool_get, ctx)
-        result = await planning_tool_get.execute()
+        tools = _fresh_planning_tools()
+        get_todo = tools["get_todo"]
+        get_todo.bind(ctx)
+        result = await get_todo.execute()
         assert result == "No todos."
 
     async def test_with_todos(self) -> None:
@@ -141,8 +162,10 @@ class TestGetTodo:
                 ]
             }
         )
-        _bind(planning_tool_get, ctx)
-        result = await planning_tool_get.execute()
+        tools = _fresh_planning_tools()
+        get_todo = tools["get_todo"]
+        get_todo.bind(ctx)
+        result = await get_todo.execute()
         assert "[ ] Task A" in result
         assert "[x] Task B" in result
 
@@ -156,18 +179,21 @@ class TestKnowledgeToolSchema:
     """Knowledge tools have correct schemas."""
 
     def test_get_knowledge_schema(self) -> None:
-        schema = knowledge_tool_get.parameters
+        tool = _fresh_knowledge_tools()["get_knowledge"]
+        schema = tool.parameters
         assert "name" in schema["properties"]
         assert "ctx" not in schema["properties"]
 
     def test_grep_knowledge_schema(self) -> None:
-        schema = knowledge_tool_grep.parameters
+        tool = _fresh_knowledge_tools()["grep_knowledge"]
+        schema = tool.parameters
         assert "name" in schema["properties"]
         assert "pattern" in schema["properties"]
         assert "ctx" not in schema["properties"]
 
     def test_search_knowledge_schema(self) -> None:
-        schema = knowledge_tool_search.parameters
+        tool = _fresh_knowledge_tools()["search_knowledge"]
+        schema = tool.parameters
         assert "query" in schema["properties"]
         assert "ctx" not in schema["properties"]
 
@@ -177,23 +203,26 @@ class TestGetKnowledge:
 
     async def test_no_workspace(self) -> None:
         ctx = _ctx()
-        _bind(knowledge_tool_get, ctx)
-        result = await knowledge_tool_get.execute(name="doc")
+        tool = _fresh_knowledge_tools()["get_knowledge"]
+        tool.bind(ctx)
+        result = await tool.execute(name="doc")
         assert "No workspace" in result
 
     async def test_artifact_not_found(self) -> None:
         ws = Workspace("test-ws")
         ctx = _ctx({"workspace": ws})
-        _bind(knowledge_tool_get, ctx)
-        result = await knowledge_tool_get.execute(name="missing")
+        tool = _fresh_knowledge_tools()["get_knowledge"]
+        tool.bind(ctx)
+        result = await tool.execute(name="missing")
         assert "not found" in result
 
     async def test_artifact_found(self) -> None:
         ws = Workspace("test-ws")
         await ws.write("doc", "Hello world content")
         ctx = _ctx({"workspace": ws})
-        _bind(knowledge_tool_get, ctx)
-        result = await knowledge_tool_get.execute(name="doc")
+        tool = _fresh_knowledge_tools()["get_knowledge"]
+        tool.bind(ctx)
+        result = await tool.execute(name="doc")
         assert result == "Hello world content"
 
 
@@ -202,23 +231,26 @@ class TestGrepKnowledge:
 
     async def test_no_workspace(self) -> None:
         ctx = _ctx()
-        _bind(knowledge_tool_grep, ctx)
-        result = await knowledge_tool_grep.execute(name="doc", pattern="test")
+        tool = _fresh_knowledge_tools()["grep_knowledge"]
+        tool.bind(ctx)
+        result = await tool.execute(name="doc", pattern="test")
         assert "No workspace" in result
 
     async def test_artifact_not_found(self) -> None:
         ws = Workspace("test-ws")
         ctx = _ctx({"workspace": ws})
-        _bind(knowledge_tool_grep, ctx)
-        result = await knowledge_tool_grep.execute(name="missing", pattern="test")
+        tool = _fresh_knowledge_tools()["grep_knowledge"]
+        tool.bind(ctx)
+        result = await tool.execute(name="missing", pattern="test")
         assert "not found" in result
 
     async def test_matching_lines(self) -> None:
         ws = Workspace("test-ws")
         await ws.write("doc", "line one\nline two test\nline three\nline four test")
         ctx = _ctx({"workspace": ws})
-        _bind(knowledge_tool_grep, ctx)
-        result = await knowledge_tool_grep.execute(name="doc", pattern="test")
+        tool = _fresh_knowledge_tools()["grep_knowledge"]
+        tool.bind(ctx)
+        result = await tool.execute(name="doc", pattern="test")
         assert "2: line two test" in result
         assert "4: line four test" in result
         assert "line one" not in result
@@ -227,16 +259,18 @@ class TestGrepKnowledge:
         ws = Workspace("test-ws")
         await ws.write("doc", "hello\nworld")
         ctx = _ctx({"workspace": ws})
-        _bind(knowledge_tool_grep, ctx)
-        result = await knowledge_tool_grep.execute(name="doc", pattern="xyz")
+        tool = _fresh_knowledge_tools()["grep_knowledge"]
+        tool.bind(ctx)
+        result = await tool.execute(name="doc", pattern="xyz")
         assert "No matches" in result
 
     async def test_invalid_regex(self) -> None:
         ws = Workspace("test-ws")
         await ws.write("doc", "hello")
         ctx = _ctx({"workspace": ws})
-        _bind(knowledge_tool_grep, ctx)
-        result = await knowledge_tool_grep.execute(name="doc", pattern="[invalid")
+        tool = _fresh_knowledge_tools()["grep_knowledge"]
+        tool.bind(ctx)
+        result = await tool.execute(name="doc", pattern="[invalid")
         assert "Invalid regex" in result
 
 
@@ -245,24 +279,27 @@ class TestSearchKnowledge:
 
     async def test_no_knowledge_store(self) -> None:
         ctx = _ctx()
-        _bind(knowledge_tool_search, ctx)
-        result = await knowledge_tool_search.execute(query="test")
+        tool = _fresh_knowledge_tools()["search_knowledge"]
+        tool.bind(ctx)
+        result = await tool.execute(query="test")
         assert "No knowledge store" in result
 
     async def test_no_results(self) -> None:
         ks = KnowledgeStore()
         ks.add("doc", "hello world")
         ctx = _ctx({"knowledge_store": ks})
-        _bind(knowledge_tool_search, ctx)
-        result = await knowledge_tool_search.execute(query="xyznotfound")
+        tool = _fresh_knowledge_tools()["search_knowledge"]
+        tool.bind(ctx)
+        result = await tool.execute(query="xyznotfound")
         assert "No results" in result
 
     async def test_with_results(self) -> None:
         ks = KnowledgeStore()
         ks.add("doc", "Python programming language guide")
         ctx = _ctx({"knowledge_store": ks})
-        _bind(knowledge_tool_search, ctx)
-        result = await knowledge_tool_search.execute(query="python")
+        tool = _fresh_knowledge_tools()["search_knowledge"]
+        tool.bind(ctx)
+        result = await tool.execute(query="python")
         assert "doc#" in result
         assert "score=" in result
 
@@ -276,7 +313,8 @@ class TestFileToolSchema:
     """File tool has correct schema."""
 
     def test_read_file_schema(self) -> None:
-        schema = file_tool_read.parameters
+        tool = _fresh_file_tools()["read_file"]
+        schema = tool.parameters
         assert "path" in schema["properties"]
         assert "ctx" not in schema["properties"]
         assert "path" in schema.get("required", [])
@@ -287,15 +325,17 @@ class TestReadFile:
 
     async def test_no_working_dir(self) -> None:
         ctx = _ctx()
-        _bind(file_tool_read, ctx)
-        result = await file_tool_read.execute(path="test.txt")
+        tool = _fresh_file_tools()["read_file"]
+        tool.bind(ctx)
+        result = await tool.execute(path="test.txt")
         assert "No working directory" in result
 
     async def test_file_not_found(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             ctx = _ctx({"working_dir": tmpdir})
-            _bind(file_tool_read, ctx)
-            result = await file_tool_read.execute(path="nonexistent.txt")
+            tool = _fresh_file_tools()["read_file"]
+            tool.bind(ctx)
+            result = await tool.execute(path="nonexistent.txt")
             assert "not found" in result
 
     async def test_read_success(self) -> None:
@@ -303,15 +343,17 @@ class TestReadFile:
             p = Path(tmpdir) / "hello.txt"
             p.write_text("Hello from file!", encoding="utf-8")
             ctx = _ctx({"working_dir": tmpdir})
-            _bind(file_tool_read, ctx)
-            result = await file_tool_read.execute(path="hello.txt")
+            tool = _fresh_file_tools()["read_file"]
+            tool.bind(ctx)
+            result = await tool.execute(path="hello.txt")
             assert result == "Hello from file!"
 
     async def test_path_traversal_blocked(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             ctx = _ctx({"working_dir": tmpdir})
-            _bind(file_tool_read, ctx)
-            result = await file_tool_read.execute(path="../../../etc/passwd")
+            tool = _fresh_file_tools()["read_file"]
+            tool.bind(ctx)
+            result = await tool.execute(path="../../../etc/passwd")
             assert "Access denied" in result
 
     async def test_subdirectory_file(self) -> None:
@@ -321,8 +363,9 @@ class TestReadFile:
             f = sub / "data.txt"
             f.write_text("nested content", encoding="utf-8")
             ctx = _ctx({"working_dir": tmpdir})
-            _bind(file_tool_read, ctx)
-            result = await file_tool_read.execute(path="subdir/data.txt")
+            tool = _fresh_file_tools()["read_file"]
+            tool.bind(ctx)
+            result = await tool.execute(path="subdir/data.txt")
             assert result == "nested content"
 
 
@@ -345,11 +388,13 @@ class TestContextToolBinding:
 
     def test_bind_returns_self(self) -> None:
         ctx = _ctx()
-        result = planning_tool_add.bind(ctx)
-        assert result is planning_tool_add
+        tool = _fresh_planning_tools()["add_todo"]
+        result = tool.bind(ctx)
+        assert result is tool
 
     def test_to_schema(self) -> None:
-        schema = planning_tool_add.to_schema()
+        tool = _fresh_planning_tools()["add_todo"]
+        schema = tool.to_schema()
         assert schema["type"] == "function"
         assert schema["function"]["name"] == "add_todo"
         assert "ctx" not in schema["function"]["parameters"].get("properties", {})

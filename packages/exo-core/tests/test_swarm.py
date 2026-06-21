@@ -857,8 +857,8 @@ class TestSwarmTeam:
         # Lead should have only its original tool, not delegate tools
         assert "my_tool" in lead.tools
         assert "delegate_to_worker" not in lead.tools
-        # my_tool + retrieve_artifact + 7 context tools (auto-loaded)
-        assert len(lead.tools) == 9
+        # my_tool + retrieve_artifact + spawn_self + 7 context tools (auto-loaded)
+        assert len(lead.tools) == 10
 
     async def test_team_tools_restored_on_error(self) -> None:
         """Lead's tools are restored even if run() raises."""
@@ -1344,12 +1344,8 @@ class TestSwarmMemoryDefaults:
 
 class TestSwarmContextMode:
     def test_swarm_propagates_context_mode_to_agents(self) -> None:
-        """Swarm(context_mode='pilot') propagates Context(mode='pilot') to all agents."""
+        """Swarm(context_mode='pilot') propagates Context(limit=100) to all agents."""
         try:
-            from exo.context.config import (  # pyright: ignore[reportMissingImports]
-                AutomationMode,
-                ContextConfig,
-            )
             from exo.context.context import Context  # pyright: ignore[reportMissingImports]
         except ImportError:
             pytest.skip("exo-context not installed")
@@ -1359,9 +1355,9 @@ class TestSwarmContextMode:
         swarm = Swarm(agents=[lead, worker], context_mode="pilot")
 
         assert isinstance(swarm.agents["lead"].context, Context)
-        assert swarm.agents["lead"].context.config.mode == AutomationMode.PILOT
+        assert swarm.agents["lead"].context.config.limit == 100
         assert isinstance(swarm.agents["worker"].context, Context)
-        assert swarm.agents["worker"].context.config.mode == AutomationMode.PILOT
+        assert swarm.agents["worker"].context.config.limit == 100
 
     def test_swarm_context_mode_none_disables_context(self) -> None:
         """Swarm(context_mode=None) disables context on all agents."""

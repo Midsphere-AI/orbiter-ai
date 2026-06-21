@@ -1,4 +1,4 @@
-"""Tests for exo._internal.agent_group — ParallelGroup and SerialGroup."""
+"""Tests for exo._internal.agent_group — ParallelGroup."""
 
 from __future__ import annotations
 
@@ -10,7 +10,6 @@ import pytest
 from exo._internal.agent_group import (
     GroupError,
     ParallelGroup,
-    SerialGroup,
 )
 from exo.agent import Agent
 from exo.runner import run
@@ -227,172 +226,6 @@ class TestParallelGroupExecution:
 
 
 # ---------------------------------------------------------------------------
-# SerialGroup construction
-# ---------------------------------------------------------------------------
-
-
-class TestSerialGroupConstruction:
-    def test_minimal_serial_group(self) -> None:
-        """SerialGroup can be created with one agent."""
-        a = Agent(name="a")
-        group = SerialGroup(name="g", agents=[a])
-
-        assert group.name == "g"
-        assert group.is_group is True
-        assert group.agent_order == ["a"]
-
-    def test_serial_group_empty_raises(self) -> None:
-        """SerialGroup with no agents raises GroupError."""
-        with pytest.raises(GroupError, match="at least one agent"):
-            SerialGroup(name="g", agents=[])
-
-    def test_serial_group_describe(self) -> None:
-        """SerialGroup.describe() returns type and agents."""
-        a = Agent(name="a")
-        b = Agent(name="b")
-        group = SerialGroup(name="g", agents=[a, b])
-
-        desc = group.describe()
-
-        assert desc["type"] == "serial"
-        assert desc["name"] == "g"
-        assert "a" in desc["agents"]
-
-    def test_serial_group_repr(self) -> None:
-        """SerialGroup.__repr__() includes name and agents."""
-        a = Agent(name="a")
-        group = SerialGroup(name="g", agents=[a])
-
-        r = repr(group)
-
-        assert "SerialGroup" in r
-        assert "g" in r
-
-
-# ---------------------------------------------------------------------------
-# SerialGroup execution
-# ---------------------------------------------------------------------------
-
-
-class TestSerialGroupExecution:
-    async def test_serial_single_agent(self) -> None:
-        """SerialGroup with one agent returns its output."""
-        a = Agent(name="a")
-        group = SerialGroup(name="g", agents=[a])
-        provider = _make_provider([AgentOutput(text="output_a")])
-
-        result = await group.run("Hello", provider=provider)
-
-        assert result.output == "output_a"
-
-    async def test_serial_two_agents_chained(self) -> None:
-        """SerialGroup chains output→input between agents."""
-        a = Agent(name="a")
-        b = Agent(name="b")
-        group = SerialGroup(name="g", agents=[a, b])
-
-        provider = _make_provider(
-            [
-                AgentOutput(
-                    text="from_a",
-                    usage=Usage(input_tokens=10, output_tokens=5, total_tokens=15),
-                ),
-                AgentOutput(
-                    text="from_b",
-                    usage=Usage(input_tokens=20, output_tokens=10, total_tokens=30),
-                ),
-            ]
-        )
-
-        result = await group.run("Hello", provider=provider)
-
-        assert result.output == "from_b"
-
-    async def test_serial_usage_aggregation(self) -> None:
-        """SerialGroup sums usage from all agents."""
-        a = Agent(name="a")
-        b = Agent(name="b")
-        group = SerialGroup(name="g", agents=[a, b])
-
-        provider = _make_provider(
-            [
-                AgentOutput(
-                    text="a",
-                    usage=Usage(input_tokens=10, output_tokens=5, total_tokens=15),
-                ),
-                AgentOutput(
-                    text="b",
-                    usage=Usage(input_tokens=20, output_tokens=10, total_tokens=30),
-                ),
-            ]
-        )
-
-        result = await group.run("Hello", provider=provider)
-
-        assert result.usage.input_tokens == 30
-        assert result.usage.output_tokens == 15
-
-    async def test_serial_three_agents_chained(self) -> None:
-        """SerialGroup chains through 3 agents."""
-        a = Agent(name="a")
-        b = Agent(name="b")
-        c = Agent(name="c")
-        group = SerialGroup(name="g", agents=[a, b, c])
-
-        provider = _make_provider(
-            [
-                AgentOutput(text="step1"),
-                AgentOutput(text="step2"),
-                AgentOutput(text="step3"),
-            ]
-        )
-
-        result = await group.run("start", provider=provider)
-
-        assert result.output == "step3"
-
-    async def test_serial_output_becomes_next_input(self) -> None:
-        """Each agent in serial group receives previous output as input."""
-        received_inputs: list[str] = []
-        call_count = 0
-
-        async def tracked_complete(messages: Any, **kwargs: Any) -> Any:
-            nonlocal call_count
-            for m in reversed(messages):
-                content = getattr(m, "content", None)
-                role = getattr(m, "role", None)
-                if role == "user" and content:
-                    received_inputs.append(content)
-                    break
-
-            responses = [
-                AgentOutput(text="output_from_a"),
-                AgentOutput(text="output_from_b"),
-            ]
-            resp = responses[min(call_count, len(responses) - 1)]
-            call_count += 1
-
-            class FakeResponse:
-                content = resp.text
-                tool_calls = resp.tool_calls
-                usage = resp.usage
-
-            return FakeResponse()
-
-        provider = AsyncMock()
-        provider.complete = tracked_complete
-
-        a = Agent(name="a")
-        b = Agent(name="b")
-        group = SerialGroup(name="g", agents=[a, b])
-
-        await group.run("initial_input", provider=provider)
-
-        assert received_inputs[0] == "initial_input"
-        assert received_inputs[1] == "output_from_a"
-
-
-# ---------------------------------------------------------------------------
 # Groups in Swarm flow DSL
 # ---------------------------------------------------------------------------
 
@@ -415,30 +248,6 @@ class TestGroupsInSwarm:
             [
                 AgentOutput(text="A_out"),  # agent a in parallel group
                 AgentOutput(text="B_out"),  # agent b in parallel group
-                AgentOutput(text="C_final"),  # agent c
-            ]
-        )
-
-        result = await swarm.run("Hello", provider=provider)
-
-        assert result.output == "C_final"
-
-    async def test_serial_group_in_workflow(self) -> None:
-        """SerialGroup works as a node in Swarm workflow."""
-        a = Agent(name="a")
-        b = Agent(name="b")
-        group = SerialGroup(name="group_ab", agents=[a, b])
-        c = Agent(name="c")
-
-        swarm = Swarm(
-            agents=[group, c],
-            flow="group_ab >> c",
-        )
-
-        provider = _make_provider(
-            [
-                AgentOutput(text="A_out"),  # agent a in serial group
-                AgentOutput(text="B_out"),  # agent b in serial group
                 AgentOutput(text="C_final"),  # agent c
             ]
         )
@@ -539,19 +348,3 @@ class TestGroupsInSwarm:
         assert "A" in result.output
         assert "B" in result.output
 
-    async def test_serial_group_standalone(self) -> None:
-        """SerialGroup can run standalone without Swarm."""
-        a = Agent(name="a")
-        b = Agent(name="b")
-        group = SerialGroup(name="g", agents=[a, b])
-
-        provider = _make_provider(
-            [
-                AgentOutput(text="step1"),
-                AgentOutput(text="step2"),
-            ]
-        )
-
-        result = await group.run("test", provider=provider)
-
-        assert result.output == "step2"

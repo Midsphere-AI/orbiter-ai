@@ -1,18 +1,5 @@
-"""Task controller — hierarchical task management for agent workflows."""
+"""Task controller — task loop queue and steering tools for agent workflows."""
 
-from exo._internal.task_controller.event_bus import (
-    TaskEvent,
-    TaskEventBus,
-    TaskEventHandler,
-    TaskEventType,
-)
-from exo._internal.task_controller.intent_recognizer import (
-    TASK_ACTIONS,
-    Intent,
-    IntentRecognizer,
-)
-from exo._internal.task_controller.manager import TaskManager, TaskNotFoundError
-from exo._internal.task_controller.scheduler import TaskScheduler
 from exo._internal.task_controller.task_loop_queue import (
     TaskLoopEvent,
     TaskLoopEventType,
@@ -31,22 +18,12 @@ from exo._internal.task_controller.types import (
 )
 
 __all__ = [
-    "TASK_ACTIONS",
-    "Intent",
-    "IntentRecognizer",
     "InvalidTransitionError",
     "Task",
     "TaskError",
-    "TaskEvent",
-    "TaskEventBus",
-    "TaskEventHandler",
-    "TaskEventType",
     "TaskLoopEvent",
     "TaskLoopEventType",
     "TaskLoopQueue",
-    "TaskManager",
-    "TaskNotFoundError",
-    "TaskScheduler",
     "TaskStatus",
     "abort_agent_tool",
     "get_task_loop_tools",

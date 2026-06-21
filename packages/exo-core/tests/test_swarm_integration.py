@@ -1,7 +1,7 @@
 """Swarm integration tests via the public run() API.
 
 End-to-end tests covering all swarm modes (workflow, handoff, team),
-parallel/serial agent groups, nested swarms, and public API exports.
+parallel agent groups, nested swarms, and public API exports.
 """
 
 from __future__ import annotations
@@ -225,7 +225,7 @@ class TestTeamIntegration:
 
 
 class TestGroupIntegration:
-    """run(swarm, input) with ParallelGroup and SerialGroup nodes."""
+    """run(swarm, input) with ParallelGroup nodes."""
 
     async def test_parallel_group_in_workflow(self) -> None:
         """ParallelGroup as a node in a swarm workflow."""
@@ -245,22 +245,6 @@ class TestGroupIntegration:
         result = await run(swarm, "go", provider=provider)
 
         assert result.output == "combined result"
-
-    async def test_serial_group_in_workflow(self) -> None:
-        """SerialGroup as a node in a swarm workflow."""
-        from exo._internal.agent_group import SerialGroup
-
-        s1 = Agent(name="s1")
-        s2 = Agent(name="s2")
-        sg = SerialGroup(name="serial", agents=[s1, s2])
-
-        swarm = Swarm(agents=[sg])
-        # s1 then s2 in sequence
-        provider = _make_provider([_text("step-1"), _text("step-2")])
-
-        result = await run(swarm, "go", provider=provider)
-
-        assert result.output == "step-2"
 
     async def test_parallel_group_custom_aggregation(self) -> None:
         """ParallelGroup with custom aggregation function."""
@@ -354,12 +338,6 @@ class TestSwarmPublicAPI:
         from exo._internal.agent_group import ParallelGroup as Direct
 
         assert ParallelGroup is Direct
-
-    def test_serial_group_importable(self) -> None:
-        from exo import SerialGroup
-        from exo._internal.agent_group import SerialGroup as Direct
-
-        assert SerialGroup is Direct
 
     async def test_run_detects_swarm(self) -> None:
         """run() detects Swarm via flow_order attribute and delegates."""
