@@ -9,7 +9,60 @@ from pydantic import BaseModel, Field
 
 
 class ExoError(Exception):
-    """Base exception for all Exo errors."""
+    """Base exception for all Exo errors.
+
+    Beyond a message, an ExoError can carry developer-facing *context* (which
+    agent / tool / model / field was involved), an actionable *hint* (what to do
+    about it), and an optional *doc* pointer. This keeps failures legible and
+    fixable even when they surface from deep inside async machinery.
+
+    Backward compatible: ``ExoError("something went wrong")`` behaves exactly
+    like a plain exception — ``str(err)`` is just the message.
+
+    Example::
+
+        raise ProviderError(
+            "Anthropic request failed after 3 retries.",
+            context={"model": "anthropic:claude-opus-4", "agent": "researcher"},
+            hint="Check ANTHROPIC_API_KEY is set and the model id is correct.",
+            doc="https://docs.exo.dev/providers#anthropic",
+        )
+    """
+
+    def __init__(
+        self,
+        message: str = "",
+        *,
+        context: dict[str, Any] | None = None,
+        hint: str | None = None,
+        doc: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.message = message
+        self.context: dict[str, Any] = dict(context) if context else {}
+        self.hint = hint
+        self.doc = doc
+
+    def with_context(self, **fields: Any) -> ExoError:
+        """Attach or override context fields in place and return self.
+
+        Handy for adding ``where`` information as an error propagates outward::
+
+            raise ToolError("bad result").with_context(tool=name, agent=agent.name)
+        """
+        self.context.update(fields)
+        return self
+
+    def __str__(self) -> str:
+        parts = [self.message]
+        if self.context:
+            rendered = "  ".join(f"{k}={v!r}" for k, v in self.context.items())
+            parts.append(f"  where: {rendered}")
+        if self.hint:
+            parts.append(f"  → {self.hint}")
+        if self.doc:
+            parts.append(f"  docs: {self.doc}")
+        return "\n".join(parts)
 
 
 # ---------------------------------------------------------------------------

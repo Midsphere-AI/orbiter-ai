@@ -9,6 +9,7 @@ import pytest
 from rich.console import Console as RichConsole
 
 from exo_cli.console import (
+    ConsoleError,
     InteractiveConsole,
     format_agents_table,
     parse_command,
@@ -128,7 +129,7 @@ class TestFormatAgentsTable:
 
 class TestConsoleInit:
     def test_requires_agents(self) -> None:
-        with pytest.raises(ValueError, match="At least one agent"):
+        with pytest.raises(ConsoleError, match="At least one agent"):
             InteractiveConsole(agents={}, run_fn=AsyncMock())
 
     def test_defaults(self) -> None:
@@ -305,3 +306,26 @@ class TestConsoleProperties:
         a = ic.agents
         a["new"] = MagicMock()
         assert "new" not in ic.agents
+
+
+# ---------------------------------------------------------------------------
+# isatty caching
+# ---------------------------------------------------------------------------
+
+
+class TestIsttyCaching:
+    def test_is_tty_cached_at_init(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """_is_tty is set once at __init__, not re-checked per _read_input call."""
+        import sys as _sys
+
+        mock_isatty = MagicMock(return_value=True)
+        monkeypatch.setattr(_sys.stdin, "isatty", mock_isatty)
+        ic = _make_console()
+        # isatty should have been called exactly once (at init)
+        assert ic._is_tty is True
+        init_calls = mock_isatty.call_count
+        assert init_calls == 1
+        # Accessing the cached value does NOT call isatty again
+        _ = ic._is_tty
+        _ = ic._is_tty
+        assert mock_isatty.call_count == 1  # still exactly one call from init

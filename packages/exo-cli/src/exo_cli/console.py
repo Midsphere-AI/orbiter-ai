@@ -20,6 +20,17 @@ from rich.console import Console as RichConsole
 from rich.panel import Panel
 from rich.table import Table
 
+from exo.types import ExoError  # pyright: ignore[reportMissingImports]
+
+# ---------------------------------------------------------------------------
+# Errors
+# ---------------------------------------------------------------------------
+
+
+class ConsoleError(ExoError):
+    """Raised for interactive console configuration errors."""
+
+
 # ---------------------------------------------------------------------------
 # Types
 # ---------------------------------------------------------------------------
@@ -97,12 +108,17 @@ class InteractiveConsole:
         run_fn: Async callable ``run(agent, input, **kw) -> result``.
         stream_fn: Optional async-iterator factory for streaming responses.
         console: Optional Rich console (default: stderr for clean piping).
+        streaming: Enable streaming output when a stream_fn is provided.
+        debug: When ``True``, re-raise exceptions in ``_execute`` so the
+            caller (``_cli_run``) can show a full traceback.
     """
 
     __slots__ = (
         "_agents",
         "_console",
         "_current_name",
+        "_debug",
+        "_is_tty",
         "_run_fn",
         "_stream_fn",
         "_streaming",
@@ -116,15 +132,22 @@ class InteractiveConsole:
         stream_fn: StreamFn | None = None,
         console: RichConsole | None = None,
         streaming: bool = False,
+        debug: bool = False,
     ) -> None:
         if not agents:
-            raise ValueError("At least one agent is required")
+            raise ConsoleError(
+                "At least one agent is required",
+                hint="Load at least one agent before starting the chat.",
+            )
         self._agents = dict(agents)
         self._run_fn = run_fn
         self._stream_fn = stream_fn
         self._console = console or RichConsole(stderr=True)
         self._streaming = streaming and stream_fn is not None
+        self._debug = debug
         self._current_name = next(iter(self._agents))
+        # Check once at init; stdin tty-ness doesn't change during a session.
+        self._is_tty: bool = sys.stdin.isatty()
 
     # -- properties ----------------------------------------------------------
 
@@ -185,7 +208,7 @@ class InteractiveConsole:
 
     async def _read_input(self) -> str | None:
         """Read one line from stdin.  Returns ``None`` on EOF."""
-        if sys.stdin.isatty():
+        if self._is_tty:
             prompt = f"[bold cyan]{self._current_name}[/bold cyan]> "
             self._console.print(prompt, end="")
         try:
@@ -212,6 +235,8 @@ class InteractiveConsole:
                 self._console.print(f"[green]{self._current_name}:[/green] {output}")
         except Exception as exc:
             self._console.print(f"[bold red]Error:[/bold red] {exc}")
+            if self._debug:
+                raise
 
     # -- main loop -----------------------------------------------------------
 

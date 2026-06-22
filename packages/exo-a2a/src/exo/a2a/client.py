@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from pathlib import Path
@@ -9,7 +10,9 @@ from typing import Any
 from urllib.parse import urlparse
 
 import httpx
+from pydantic import ValidationError
 
+from exo._internal.resilience import retry_async  # pyright: ignore[reportMissingImports]
 from exo.a2a.types import (  # pyright: ignore[reportMissingImports]
     AgentCard,
     ClientConfig,
@@ -55,7 +58,10 @@ class A2AClient:
             self._agent_card = agent_card
         elif isinstance(agent_card, str):
             if not agent_card.strip():
-                raise A2AClientError("agent_card string cannot be empty")
+                raise A2AClientError(
+                    "agent_card string cannot be empty",
+                    hint="Pass a URL ('https://...') or a local file path to the agent card JSON.",
+                )
             self._source = agent_card.strip()
         else:
             raise A2AClientError(
@@ -78,36 +84,92 @@ class A2AClient:
             return self._agent_card
 
         if self._source is None:
-            raise A2AClientError("No agent card source to resolve")
+            raise A2AClientError(
+                "No agent card source to resolve",
+                hint="Construct A2AClient with an AgentCard instance, a URL, or a file path.",
+            )
 
         if self._source.startswith(("http://", "https://")):
             self._agent_card = await self._resolve_from_url(self._source)
         else:
-            self._agent_card = self._resolve_from_file(self._source)
+            self._agent_card = await self._resolve_from_file(self._source)
         return self._agent_card
 
     async def _resolve_from_url(self, url: str) -> AgentCard:
         """Fetch agent card JSON from a remote URL."""
         parsed = urlparse(url)
         if not parsed.scheme or not parsed.netloc:
-            raise A2AClientError(f"Invalid URL: {url}")
+            raise A2AClientError(
+                f"Invalid URL: {url}",
+                hint="Provide a full URL including scheme, e.g. 'https://myagent.example.com/.well-known/agent-card'.",
+            )
+
+        max_retries = self._config.max_retries
+        retry_delay = self._config.retry_delay
+
+        async def _do_get() -> httpx.Response:
+            # Only httpx.TransportError propagates out so retry_async can catch it.
+            # HTTPStatusError (non-transient) is not retried and is raised immediately.
+            try:
+                resp = await self._http.get(url)
+                resp.raise_for_status()
+                return resp
+            except httpx.HTTPStatusError as exc:
+                raise A2AClientError(
+                    f"HTTP error fetching agent card from {url}: {exc}",
+                    context={"url": url, "status_code": exc.response.status_code},
+                    hint="Verify the agent card endpoint is reachable and returns valid JSON.",
+                ) from exc
+            # httpx.TransportError (subclass of HTTPError, not HTTPStatusError) propagates
+            # so retry_async can catch it on retry_on=(httpx.TransportError,).
+
         try:
-            resp = await self._http.get(url)
-            resp.raise_for_status()
-            return AgentCard(**resp.json())
-        except httpx.HTTPError as exc:
-            raise A2AClientError(f"Failed to fetch agent card from {url}: {exc}") from exc
+            resp = await retry_async(
+                _do_get,
+                attempts=max_retries,
+                base_delay=retry_delay,
+                retry_on=(httpx.TransportError,),
+            )
+        except httpx.TransportError as exc:
+            raise A2AClientError(
+                f"Failed to fetch agent card from {url}.",
+                context={"url": url},
+                hint="Verify the A2A peer is running and the URL points to a valid /.well-known/agent-card endpoint.",
+            ) from exc
+
+        try:
+            data = resp.json()
+            return AgentCard.model_validate(data)
+        except json.JSONDecodeError as exc:
+            raise A2AClientError(
+                f"Invalid agent card JSON at {url}: {exc}",
+                context={"url": url},
+                hint="The /.well-known/agent-card endpoint must return valid AgentCard JSON.",
+            ) from exc
+        except ValidationError as exc:
+            raise A2AClientError(
+                f"Agent card schema mismatch at {url}: {exc}",
+                context={"url": url},
+                hint="The /.well-known/agent-card endpoint must return valid AgentCard JSON.",
+            ) from exc
 
     @staticmethod
-    def _resolve_from_file(path_str: str) -> AgentCard:
-        """Load agent card JSON from a local file."""
+    async def _resolve_from_file(path_str: str) -> AgentCard:
+        """Load agent card JSON from a local file (async via asyncio.to_thread)."""
         path = Path(path_str)
-        if not path.is_file():
-            raise A2AClientError(f"Agent card file not found: {path_str}")
+
+        def _read() -> str:
+            if not path.is_file():
+                raise A2AClientError(f"Agent card file not found: {path_str}")
+            return path.read_text(encoding="utf-8")
+
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-            return AgentCard(**data)
-        except (json.JSONDecodeError, Exception) as exc:
+            raw = await asyncio.to_thread(_read)
+            data = json.loads(raw)
+            return AgentCard.model_validate(data)
+        except A2AClientError:
+            raise
+        except Exception as exc:
             raise A2AClientError(f"Invalid agent card file {path_str}: {exc}") from exc
 
     # -- Task execution -------------------------------------------------------
@@ -126,17 +188,60 @@ class A2AClient:
             A2AClientError: If the request fails.
         """
         card = await self.resolve_agent_card()
+        if not card.url:
+            raise A2AClientError(
+                "Agent card has an empty URL — cannot send task.",
+                hint="Ensure the remote agent is configured with a non-empty url in its AgentCard.",
+            )
         url = card.url.rstrip("/")
         payload: dict[str, Any] = {"text": text}
         if task_id:
             payload["task_id"] = task_id
 
+        max_retries = self._config.max_retries
+        retry_delay = self._config.retry_delay
+
+        async def _do_post() -> httpx.Response:
+            # Only httpx.TransportError propagates out for retry_async to catch.
+            # HTTPStatusError is not retried (non-transient) and raises immediately.
+            try:
+                resp = await self._http.post(f"{url}/", json=payload)
+                resp.raise_for_status()
+                return resp
+            except httpx.HTTPStatusError as exc:
+                raise A2AClientError(
+                    f"Task POST to A2A peer at {url}/ failed.",
+                    context={
+                        "url": f"{url}/",
+                        "task_id": task_id or "(auto)",
+                        "status_code": exc.response.status_code,
+                    },
+                    hint="Check that the remote A2A server is running and reachable. Increase ClientConfig(timeout=...) for slow agents.",
+                ) from exc
+            # httpx.TransportError propagates to retry_async.
+
         try:
-            resp = await self._http.post(f"{url}/", json=payload)
-            resp.raise_for_status()
-            return resp.json()
-        except httpx.HTTPError as exc:
-            raise A2AClientError(f"Task request failed: {exc}") from exc
+            resp = await retry_async(
+                _do_post,
+                attempts=max_retries,
+                base_delay=retry_delay,
+                retry_on=(httpx.TransportError,),
+            )
+        except httpx.TransportError as exc:
+            raise A2AClientError(
+                f"Task POST to A2A peer at {url}/ failed.",
+                context={"url": f"{url}/", "task_id": task_id or "(auto)"},
+                hint="Check that the remote A2A server is running and reachable. Increase ClientConfig(timeout=...) for slow agents.",
+            ) from exc
+
+        try:
+            return resp.json()  # type: ignore[no-any-return]
+        except json.JSONDecodeError as exc:
+            raise A2AClientError(
+                f"Invalid JSON in task response from {url}/.",
+                context={"url": f"{url}/", "task_id": task_id or "(auto)"},
+                hint="The remote A2A server returned a non-JSON body. Check server logs at the peer.",
+            ) from exc
 
     async def send_task_collect(
         self,
@@ -163,24 +268,83 @@ class A2AClient:
         """
         card = await self.resolve_agent_card()
         if not card.capabilities.streaming:
-            raise A2AClientError("Remote agent does not support streaming")
+            raise A2AClientError(
+                "Remote agent does not support streaming.",
+                context={"agent_name": card.name, "url": card.url},
+                hint=(
+                    "Enable streaming on the remote server: ServingConfig(streaming=True). "
+                    "Or use send_task() for a non-streaming request."
+                ),
+            )
+        if not card.url:
+            raise A2AClientError(
+                "Agent card has an empty URL — cannot send streaming task.",
+                hint="Ensure the remote agent is configured with a non-empty url in its AgentCard.",
+            )
 
         url = card.url.rstrip("/")
         payload: dict[str, Any] = {"text": text}
         if task_id:
             payload["task_id"] = task_id
 
+        max_retries = self._config.max_retries
+        retry_delay = self._config.retry_delay
+
+        async def _do_stream_post() -> httpx.Response:
+            # Only httpx.TransportError propagates out for retry_async to catch.
+            # HTTPStatusError is not retried (non-transient) and raises immediately.
+            try:
+                resp = await self._http.post(f"{url}/stream", json=payload)
+                resp.raise_for_status()
+                return resp
+            except httpx.HTTPStatusError as exc:
+                raise A2AClientError(
+                    f"Stream request to A2A peer at {url}/stream failed.",
+                    context={
+                        "url": f"{url}/stream",
+                        "task_id": task_id or "(auto)",
+                        "status_code": exc.response.status_code,
+                    },
+                    hint=(
+                        "Check that the remote A2A server has streaming enabled: ServingConfig(streaming=True). "
+                        "Increase ClientConfig(timeout=...) for slow agents."
+                    ),
+                ) from exc
+            # httpx.TransportError propagates to retry_async.
+
         try:
-            resp = await self._http.post(f"{url}/stream", json=payload)
-            resp.raise_for_status()
-        except httpx.HTTPError as exc:
-            raise A2AClientError(f"Stream request failed: {exc}") from exc
+            resp = await retry_async(
+                _do_stream_post,
+                attempts=max_retries,
+                base_delay=retry_delay,
+                retry_on=(httpx.TransportError,),
+            )
+        except httpx.TransportError as exc:
+            raise A2AClientError(
+                f"Stream request to A2A peer at {url}/stream failed.",
+                context={"url": f"{url}/stream", "task_id": task_id or "(auto)"},
+                hint=(
+                    "Check that the remote A2A server has streaming enabled: ServingConfig(streaming=True). "
+                    "Increase ClientConfig(timeout=...) for slow agents."
+                ),
+            ) from exc
 
         events: list[dict[str, Any]] = []
         for line in resp.text.strip().split("\n"):
             line = line.strip()
             if line:
-                events.append(json.loads(line))
+                try:
+                    events.append(json.loads(line))
+                except json.JSONDecodeError as exc:
+                    raise A2AClientError(
+                        f"Malformed NDJSON line from A2A peer at {url}/stream.",
+                        context={
+                            "url": f"{url}/stream",
+                            "task_id": task_id or "(auto)",
+                            "line": line[:120],
+                        },
+                        hint="The remote agent returned invalid JSON in its streaming response. Check server logs at the peer.",
+                    ) from exc
         return events
 
     # -- Lifecycle ------------------------------------------------------------
@@ -188,6 +352,12 @@ class A2AClient:
     async def close(self) -> None:
         """Close the underlying HTTP client."""
         await self._http.aclose()
+
+    async def __aenter__(self) -> A2AClient:
+        return self
+
+    async def __aexit__(self, *args: object) -> None:
+        await self.close()
 
     def __repr__(self) -> str:
         name = self._agent_card.name if self._agent_card else self._source or "unresolved"
@@ -289,6 +459,12 @@ class RemoteAgent:
     async def close(self) -> None:
         """Close the underlying client."""
         await self._client.close()
+
+    async def __aenter__(self) -> RemoteAgent:
+        return self
+
+    async def __aexit__(self, *args: object) -> None:
+        await self.close()
 
     def __repr__(self) -> str:
         return f"RemoteAgent(name={self.name!r}, client={self._client!r})"

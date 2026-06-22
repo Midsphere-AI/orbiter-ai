@@ -414,8 +414,6 @@ class TestVertexEmbeddings:
         assert emb.dimension == 768
 
 
-
-
 class TestEmbeddingProvider:
     """Tests for the EmbeddingProvider runtime-checkable protocol."""
 
@@ -866,5 +864,3 @@ class TestChromaVectorMemoryStore:
         assert len(results) == 1
         assert results[0].id == item.id
         assert results[0].content == "round trip content"
-
-

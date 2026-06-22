@@ -55,11 +55,16 @@ class MemoryCallOperator(Operator):
         *,
         enabled: bool = True,
         max_retries: int = 1,
+        max_traces: int = 1000,
     ) -> None:
+        if max_retries < 1:
+            msg = f"max_retries must be >= 1, got {max_retries}"
+            raise ValueError(msg)
         self._name = op_name
         self._memory_fn = memory_fn
         self._enabled = enabled
         self._max_retries = max_retries
+        self._max_traces = max_traces
         self._traces: list[MemoryCallTrace] = []
 
     @property
@@ -82,7 +87,7 @@ class MemoryCallOperator(Operator):
         result: Any = None
 
         if not self._enabled:
-            self._traces.append(
+            self._append_trace(
                 MemoryCallTrace(
                     operator_name=self._name,
                     enabled=False,
@@ -96,7 +101,7 @@ class MemoryCallOperator(Operator):
             return None
 
         last_exc: Exception | None = None
-        for attempt in range(self._max_retries):
+        for _attempt in range(self._max_retries):
             try:
                 result = await self._memory_fn(**kwargs)
                 error = None
@@ -108,7 +113,7 @@ class MemoryCallOperator(Operator):
         else:
             # All retries exhausted
             duration_ms = (time.monotonic() - start) * 1000
-            self._traces.append(
+            self._append_trace(
                 MemoryCallTrace(
                     operator_name=self._name,
                     enabled=self._enabled,
@@ -125,7 +130,7 @@ class MemoryCallOperator(Operator):
             return None
 
         duration_ms = (time.monotonic() - start) * 1000
-        self._traces.append(
+        self._append_trace(
             MemoryCallTrace(
                 operator_name=self._name,
                 enabled=self._enabled,
@@ -139,6 +144,12 @@ class MemoryCallOperator(Operator):
         )
         return result
 
+    def _append_trace(self, trace: MemoryCallTrace) -> None:
+        """Append *trace* to the ring buffer, evicting oldest if over cap."""
+        self._traces.append(trace)
+        if len(self._traces) > self._max_traces:
+            self._traces = self._traces[-self._max_traces :]
+
     def get_tunables(self) -> list[TunableSpec]:
         return [
             TunableSpec(
@@ -151,7 +162,7 @@ class MemoryCallOperator(Operator):
                 name="max_retries",
                 kind=TunableKind.DISCRETE,
                 current_value=self._max_retries,
-                constraints={"min": 0, "max": 10},
+                constraints={"min": 1, "max": 10},
             ),
         ]
 
@@ -162,5 +173,9 @@ class MemoryCallOperator(Operator):
         }
 
     def load_state(self, state: dict[str, Any]) -> None:
+        max_retries = state["max_retries"]
+        if max_retries < 1:
+            msg = f"max_retries must be >= 1, got {max_retries}"
+            raise ValueError(msg)
         self._enabled = state["enabled"]
-        self._max_retries = state["max_retries"]
+        self._max_retries = max_retries

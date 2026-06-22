@@ -32,7 +32,7 @@ class _StubStrategy(EvolutionStrategy):
         self.evaluate_calls: list[int] = []
         self._fail_at_epoch = fail_at_epoch
 
-    async def synthesise(
+    async def synthesize(
         self,
         agent: Any,
         data: Sequence[dict[str, Any]],

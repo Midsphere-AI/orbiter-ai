@@ -34,6 +34,24 @@ class TaskPayload(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
     created_at: float = 0.0
     timeout_seconds: float = 300.0
+    retry_policy: dict[str, Any] | None = None
+    """Serialized retry configuration for durable execution backends.
+
+    When set, durable backends (e.g. the Temporal executor) apply it as the
+    per-task retry policy.  Round-trips through
+    :meth:`exo.distributed.temporal.RetryConfig.to_dict` /
+    :meth:`~exo.distributed.temporal.RetryConfig.from_dict`.  Backend-agnostic:
+    the local executor ignores it.
+    """
+    timeouts: dict[str, Any] | None = None
+    """Serialized timeout configuration for durable execution backends.
+
+    Carries the activity- and workflow-level timeouts applied by durable
+    backends.  Round-trips through
+    :meth:`exo.distributed.temporal.TimeoutConfig.to_dict` /
+    :meth:`~exo.distributed.temporal.TimeoutConfig.from_dict`.  The local
+    executor uses only :attr:`timeout_seconds`.
+    """
 
 
 class TaskResult(BaseModel):

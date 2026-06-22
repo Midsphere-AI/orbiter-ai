@@ -6,10 +6,14 @@ from ``Chunk`` objects, producing structured knowledge graph data.
 
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 import re
 from dataclasses import dataclass
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -62,15 +66,22 @@ class TripleExtractor:
             ``get_provider()`` (e.g. ``api_key``, ``base_url``).
     """
 
+    #: Maximum number of concurrent LLM calls for triple extraction.
+    MAX_CONCURRENCY: int = 8
+
     def __init__(
         self,
         model: str,
         *,
         prompt_template: str | None = None,
+        max_concurrency: int | None = None,
         **provider_kwargs: Any,
     ) -> None:
         self.model = model
         self.prompt_template = prompt_template or _DEFAULT_PROMPT
+        self._max_concurrency = (
+            max_concurrency if max_concurrency is not None else self.MAX_CONCURRENCY
+        )
         self._provider_kwargs = provider_kwargs
 
     async def extract(
@@ -92,18 +103,30 @@ class TripleExtractor:
             return []
 
         from exo.models import get_provider  # pyright: ignore[reportMissingImports]
+        from exo.retrieval.types import RetrievalError  # pyright: ignore[reportMissingImports]
         from exo.types import UserMessage
 
         provider = get_provider(self.model, **self._provider_kwargs)
-        all_triples: list[Triple] = []
+        semaphore = asyncio.Semaphore(self._max_concurrency)
 
-        for chunk in chunks:
-            prompt = self.prompt_template.format(text=chunk.content)
-            response = await provider.complete([UserMessage(content=prompt)])
+        async def _extract_one(chunk: Any) -> list[Triple]:
             chunk_id = f"{chunk.document_id}:{chunk.index}"
-            triples = self._parse_triples(response.content, chunk_id)
-            all_triples.extend(triples)
+            prompt = self.prompt_template.format(text=chunk.content)
+            async with semaphore:
+                try:
+                    response = await provider.complete([UserMessage(content=prompt)])
+                except Exception as exc:
+                    raise RetrievalError(
+                        f"Triple extraction LLM call failed: {exc}",
+                        context={"model": self.model, "chunk_id": chunk_id},
+                        hint="Check the model string and API key for the extraction LLM.",
+                    ) from exc
+            return self._parse_triples(response.content, chunk_id)
 
+        results = await asyncio.gather(*(_extract_one(c) for c in chunks))
+        all_triples: list[Triple] = []
+        for chunk_triples in results:
+            all_triples.extend(chunk_triples)
         return all_triples
 
     @staticmethod
@@ -122,11 +145,23 @@ class TripleExtractor:
         # Try to extract a JSON array from the response
         match = re.search(r"\[.*\]", content, re.DOTALL)
         if not match:
+            logger.debug(
+                "TripleExtractor: no JSON array found in LLM response for chunk %r;"
+                " returning empty triple list. Response: %r",
+                source_chunk_id,
+                content[:200],
+            )
             return []
 
         try:
             data = json.loads(match.group())
         except (json.JSONDecodeError, TypeError):
+            logger.debug(
+                "TripleExtractor: failed to parse JSON from LLM response for chunk %r;"
+                " returning empty triple list. Response: %r",
+                source_chunk_id,
+                content[:200],
+            )
             return []
 
         if not isinstance(data, list):

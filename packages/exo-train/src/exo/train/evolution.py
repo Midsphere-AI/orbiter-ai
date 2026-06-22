@@ -116,8 +116,16 @@ class EvolutionStrategy(ABC):
 
     __slots__ = ()
 
+    def reset(self) -> None:  # noqa: B027
+        """Reset strategy state so the pipeline can be re-run from scratch.
+
+        The default implementation is a no-op.  Strategies that maintain
+        stateful RNGs (e.g. :class:`GaussianMutationStrategy`) should
+        override this to reseed their RNG so that re-runs are reproducible.
+        """
+
     @abstractmethod
-    async def synthesise(
+    async def synthesize(
         self,
         agent: Any,
         data: Sequence[dict[str, Any]],
@@ -128,6 +136,15 @@ class EvolutionStrategy(ABC):
         Returns:
             New or augmented training items.
         """
+
+    async def synthesise(
+        self,
+        agent: Any,
+        data: Sequence[dict[str, Any]],
+        epoch: int,
+    ) -> list[dict[str, Any]]:
+        """Deprecated spelling — override synthesize instead."""
+        return await self.synthesize(agent, data, epoch)
 
     @abstractmethod
     async def train(
@@ -187,7 +204,7 @@ class GaussianMutationStrategy(EvolutionStrategy):
         seed:              Optional RNG seed for reproducibility.
     """
 
-    __slots__ = ("_augment_factor", "_learning_rate", "_mutation_std", "_rng")
+    __slots__ = ("_augment_factor", "_learning_rate", "_mutation_std", "_rng", "_seed")
 
     def __init__(
         self,
@@ -205,7 +222,12 @@ class GaussianMutationStrategy(EvolutionStrategy):
         self._mutation_std = mutation_std
         self._augment_factor = augment_factor
         self._learning_rate = learning_rate
+        self._seed = seed
         self._rng = random.Random(seed)
+
+    def reset(self) -> None:
+        """Reseed the RNG so that a re-run produces identical output."""
+        self._rng = random.Random(self._seed)
 
     def _mutate_item(self, item: dict[str, Any]) -> dict[str, Any]:
         """Return a copy of *item* with numeric values perturbed by Gaussian noise."""
@@ -220,7 +242,7 @@ class GaussianMutationStrategy(EvolutionStrategy):
                 mutated[key] = value
         return mutated
 
-    async def synthesise(
+    async def synthesize(
         self,
         agent: Any,
         data: Sequence[dict[str, Any]],
@@ -236,7 +258,7 @@ class GaussianMutationStrategy(EvolutionStrategy):
             for _ in range(self._augment_factor):
                 result.append(self._mutate_item(item))
         logger.debug(
-            "GaussianMutationStrategy.synthesise: epoch=%d, original=%d, augmented=%d",
+            "GaussianMutationStrategy.synthesize: epoch=%d, original=%d, augmented=%d",
             epoch,
             len(data),
             len(result),
@@ -370,7 +392,7 @@ class EvolutionPipeline:
 
                 # Phase 1: Synthesis
                 if EvolutionPhase.SYNTHESIS in cfg.phases:
-                    synthesised = await self._strategy.synthesise(agent, current_data, epoch_idx)
+                    synthesised = await self._strategy.synthesize(agent, current_data, epoch_idx)
                     epoch.synthesis_count = len(synthesised)
                     current_data = synthesised if synthesised else current_data
 
@@ -417,8 +439,12 @@ class EvolutionPipeline:
         return result
 
     def reset(self) -> None:
-        """Reset pipeline to IDLE so it can be re-run."""
+        """Reset pipeline to IDLE so it can be re-run.
+
+        Also resets the strategy (e.g. reseeds RNGs) for reproducibility.
+        """
         self._state = EvolutionState.IDLE
+        self._strategy.reset()
 
     def __repr__(self) -> str:
         return (

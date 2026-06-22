@@ -7,6 +7,7 @@ via a ``_migrations`` metadata table.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -55,8 +56,15 @@ class MigrationRegistry:
         """Register a migration. Raises if version is duplicate."""
         for m in self._migrations:
             if m.version == migration.version:
-                msg = f"Duplicate migration version: {migration.version}"
-                raise MigrationError(msg)
+                raise MigrationError(
+                    f"Duplicate migration version {migration.version}.",
+                    context={"version": migration.version},
+                    hint=(
+                        f"Already registered versions: "
+                        f"{[m.version for m in self._migrations]}. "
+                        "Each migration must have a unique, monotonically increasing version."
+                    ),
+                )
         self._migrations.append(migration)
         self._migrations.sort(key=lambda m: m.version)
 
@@ -112,8 +120,14 @@ async def run_migrations(store: Any, registry: MigrationRegistry) -> int:
         return await _run_sqlite(store, registry)
     if backend == "postgres":
         return await _run_postgres(store, registry)
-    msg = f"Unsupported store type: {type(store).__name__}"
-    raise MigrationError(msg)
+    raise MigrationError(
+        f"Unsupported store type: {type(store).__name__}.",
+        context={"store_type": type(store).__name__},
+        hint=(
+            "Pass a SQLiteMemoryStore or PostgresMemoryStore instance. "
+            f"Got: {type(store).__name__}."
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -176,13 +190,17 @@ async def _run_postgres(store: Any, registry: MigrationRegistry) -> int:
         applied = 0
         for migration in pending:
             try:
-                await migration.up(conn)
-                await conn.execute(
-                    "INSERT INTO _migrations (version, description, applied_at) "
-                    "VALUES ($1, $2, NOW()::text)",
-                    migration.version,
-                    migration.description,
-                )
+                # Each migration runs inside its own transaction so that a
+                # failure doesn't partially apply a migration (SQLite commits
+                # per migration too, achieving equivalent isolation).
+                async with conn.transaction():
+                    await migration.up(conn)
+                    await conn.execute(
+                        "INSERT INTO _migrations (version, description, applied_at) "
+                        "VALUES ($1, $2, NOW()::text)",
+                        migration.version,
+                        migration.description,
+                    )
                 applied += 1
                 logger.info("Applied migration v%d: %s", migration.version, migration.description)
             except Exception as exc:
@@ -215,3 +233,35 @@ def _detect_backend(store: Any) -> str:
     if hasattr(store, "_pool"):
         return "postgres"
     return "unknown"
+
+
+# ---------------------------------------------------------------------------
+# Built-in migrations
+# ---------------------------------------------------------------------------
+
+
+async def _migration_v1_up(conn: Any) -> None:
+    """Add the ``category`` column to ``memory_items``.
+
+    Works for both SQLite (aiosqlite.Connection) and Postgres
+    (asyncpg.Connection) — both expose ``.execute()``. SQLite does not
+    support ``ADD COLUMN IF NOT EXISTS``, so a failure (column already
+    present) is swallowed to keep the migration idempotent.
+    """
+    with contextlib.suppress(Exception):
+        await conn.execute("ALTER TABLE memory_items ADD COLUMN category TEXT")
+
+
+DEFAULT_REGISTRY = MigrationRegistry()
+DEFAULT_REGISTRY.register(
+    Migration(
+        version=1,
+        description="Add category column to memory_items",
+        up=_migration_v1_up,
+    )
+)
+
+
+def get_default_registry() -> MigrationRegistry:
+    """Return the built-in migration registry with all bundled migrations."""
+    return DEFAULT_REGISTRY

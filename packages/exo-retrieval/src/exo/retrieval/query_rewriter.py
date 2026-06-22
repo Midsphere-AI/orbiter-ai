@@ -7,7 +7,10 @@ retrieval results.
 
 from __future__ import annotations
 
+import logging
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 _DEFAULT_TEMPLATE = """You are a search query optimizer. Rewrite the following query to improve retrieval quality.
 
@@ -57,6 +60,7 @@ class QueryRewriter:
         self.model = model
         self.prompt_template = prompt_template or _DEFAULT_TEMPLATE
         self._provider_kwargs = provider_kwargs
+        self._provider: Any = None  # lazily initialised on first rewrite call
 
     async def rewrite(
         self,
@@ -86,8 +90,19 @@ class QueryRewriter:
         else:
             prompt = self.prompt_template.format(query=query)
 
-        provider = get_provider(self.model, **self._provider_kwargs)
-        response = await provider.complete([UserMessage(content=prompt)])
+        if self._provider is None:
+            self._provider = get_provider(self.model, **self._provider_kwargs)
+        provider = self._provider
+        try:
+            response = await provider.complete([UserMessage(content=prompt)])
+        except Exception as exc:
+            from exo.retrieval.types import RetrievalError  # pyright: ignore[reportMissingImports]
+
+            raise RetrievalError(
+                f"Query rewrite failed: {exc}",
+                context={"model": self.model},
+                hint="Check the model string and API key for the rewrite LLM.",
+            ) from exc
 
         # Strip whitespace and return; fall back to original on empty response
         rewritten = response.content.strip()

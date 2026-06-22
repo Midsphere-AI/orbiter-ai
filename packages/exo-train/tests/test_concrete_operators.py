@@ -49,15 +49,18 @@ async def _fake_memory(**kwargs: Any) -> list[str]:
     return ["memory_1", "memory_2"]
 
 
-_fail_count = 0
+def _make_flaky_memory(fail_times: int = 1) -> Any:
+    """Return a memory fn that fails *fail_times* times then succeeds."""
+    call_count = 0
 
+    async def _flaky_memory(**kwargs: Any) -> list[str]:
+        nonlocal call_count
+        call_count += 1
+        if call_count <= fail_times:
+            raise ConnectionError("transient error")
+        return ["recovered"]
 
-async def _flaky_memory(**kwargs: Any) -> list[str]:
-    global _fail_count
-    _fail_count += 1
-    if _fail_count <= 1:
-        raise ConnectionError("transient error")
-    return ["recovered"]
+    return _flaky_memory
 
 
 async def _always_failing_memory(**kwargs: Any) -> list[str]:
@@ -293,7 +296,7 @@ class TestMemoryCallOperator:
             name="max_retries",
             kind=TunableKind.DISCRETE,
             current_value=3,
-            constraints={"min": 0, "max": 10},
+            constraints={"min": 1, "max": 10},
         )
 
     async def test_execute(self) -> None:
@@ -315,9 +318,7 @@ class TestMemoryCallOperator:
         assert traces[0].result is None
 
     async def test_retry_on_transient_failure(self) -> None:
-        global _fail_count
-        _fail_count = 0
-        op = MemoryCallOperator("mem-1", _flaky_memory, max_retries=3)
+        op = MemoryCallOperator("mem-1", _make_flaky_memory(fail_times=1), max_retries=3)
         result = await op.execute()
         assert result == ["recovered"]
         traces = op.traces
@@ -358,13 +359,18 @@ class TestMemoryCallOperator:
 
     def test_load_state(self) -> None:
         op = MemoryCallOperator("m", _fake_memory)
-        op.load_state({"enabled": False, "max_retries": 0})
-        assert op.get_state() == {"enabled": False, "max_retries": 0}
+        op.load_state({"enabled": False, "max_retries": 2})
+        assert op.get_state() == {"enabled": False, "max_retries": 2}
+
+    def test_load_state_invalid_max_retries(self) -> None:
+        op = MemoryCallOperator("m", _fake_memory)
+        with pytest.raises(ValueError, match="max_retries must be >= 1"):
+            op.load_state({"enabled": False, "max_retries": 0})
 
     def test_state_roundtrip(self) -> None:
         op = MemoryCallOperator("m", _fake_memory, enabled=True, max_retries=3)
         original = op.get_state()
-        op.load_state({"enabled": False, "max_retries": 0})
+        op.load_state({"enabled": False, "max_retries": 2})
         assert op.get_state() != original
         op.load_state(original)
         assert op.get_state() == original

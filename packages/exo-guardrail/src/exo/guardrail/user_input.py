@@ -36,15 +36,17 @@ _DEFAULT_PATTERNS: list[tuple[str, RiskLevel, str]] = [
         "instruction_override",
     ),
     # Role impersonation / DAN-style jailbreaks
-    (r"you\s+are\s+now\s+(in\s+)?(\w+\s+)?mode", RiskLevel.HIGH, "role_impersonation"),
+    (r"you\s+are\s+now\s+(in\s+)?(\w+\s+)*mode", RiskLevel.HIGH, "role_impersonation"),
     (
-        r"act\s+as\s+(if\s+you\s+(are|were)\s+)?(a\s+)?(\w+\s+)*(unrestricted|unfiltered|evil|dan\b)",
+        r"(act|behave|pose|roleplay)\s+(as|like)\s+(if\s+you\s+(are|were)\s+)?"
+        r"(a\s+)?(\w+\s+)*(unrestricted|unfiltered|evil|dan\b)",
         RiskLevel.HIGH,
         "role_impersonation",
     ),
     (r"\bdan\s+mode\b", RiskLevel.HIGH, "role_impersonation"),
     (
-        r"pretend\s+you\s+(are|have)\s+no\s+(restrictions|rules|limitations|guidelines)",
+        r"pretend\s+you\s+(are|have|do\s+not\s+have)\s+"
+        r"(no\s+|without\s+|absolutely\s+no\s+)?(restrictions|rules|limitations|guidelines)",
         RiskLevel.HIGH,
         "role_impersonation",
     ),
@@ -63,7 +65,7 @@ _DEFAULT_PATTERNS: list[tuple[str, RiskLevel, str]] = [
     (r"```\s*(system|admin|root)\b", RiskLevel.HIGH, "delimiter_attack"),
     (r"\[INST\]|\[/INST\]|<<SYS>>|<\|im_start\|>|<\|im_end\|>", RiskLevel.HIGH, "delimiter_attack"),
     # Encoded / obfuscated injection
-    (r"base64[:\s]+(decode|encode)", RiskLevel.MEDIUM, "encoded_injection"),
+    (r"base64[-:\s]+(decode|encode)", RiskLevel.MEDIUM, "encoded_injection"),
     (r"eval\s*\(|exec\s*\(", RiskLevel.MEDIUM, "code_injection"),
 ]
 
@@ -126,11 +128,12 @@ class PatternBackend(GuardrailBackend):
         if worst_level == RiskLevel.SAFE:
             return RiskAssessment(has_risk=False, risk_level=RiskLevel.SAFE)
 
+        n = len(matched_patterns)
         return RiskAssessment(
             has_risk=True,
             risk_level=worst_level,
             risk_type="prompt_injection",
-            confidence=min(1.0, len(matched_patterns) * 0.5),
+            confidence=min(1.0, 0.7 + (n - 1) * 0.15),
             details={"matched_patterns": matched_patterns},
         )
 

@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
+from pathlib import Path
+from unittest.mock import patch
+
 import pytest
 
 from exo.context.workspace import (  # pyright: ignore[reportMissingImports]
@@ -183,7 +187,7 @@ class TestVersioning:
         await ws.write("f", "v1")
         await ws.write("f", "v2")
         await ws.write("f", "v3")
-        ws.revert_to_version("f", 0)
+        await ws.revert_to_version("f", 0)
         assert ws.read("f") == "v1"
         # Revert adds a new version (doesn't truncate)
         assert ws.get("f") is not None
@@ -192,19 +196,32 @@ class TestVersioning:
     async def test_revert_missing_raises(self) -> None:
         ws = Workspace("ws")
         with pytest.raises(WorkspaceError, match="not found"):
-            ws.revert_to_version("missing", 0)
+            await ws.revert_to_version("missing", 0)
 
     async def test_revert_invalid_version_raises(self) -> None:
         ws = Workspace("ws")
         await ws.write("f", "v1")
         with pytest.raises(WorkspaceError, match="out of range"):
-            ws.revert_to_version("f", 5)
+            await ws.revert_to_version("f", 5)
 
     async def test_revert_negative_version_raises(self) -> None:
         ws = Workspace("ws")
         await ws.write("f", "v1")
         with pytest.raises(WorkspaceError, match="out of range"):
-            ws.revert_to_version("f", -1)
+            await ws.revert_to_version("f", -1)
+
+    async def test_revert_fires_on_update(self) -> None:
+        events: list[tuple[str, str]] = []
+
+        async def handler(event: str, artifact: Artifact) -> None:
+            events.append((event, artifact.name))
+
+        ws = Workspace("ws")
+        ws.on("on_update", handler)
+        await ws.write("f", "v1")
+        await ws.write("f", "v2")
+        await ws.revert_to_version("f", 0)
+        assert ("on_update", "f") in events
 
 
 # ── Observer notifications ───────────────────────────────────────────
@@ -331,6 +348,96 @@ class TestFilesystemPersistence:
         ws = Workspace("ws", storage_path=path)
         await ws.write("file", "v1")
         await ws.write("file", "v2")
-        ws.revert_to_version("file", 0)
+        await ws.revert_to_version("file", 0)
         content_file = path / "file" / "content"
         assert content_file.read_text() == "v1"
+
+
+# ── Atomic persist + cancellation safety ─────────────────────────────
+
+
+class TestAtomicPersist:
+    """Verify that _persist is atomic: a cancel/error mid-write leaves no corrupt file."""
+
+    async def test_no_temp_files_left_after_successful_write(self, tmp_path: Path) -> None:
+        ws = Workspace("ws", storage_path=tmp_path)
+        await ws.write("artifact", "some content")
+        artifact_dir = tmp_path / "artifact"
+        # No .tmp files should remain after a clean write
+        tmp_files = list(artifact_dir.glob("*.tmp"))
+        assert tmp_files == [], f"Unexpected temp files: {tmp_files}"
+
+    async def test_no_corrupt_file_after_simulated_write_failure(self, tmp_path: Path) -> None:
+        """When the content write fails, the pre-existing content file must remain intact."""
+        ws = Workspace("ws", storage_path=tmp_path)
+        # Establish a clean first version
+        await ws.write("artifact", "original content")
+        content_file = tmp_path / "artifact" / "content"
+        assert content_file.read_text() == "original content"
+
+        # Patch write_text on the temp content path to raise mid-write
+        original_write_text = Path.write_text
+
+        def failing_write(self_path: Path, *args: object, **kwargs: object) -> None:
+            if self_path.suffix == ".tmp" and "content" in self_path.name:
+                raise OSError("simulated disk-full error")
+            return original_write_text(self_path, *args, **kwargs)  # type: ignore[arg-type]
+
+        with (
+            patch.object(Path, "write_text", failing_write),
+            pytest.raises(WorkspaceError, match="Could not write artifact"),
+        ):
+            await ws.write("artifact", "corrupt content")
+
+        # The original content file must be untouched
+        assert content_file.read_text() == "original content"
+        # No .tmp files should remain
+        tmp_files = list((tmp_path / "artifact").glob("*.tmp"))
+        assert tmp_files == [], f"Temp files leaked: {tmp_files}"
+
+    async def test_cancellation_leaves_no_partial_file(self, tmp_path: Path) -> None:
+        """A CancelledError raised inside _persist cleanup leaves no .tmp files."""
+        ws = Workspace("ws", storage_path=tmp_path)
+        await ws.write("artifact", "original")
+
+        original_write_text = Path.write_text
+        call_count = 0
+
+        def cancel_on_second_write(self_path: Path, *args: object, **kwargs: object) -> None:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 2 and self_path.suffix == ".tmp":
+                raise asyncio.CancelledError()
+            return original_write_text(self_path, *args, **kwargs)  # type: ignore[arg-type]
+
+        with (
+            patch.object(Path, "write_text", cancel_on_second_write),
+            pytest.raises(asyncio.CancelledError),
+        ):
+            ws._persist(ws._artifacts["artifact"])
+
+        # No .tmp files should remain after cancellation
+        tmp_files = list((tmp_path / "artifact").glob("*.tmp"))
+        assert tmp_files == [], f"Temp files leaked after cancel: {tmp_files}"
+
+
+# ── WorkspaceError hints ─────────────────────────────────────────────
+
+
+class TestWorkspaceErrorHints:
+    def test_empty_workspace_id_has_hint(self) -> None:
+        from exo.types import ExoError  # pyright: ignore[reportMissingImports]
+
+        with pytest.raises(WorkspaceError) as exc_info:
+            Workspace("")
+        err = exc_info.value
+        assert isinstance(err, ExoError)
+        assert err.hint is not None
+        assert "workspace_id" in err.hint.lower() or "workspace" in err.hint.lower()
+
+    async def test_empty_artifact_name_has_hint(self) -> None:
+        ws = Workspace("ws")
+        with pytest.raises(WorkspaceError) as exc_info:
+            await ws.write("", "content")
+        err = exc_info.value
+        assert err.hint is not None

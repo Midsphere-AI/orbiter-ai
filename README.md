@@ -4,7 +4,7 @@
 
 ### Smart agents by default, not by configuration.
 
-[![Python 3.11+](https://img.shields.io/badge/python-3.11+-3776AB.svg?style=flat-square&logo=python&logoColor=white)](https://python.org)
+[![Python 3.13+](https://img.shields.io/badge/python-3.13+-3776AB.svg?style=flat-square&logo=python&logoColor=white)](https://python.org)
 [![License: MIT](https://img.shields.io/badge/license-MIT-22c55e.svg?style=flat-square)](LICENSE)
 [![UV Workspace](https://img.shields.io/badge/uv-workspace-DE5FE9.svg?style=flat-square&logo=uv&logoColor=white)](https://docs.astral.sh/uv/)
 [![Pydantic v2](https://img.shields.io/badge/pydantic-v2-E92063.svg?style=flat-square&logo=pydantic&logoColor=white)](https://docs.pydantic.dev/)
@@ -34,7 +34,7 @@ pip install exo-ai          # full framework
 pip install exo-core        # just the agent runtime
 ```
 
-Requires Python 3.11+.
+Requires Python 3.13+.
 
 ---
 

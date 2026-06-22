@@ -2,7 +2,10 @@
 
 import pytest
 
-from exo.context.state import ContextState  # pyright: ignore[reportMissingImports]
+from exo.context.state import (  # pyright: ignore[reportMissingImports]
+    ContextState,
+    ContextStateKeyError,
+)
 
 # ── Basic read/write ─────────────────────────────────────────────────
 
@@ -25,8 +28,15 @@ class TestBasicReadWrite:
 
     def test_getitem_missing_raises(self) -> None:
         s = ContextState()
-        with pytest.raises(KeyError, match="missing"):
+        with pytest.raises(ContextStateKeyError, match="missing"):
             _ = s["missing"]
+
+    def test_getitem_missing_has_actionable_hint(self) -> None:
+        s = ContextState()
+        with pytest.raises(ContextStateKeyError) as exc_info:
+            _ = s["my_key"]
+        assert exc_info.value.hint is not None
+        assert "get" in exc_info.value.hint
 
     def test_contains(self) -> None:
         s = ContextState()

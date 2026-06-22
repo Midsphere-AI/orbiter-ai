@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from pathlib import Path
 
 from watchfiles import Change, awatch
@@ -19,69 +19,13 @@ from exo.skills import (
     SkillChangeEvent,
     SkillWatcher,
     _collect_skills,
-    _skill_fingerprint,
 )
+from exo_skills.watchers._utils import _diff_snapshots
 
 logger = logging.getLogger(__name__)
 
-
-def _diff_snapshots(
-    old: dict[str, Skill],
-    new: dict[str, Skill],
-    source_path: str,
-) -> list[SkillChangeEvent]:
-    """Compare two skill snapshots and return a list of change events.
-
-    Args:
-        old: Previous snapshot mapping skill name to Skill.
-        new: Current snapshot mapping skill name to Skill.
-        source_path: The root directory being watched (for event metadata).
-
-    Returns:
-        List of :class:`SkillChangeEvent` describing added, removed, and
-        modified skills.  Returns an empty list when the snapshots are
-        identical.
-    """
-    events: list[SkillChangeEvent] = []
-
-    old_names = set(old)
-    new_names = set(new)
-
-    # Added skills
-    for name in sorted(new_names - old_names):
-        events.append(
-            SkillChangeEvent(
-                kind="added",
-                skill_name=name,
-                skill=new[name],
-                source_path=source_path,
-            )
-        )
-
-    # Removed skills
-    for name in sorted(old_names - new_names):
-        events.append(
-            SkillChangeEvent(
-                kind="removed",
-                skill_name=name,
-                skill=None,
-                source_path=source_path,
-            )
-        )
-
-    # Modified skills
-    for name in sorted(old_names & new_names):
-        if _skill_fingerprint(old[name]) != _skill_fingerprint(new[name]):
-            events.append(
-                SkillChangeEvent(
-                    kind="modified",
-                    skill_name=name,
-                    skill=new[name],
-                    source_path=source_path,
-                )
-            )
-
-    return events
+# Re-export for backward compatibility (tests import _diff_snapshots from here).
+__all__ = ["LocalFileWatcher", "_diff_snapshots", "_skill_file_filter"]
 
 
 def _skill_file_filter(change: Change, path: str) -> bool:
@@ -105,6 +49,10 @@ class LocalFileWatcher(SkillWatcher):
     and diff against the previous snapshot, yielding batches of
     :class:`SkillChangeEvent` objects.
 
+    This watcher is **restartable**: calling :meth:`stop` and then
+    :meth:`watch` again resets the stop event so the watcher can run a second
+    time from the same instance.
+
     Args:
         path: Root directory to watch for skill files.
         debounce_ms: Minimum quiet period (in milliseconds) before a batch
@@ -124,12 +72,18 @@ class LocalFileWatcher(SkillWatcher):
         self._stop_event = asyncio.Event()
         self._snapshot: dict[str, Skill] = {}
 
-    async def watch(self) -> AsyncIterator[list[SkillChangeEvent]]:
+    async def watch(self) -> AsyncGenerator[list[SkillChangeEvent]]:
         """Yield batches of skill change events as they occur.
 
         Takes an initial snapshot, then watches the directory for changes.
         The iterator terminates when :meth:`stop` is called.
+
+        The stop event is reset at entry so the watcher can be restarted
+        after a previous :meth:`stop` call.
         """
+        # Reset so the watcher can be re-started after a previous stop().
+        self._stop_event.clear()
+
         self._snapshot = _collect_skills(self._path)
         source = str(self._path)
         logger.debug(

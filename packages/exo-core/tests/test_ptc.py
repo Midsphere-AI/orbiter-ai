@@ -1803,10 +1803,12 @@ class TestSpawnSelfPTCLeakRegression:
         )
 
         # Mimic the construction path in spawn_self
+        from exo.agent import _SUBAGENT_TOOL_NAMES
+
         child_tools = [
             t
             for name, t in parent.tools.items()
-            if name != "spawn_self"
+            if name not in _SUBAGENT_TOOL_NAMES
             and not getattr(t, "_is_context_tool", False)
             and not getattr(t, "_is_ptc_tool", False)
         ]

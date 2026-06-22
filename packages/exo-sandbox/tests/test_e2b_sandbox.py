@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import warnings
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -12,6 +14,10 @@ from exo.sandbox.base import (  # pyright: ignore[reportMissingImports]
     SandboxStatus,
 )
 from exo.sandbox.e2b import E2BSandbox  # pyright: ignore[reportMissingImports]
+
+# TerminalTool is deprecated; suppress the warning in behavioural tests that
+# exercise its functionality via E2B's terminal_tool() factory.
+warnings.filterwarnings("ignore", category=DeprecationWarning, module="exo.sandbox.tools")
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -337,13 +343,25 @@ class TestRunTool:
         assert result["path"] == "/"
         mock_sb.files.list.assert_called_once_with("/")
 
-    async def test_run_unknown_tool(self) -> None:
-        sb, _ = await self._make_running()
-        result = await sb.run_tool("custom_thing", {"foo": "bar"})
+    async def test_run_code_executes_in_vm(self) -> None:
+        sb, mock_sb = await self._make_running()
+        result = await sb.run_tool("code", {"code": "print('hi')"})
 
-        assert result["tool"] == "custom_thing"
-        assert result["arguments"] == {"foo": "bar"}
         assert result["status"] == "ok"
+        assert result["exit_code"] == 0
+        # code is base64'd and piped to python3 in the remote VM
+        cmd = mock_sb.commands.run.call_args[0][0]
+        assert "base64 -d | python3" in cmd
+
+    async def test_run_unknown_tool_raises(self) -> None:
+        sb, _ = await self._make_running()
+        with pytest.raises(SandboxError, match="Unknown tool 'custom_thing'"):
+            await sb.run_tool("custom_thing", {"foo": "bar"})
+
+    async def test_run_typo_tool_lists_known_names(self) -> None:
+        sb, _ = await self._make_running()
+        with pytest.raises(SandboxError, match="file_write"):
+            await sb.run_tool("file_writ", {"path": "/x", "content": "y"})
 
     async def test_run_tool_not_running(self) -> None:
         sb = E2BSandbox(sandbox_id="s10", api_key="k")
@@ -375,6 +393,125 @@ class TestContextManager:
                 assert s is sb
 
         assert sb.status == SandboxStatus.CLOSED
+
+
+# ---------------------------------------------------------------------------
+# TestRawHandle
+# ---------------------------------------------------------------------------
+
+
+class TestRawHandle:
+    """Test the public ``e2b_sandbox`` accessor for the raw SDK handle."""
+
+    async def test_returns_handle_when_running(self) -> None:
+        mock_sb = _mock_e2b_sandbox()
+        mock_mod = _mock_e2b_module(mock_sb)
+        sb = E2BSandbox(sandbox_id="rh1", api_key="k")
+
+        with patch.object(E2BSandbox, "_load_e2b", return_value=mock_mod):
+            await sb.start()
+
+        assert sb.e2b_sandbox is mock_sb
+
+    def test_raises_before_start(self) -> None:
+        sb = E2BSandbox(sandbox_id="rh2", api_key="k")
+        with pytest.raises(SandboxError, match="not running"):
+            _ = sb.e2b_sandbox
+
+    async def test_raises_after_close(self) -> None:
+        mock_sb = _mock_e2b_sandbox()
+        mock_mod = _mock_e2b_module(mock_sb)
+        sb = E2BSandbox(sandbox_id="rh3", api_key="k")
+
+        with patch.object(E2BSandbox, "_load_e2b", return_value=mock_mod):
+            await sb.start()
+        await sb.cleanup()
+
+        with pytest.raises(SandboxError, match="not running"):
+            _ = sb.e2b_sandbox
+
+    async def test_handle_exposes_native_sdk_features(self) -> None:
+        """The raw handle gives access to e2b SDK methods run_tool does not wrap."""
+        mock_sb = _mock_e2b_sandbox()
+        mock_mod = _mock_e2b_module(mock_sb)
+        sb = E2BSandbox(sandbox_id="rh4", api_key="k")
+
+        with patch.object(E2BSandbox, "_load_e2b", return_value=mock_mod):
+            await sb.start()
+
+        # e.g. uploading a file straight through the SDK
+        sb.e2b_sandbox.files.write("/tmp/upload.txt", "payload")
+        mock_sb.files.write.assert_called_once_with("/tmp/upload.txt", "payload")
+
+
+# ---------------------------------------------------------------------------
+# TestConvenienceMethods
+# ---------------------------------------------------------------------------
+
+
+class TestConvenienceMethods:
+    """Test the rookie-friendly file/command helpers on E2BSandbox."""
+
+    async def _running(self) -> tuple[E2BSandbox, MagicMock]:
+        mock_sb = _mock_e2b_sandbox()
+        mock_mod = _mock_e2b_module(mock_sb)
+        sb = E2BSandbox(sandbox_id="cv", api_key="k")
+        with patch.object(E2BSandbox, "_load_e2b", return_value=mock_mod):
+            await sb.start()
+        return sb, mock_sb
+
+    async def test_upload(self, tmp_path: Path) -> None:
+        sb, mock_sb = await self._running()
+        local = tmp_path / "data.csv"
+        local.write_text("a,b,c")
+
+        result = await sb.upload(local, "/home/user/data.csv")
+
+        assert result == "/home/user/data.csv"
+        mock_sb.files.write.assert_called_once_with("/home/user/data.csv", b"a,b,c")
+
+    async def test_download(self, tmp_path: Path) -> None:
+        sb, mock_sb = await self._running()
+        dest = tmp_path / "out.txt"
+
+        result = await sb.download("/home/user/out.txt", dest)
+
+        assert result == str(dest)
+        assert dest.read_text() == "file content"  # from the mock files.read
+        mock_sb.files.read.assert_called_once_with("/home/user/out.txt")
+
+    async def test_write_and_read_file(self) -> None:
+        sb, mock_sb = await self._running()
+
+        assert await sb.write_file("/tmp/x.txt", "hi") == "/tmp/x.txt"
+        mock_sb.files.write.assert_called_once_with("/tmp/x.txt", "hi")
+
+        assert await sb.read_file("/tmp/x.txt") == "file content"
+
+    async def test_list_files(self) -> None:
+        sb, mock_sb = await self._running()
+        entries = await sb.list_files("/home")
+        assert len(entries) == 2
+        mock_sb.files.list.assert_called_once_with("/home")
+
+    async def test_run_foreground(self) -> None:
+        sb, mock_sb = await self._running()
+        result = await sb.run("echo hi")
+        assert result == {"stdout": "hello\n", "stderr": "", "exit_code": 0}
+        mock_sb.commands.run.assert_called_once_with("echo hi")
+
+    async def test_run_background_returns_handle(self) -> None:
+        sb, mock_sb = await self._running()
+        handle = MagicMock()
+        mock_sb.commands.run.return_value = handle
+        result = await sb.run("sleep 100", background=True)
+        assert result is handle
+        mock_sb.commands.run.assert_called_once_with("sleep 100", background=True)
+
+    async def test_helpers_raise_before_start(self) -> None:
+        sb = E2BSandbox(sandbox_id="cv2", api_key="k")  # never started
+        with pytest.raises(SandboxError, match="not running"):
+            await sb.read_file("/tmp/x")
 
 
 # ---------------------------------------------------------------------------
@@ -603,6 +740,21 @@ class TestToolRegistration:
         sb.register_tool("tool_a", h1)
         sb.register_tool("tool_b", h2)
         assert set(sb.registered_tools) == {"tool_a", "tool_b"}
+
+    async def test_register_tool_object_form(self) -> None:
+        """E2B also accepts the Tool-object form: register_tool(tool)."""
+        sb = self._make_running()
+
+        class _EchoTool:
+            name = "echo"
+
+            async def execute(self, **kwargs: Any) -> dict:
+                return {"echo": kwargs.get("message")}
+
+        sb.register_tool(_EchoTool())
+        assert "echo" in sb.registered_tools
+        result = await sb.run_tool("echo", {"message": "hi"})
+        assert result == {"echo": "hi"}
 
     async def test_run_tool_dispatches_to_registered(self) -> None:
         sb = self._make_running()

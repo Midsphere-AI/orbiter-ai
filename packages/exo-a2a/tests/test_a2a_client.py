@@ -188,7 +188,7 @@ class TestA2AClientSendTask:
         client._http = AsyncMock()
         client._http.post = AsyncMock(side_effect=httpx.ConnectError("refused"))
 
-        with pytest.raises(A2AClientError, match="Task request failed"):
+        with pytest.raises(A2AClientError, match="Task POST to A2A peer"):
             await client.send_task("test")
 
 
@@ -234,7 +234,7 @@ class TestA2AClientCollect:
         client._http = AsyncMock()
         client._http.post = AsyncMock(side_effect=httpx.ConnectError("refused"))
 
-        with pytest.raises(A2AClientError, match="Stream request failed"):
+        with pytest.raises(A2AClientError, match="Stream request to A2A peer"):
             await client.send_task_collect("test")
 
 
@@ -391,3 +391,228 @@ class TestExtractText:
     def test_non_dict_artifact(self) -> None:
         resp = {"artifact": "not-a-dict", "result": "ok"}
         assert _extract_text(resp) == "ok"
+
+
+# ===========================================================================
+# Error DX — malformed JSON / schema mismatch
+# ===========================================================================
+
+
+class TestMalformedNDJSON:
+    """send_task_collect wraps json.JSONDecodeError as A2AClientError."""
+
+    async def test_malformed_ndjson_line_raises(self) -> None:
+        card = _make_card(streaming=True)
+        client = A2AClient(card)
+
+        mock_resp = MagicMock()
+        mock_resp.text = '{"ok": 1}\nnot-valid-json\n{"ok": 3}'
+        mock_resp.raise_for_status = MagicMock()
+        client._http = AsyncMock()
+        client._http.post = AsyncMock(return_value=mock_resp)
+
+        with pytest.raises(A2AClientError, match="Malformed NDJSON"):
+            await client.send_task_collect("test")
+
+    async def test_malformed_ndjson_carries_context(self) -> None:
+        card = _make_card(streaming=True)
+        client = A2AClient(card)
+
+        mock_resp = MagicMock()
+        mock_resp.text = "not-json"
+        mock_resp.raise_for_status = MagicMock()
+        client._http = AsyncMock()
+        client._http.post = AsyncMock(return_value=mock_resp)
+
+        with pytest.raises(A2AClientError) as exc_info:
+            await client.send_task_collect("test")
+        err = exc_info.value
+        assert err.context is not None
+        assert "url" in err.context
+        assert err.hint is not None
+
+
+class TestMalformedAgentCardJSON:
+    """_resolve_from_url wraps json.JSONDecodeError and ValidationError as A2AClientError."""
+
+    async def test_json_decode_error_raises_client_error(self) -> None:
+        import json as _json
+
+        client = A2AClient("http://remote:9000/.well-known/agent-card")
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock()
+        mock_resp.json.side_effect = _json.JSONDecodeError("bad", "", 0)
+        client._http = AsyncMock()
+        client._http.get = AsyncMock(return_value=mock_resp)
+
+        with pytest.raises(A2AClientError, match="Invalid agent card JSON"):
+            await client.resolve_agent_card()
+
+    async def test_schema_mismatch_raises_client_error(self) -> None:
+        """AgentCard with missing required field 'name' raises A2AClientError."""
+        client = A2AClient("http://remote:9000/.well-known/agent-card")
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock()
+        # Return JSON that fails AgentCard validation (missing required 'name')
+        mock_resp.json.return_value = {"not_a_valid_field": "bad"}
+        client._http = AsyncMock()
+        client._http.get = AsyncMock(return_value=mock_resp)
+
+        with pytest.raises(A2AClientError):
+            await client.resolve_agent_card()
+
+
+# ===========================================================================
+# Context manager — async with A2AClient / RemoteAgent
+# ===========================================================================
+
+
+class TestAsyncContextManager:
+    async def test_a2a_client_aenter_returns_self(self) -> None:
+        client = A2AClient(_make_card())
+        client._http = AsyncMock()
+        async with client as c:
+            assert c is client
+
+    async def test_a2a_client_aexit_calls_close(self) -> None:
+        client = A2AClient(_make_card())
+        client._http = AsyncMock()
+        async with client:
+            pass
+        client._http.aclose.assert_awaited_once()
+
+    async def test_remote_agent_aenter_returns_self(self) -> None:
+        agent = RemoteAgent(name="r", agent_card=_make_card())
+        agent._client._http = AsyncMock()
+        async with agent as a:
+            assert a is agent
+
+    async def test_remote_agent_aexit_calls_close(self) -> None:
+        agent = RemoteAgent(name="r", agent_card=_make_card())
+        agent._client._http = AsyncMock()
+        async with agent:
+            pass
+        agent._client._http.aclose.assert_awaited_once()
+
+
+# ===========================================================================
+# ClientConfig — max_retries / retry_delay defaults
+# ===========================================================================
+
+
+class TestClientConfigRetryFields:
+    def test_default_max_retries(self) -> None:
+        config = ClientConfig()
+        assert config.max_retries == 1
+
+    def test_custom_max_retries(self) -> None:
+        config = ClientConfig(max_retries=3)
+        assert config.max_retries == 3
+
+    def test_default_retry_delay(self) -> None:
+        config = ClientConfig()
+        assert config.retry_delay == 0.5
+
+
+# ===========================================================================
+# Retry actually fires on TransportError (Finding 1)
+# ===========================================================================
+
+
+class TestRetryOnTransportError:
+    """TransportError must propagate out of the inner function so retry_async fires."""
+
+    async def test_resolve_from_url_retries_on_transport_error(self) -> None:
+        """resolve_agent_card retries on TransportError, succeeds on second attempt."""
+        card_data = {"name": "retry-agent", "url": "http://remote:9000"}
+
+        mock_ok = MagicMock()
+        mock_ok.json.return_value = card_data
+        mock_ok.raise_for_status = MagicMock()
+
+        call_count = 0
+
+        async def _flaky_get(url: str, **kwargs: Any) -> Any:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise httpx.ConnectError("transient failure")
+            return mock_ok
+
+        config = ClientConfig(max_retries=3, retry_delay=0.01)
+        client = A2AClient("http://remote:9000/.well-known/agent-card", config)
+        client._http = AsyncMock()
+        client._http.get = _flaky_get
+
+        resolved = await client.resolve_agent_card()
+        assert resolved.name == "retry-agent"
+        assert call_count == 2  # failed once, then succeeded
+
+    async def test_send_task_retries_on_transport_error(self) -> None:
+        """send_task retries on TransportError, succeeds on second attempt."""
+        card = _make_card(url="http://remote:9000")
+        resp_data = _task_response("ok")
+
+        mock_ok = MagicMock()
+        mock_ok.json.return_value = resp_data
+        mock_ok.raise_for_status = MagicMock()
+
+        call_count = 0
+
+        async def _flaky_post(url: str, **kwargs: Any) -> Any:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise httpx.ConnectError("transient failure")
+            return mock_ok
+
+        config = ClientConfig(max_retries=3, retry_delay=0.01)
+        client = A2AClient(card, config)
+        client._http = AsyncMock()
+        client._http.post = _flaky_post
+
+        result = await client.send_task("hello")
+        assert result["artifact"]["text"] == "ok"
+        assert call_count == 2
+
+    async def test_resolve_from_url_exhausts_retries_raises_client_error(self) -> None:
+        """When all retries are exhausted, A2AClientError is raised (not TransportError)."""
+        config = ClientConfig(max_retries=2, retry_delay=0.01)
+        client = A2AClient("http://remote:9000/.well-known/agent-card", config)
+        client._http = AsyncMock()
+        client._http.get = AsyncMock(side_effect=httpx.ConnectError("always fails"))
+
+        with pytest.raises(A2AClientError, match="Failed to fetch"):
+            await client.resolve_agent_card()
+
+    async def test_send_task_exhausts_retries_raises_client_error(self) -> None:
+        """When all retries are exhausted, A2AClientError is raised (not TransportError)."""
+        card = _make_card(url="http://remote:9000")
+        config = ClientConfig(max_retries=2, retry_delay=0.01)
+        client = A2AClient(card, config)
+        client._http = AsyncMock()
+        client._http.post = AsyncMock(side_effect=httpx.ConnectError("always fails"))
+
+        with pytest.raises(A2AClientError, match="Task POST to A2A peer"):
+            await client.send_task("hello")
+
+
+# ===========================================================================
+# Empty card.url guard (Finding 3)
+# ===========================================================================
+
+
+class TestEmptyCardUrl:
+    async def test_send_task_empty_url_raises(self) -> None:
+        """send_task raises A2AClientError when card.url is empty."""
+        card = _make_card(url="")
+        client = A2AClient(card)
+        with pytest.raises(A2AClientError, match="empty URL"):
+            await client.send_task("hello")
+
+    async def test_send_task_collect_empty_url_raises(self) -> None:
+        """send_task_collect raises A2AClientError when card.url is empty."""
+        card = _make_card(url="", streaming=True)
+        client = A2AClient(card)
+        with pytest.raises(A2AClientError, match="empty URL"):
+            await client.send_task_collect("hello")

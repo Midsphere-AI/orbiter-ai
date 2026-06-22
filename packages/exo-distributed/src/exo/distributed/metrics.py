@@ -28,6 +28,43 @@ from exo.observability.metrics import (  # pyright: ignore[reportMissingImports]
     _get_meter,
 )
 
+# ---------------------------------------------------------------------------
+# Instrument cache — OTel instruments are safe to create once and reuse.
+# Calling create_counter/create_histogram on every metric emission is
+# wasteful (the meter caches by name, but it still acquires a lock).
+# We pre-create (lazily on first use) and cache here.
+# ---------------------------------------------------------------------------
+_counter_cache: dict[str, Any] = {}
+_histogram_cache: dict[str, Any] = {}
+_gauge_cache: dict[str, Any] = {}
+
+
+def _get_counter(name: str, *, description: str = "", unit: str = "1") -> Any:
+    """Return (or lazily create and cache) an OTel counter instrument."""
+    if name not in _counter_cache:
+        _counter_cache[name] = _get_meter().create_counter(
+            name=name, unit=unit, description=description
+        )
+    return _counter_cache[name]
+
+
+def _get_histogram(name: str, *, description: str = "", unit: str = "s") -> Any:
+    """Return (or lazily create and cache) an OTel histogram instrument."""
+    if name not in _histogram_cache:
+        _histogram_cache[name] = _get_meter().create_histogram(
+            name=name, unit=unit, description=description
+        )
+    return _histogram_cache[name]
+
+
+def _get_gauge(name: str, *, description: str = "", unit: str = "1") -> Any:
+    """Return (or lazily create and cache) an OTel up-down-counter instrument."""
+    if name not in _gauge_cache:
+        _gauge_cache[name] = _get_meter().create_up_down_counter(
+            name=name, unit=unit, description=description
+        )
+    return _gauge_cache[name]
+
 
 def _build_attributes(
     *,
@@ -54,7 +91,7 @@ def increment_counter(
 ) -> None:
     """Increment a counter metric, routing to OTel or the in-memory collector."""
     if HAS_OTEL:
-        _get_meter().create_counter(name=name, unit=unit, description=description).add(1, attrs)
+        _get_counter(name, description=description, unit=unit).add(1, attrs)
     else:
         _collector.add_counter(name, 1.0, attrs)
 
@@ -64,9 +101,7 @@ def record_histogram_value(
 ) -> None:
     """Record a histogram observation, routing to OTel or the in-memory collector."""
     if HAS_OTEL:
-        _get_meter().create_histogram(name=name, unit=unit, description=description).record(
-            value, attrs
-        )
+        _get_histogram(name, description=description, unit=unit).record(value, attrs)
     else:
         _collector.record_histogram(name, value, attrs)
 
@@ -172,10 +207,10 @@ def record_queue_depth(
     """Record the current queue depth."""
     attrs: dict[str, Any] = _build_attributes(queue_name=queue_name)
     if HAS_OTEL:
-        _get_meter().create_up_down_counter(
-            name=METRIC_DIST_QUEUE_DEPTH,
-            unit="1",
+        _get_gauge(
+            METRIC_DIST_QUEUE_DEPTH,
             description="Current distributed task queue depth",
+            unit="1",
         ).add(depth, attrs)
     else:
         _collector.set_gauge(METRIC_DIST_QUEUE_DEPTH, float(depth), attrs)

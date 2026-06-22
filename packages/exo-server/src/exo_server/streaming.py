@@ -18,6 +18,7 @@ SSE endpoint:
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -25,12 +26,21 @@ from fastapi import APIRouter, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse
 
 from exo.runner import run as _run_agent
+from exo_server._constants import AGENTS_KEY, DEFAULT_AGENT_KEY
+
+logger = logging.getLogger(__name__)
 
 stream_router = APIRouter()
 
 
-async def _iter_events(agent: Any, message: str) -> AsyncIterator[dict[str, str]]:
-    """Iterate over agent stream events as JSON-serialisable dicts."""
+async def _iter_events(agent: Any, message: str) -> AsyncIterator[dict[str, Any]]:
+    """Iterate over agent stream events as JSON-serialisable dicts.
+
+    Only ``"text"`` and ``"tool_call"`` events are forwarded to the client;
+    all other event types (step, status, usage, error, reasoning,
+    tool_result, tool_call_delta, etc.) are silently dropped so that
+    consumers never receive a payload mislabelled as ``tool_call``.
+    """
     stream_fn = getattr(_run_agent, "stream", None)
     if stream_fn is None:
         yield {"type": "error", "error": "Streaming not available"}
@@ -38,29 +48,33 @@ async def _iter_events(agent: Any, message: str) -> AsyncIterator[dict[str, str]
 
     try:
         async for event in stream_fn(agent, message):
-            event_type = getattr(event, "type", "text")
+            event_type = getattr(event, "type", None)
             if event_type == "text":
                 yield {"type": "text", "text": getattr(event, "text", "")}
-            else:
+            elif event_type == "tool_call":
                 yield {
                     "type": "tool_call",
                     "tool_name": getattr(event, "tool_name", ""),
                     "tool_call_id": getattr(event, "tool_call_id", ""),
                 }
+            # All other event types (step, status, usage, error, reasoning,
+            # tool_result, tool_call_delta, context, …) are intentionally
+            # dropped — this server only surfaces text and tool_call to clients.
     except Exception as exc:
+        logger.exception("Error streaming agent response: %s", exc)
         yield {"type": "error", "error": str(exc)}
 
 
 def _resolve_agent(app_state: Any, name: str | None) -> Any:
     """Resolve agent from app state without raising HTTPException."""
-    agents: dict[str, Any] = getattr(app_state, "exo_agents", {})
+    agents: dict[str, Any] = getattr(app_state, AGENTS_KEY, {})
     if not agents:
         return None
 
     if name is not None:
         return agents.get(name)
 
-    default_name: str | None = getattr(app_state, "exo_default_agent", None)
+    default_name: str | None = getattr(app_state, DEFAULT_AGENT_KEY, None)
     if default_name and default_name in agents:
         return agents[default_name]
 
@@ -99,11 +113,12 @@ async def ws_chat(websocket: WebSocket) -> None:
     try:
         async for payload in _iter_events(agent, message):
             await websocket.send_json(payload)
+        # Send the "done" marker and close inside the try so that a
+        # WebSocketDisconnect during these final sends is caught cleanly.
         await websocket.send_json({"type": "done"})
+        await websocket.close()
     except WebSocketDisconnect:
         return
-
-    await websocket.close()
 
 
 async def _sse_iter(agent: Any, message: str) -> AsyncIterator[str]:
@@ -123,15 +138,13 @@ async def sse_stream(
 
     Returns ``text/event-stream`` with JSON payloads matching
     the WebSocket protocol, ending with ``data: [DONE]``.
+    Returns HTTP 404 (before the stream begins) when the agent is not found.
     """
+    from fastapi import HTTPException  # local import avoids circular deps
+
     agent = _resolve_agent(req.app.state, agent_name)
     if agent is None:
-        error = json.dumps({"type": "error", "error": "Agent not found"})
-        content = f"data: {error}\n\ndata: [DONE]\n\n"
-        return StreamingResponse(
-            iter([content]),
-            media_type="text/event-stream",
-        )
+        raise HTTPException(status_code=404, detail="Agent not found")
 
     return StreamingResponse(
         _sse_iter(agent, message),

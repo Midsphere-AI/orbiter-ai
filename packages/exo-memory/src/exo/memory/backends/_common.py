@@ -7,6 +7,7 @@ from typing import Any
 from exo.memory.base import (  # pyright: ignore[reportMissingImports]
     AIMemory,
     HumanMemory,
+    MemoryCategory,
     MemoryItem,
     MemoryMetadata,
     MemoryStatus,
@@ -54,6 +55,7 @@ def row_to_item(
     extra: dict[str, Any],
     created_at: str,
     updated_at: str,
+    category_str: str | None = None,
 ) -> MemoryItem:
     """Reconstruct a MemoryItem from individual column values.
 
@@ -70,6 +72,7 @@ def row_to_item(
         "metadata": MemoryMetadata(**meta_dict),
         "created_at": created_at,
         "updated_at": updated_at,
+        "category": MemoryCategory(category_str) if category_str else None,
     }
 
     if memory_type == "system":

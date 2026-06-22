@@ -17,6 +17,7 @@ from exo.observability.health import (  # pyright: ignore[reportMissingImports]
     get_registry,
     reset,
 )
+from exo.types import ExoError  # pyright: ignore[reportMissingImports]
 
 # ---------------------------------------------------------------------------
 # HealthStatus
@@ -200,8 +201,17 @@ class TestHealthRegistry:
 
     def test_run_unknown_raises(self) -> None:
         registry = HealthRegistry()
-        with pytest.raises(KeyError, match="Unknown health check"):
+        with pytest.raises(ExoError, match="Unknown health check"):
             registry.run("nonexistent")
+
+    def test_run_unknown_raises_has_hint(self) -> None:
+        registry = HealthRegistry()
+        with pytest.raises(ExoError) as exc_info:
+            registry.run("nonexistent")
+        err = exc_info.value
+        assert err.hint is not None
+        assert "list_checks" in err.hint
+        assert err.context.get("check") == "nonexistent"
 
     def test_run_all(self) -> None:
         registry = HealthRegistry()

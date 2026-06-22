@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -112,7 +113,7 @@ class Reflector(ABC):
         """Run the full three-step reflection pipeline."""
         analysis = await self.analyze(context)
         derived = await self.insight(analysis)
-        actions = await self.suggest(analysis)
+        actions = await self.suggest(derived)
         return ReflectionResult(
             reflection_type=self.reflection_type,
             level=self.level,
@@ -129,11 +130,24 @@ class Reflector(ABC):
         """Step 1: Extract facts and key findings from the execution context."""
 
     async def insight(self, analysis: dict[str, Any]) -> dict[str, Any]:
-        """Step 2: Derive insights from the analysis (override for custom logic)."""
-        return {"insights": analysis.get("insights", [])}
+        """Step 2: Derive insights from the analysis (override for custom logic).
+
+        The default implementation passes through both ``"insights"`` and
+        ``"suggestions"`` from the analysis dict so that :meth:`suggest` —
+        which receives the ``derived`` dict returned here — can read
+        ``"suggestions"`` directly.
+        """
+        return {
+            "insights": analysis.get("insights", []),
+            "suggestions": analysis.get("suggestions", []),
+        }
 
     async def suggest(self, insights: dict[str, Any]) -> dict[str, Any]:
-        """Step 3: Generate actionable suggestions from insights (override for custom logic)."""
+        """Step 3: Generate actionable suggestions from insights (override for custom logic).
+
+        *insights* is the dict returned by :meth:`insight` (the ``derived``
+        dict), not the raw analysis.
+        """
         return {"suggestions": insights.get("suggestions", [])}
 
 
@@ -159,7 +173,7 @@ _SYSTEM_PROMPT = (
 class GeneralReflector(Reflector):
     """LLM-powered reflector using a judge callable ``(prompt: str) -> str``."""
 
-    __slots__ = ("_judge", "_system_prompt")
+    __slots__ = ("_judge", "_system_prompt", "_timeout")
 
     def __init__(
         self,
@@ -169,10 +183,12 @@ class GeneralReflector(Reflector):
         name: str = "general_reflector",
         reflection_type: ReflectionType = ReflectionType.INSIGHT,
         level: ReflectionLevel = ReflectionLevel.DEEP,
+        timeout: float = 0.0,
     ) -> None:
         super().__init__(name=name, reflection_type=reflection_type, level=level)
         self._judge = judge
         self._system_prompt = system_prompt or _SYSTEM_PROMPT
+        self._timeout = timeout
 
     async def analyze(self, context: dict[str, Any]) -> dict[str, Any]:
         """Call the LLM judge with the execution context and parse the response."""
@@ -180,12 +196,22 @@ class GeneralReflector(Reflector):
             return {"summary": "No judge callable provided", "error": True}
 
         prompt = self._build_prompt(context)
-        response = await self._judge(prompt)
+        if self._timeout > 0:
+            response = await asyncio.wait_for(self._judge(prompt), timeout=self._timeout)
+        else:
+            response = await self._judge(prompt)
         return self._parse_response(str(response))
 
     async def insight(self, analysis: dict[str, Any]) -> dict[str, Any]:
-        """Pass through insights from the LLM analysis."""
-        return {"insights": analysis.get("insights", [])}
+        """Pass through insights and suggestions from the LLM analysis.
+
+        Both keys are forwarded so that :meth:`suggest` can read
+        ``"suggestions"`` from the ``derived`` dict it receives.
+        """
+        return {
+            "insights": analysis.get("insights", []),
+            "suggestions": analysis.get("suggestions", []),
+        }
 
     async def suggest(self, insights: dict[str, Any]) -> dict[str, Any]:
         """Pass through suggestions from the LLM analysis (already in analyze)."""

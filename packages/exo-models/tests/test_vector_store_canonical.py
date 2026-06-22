@@ -130,7 +130,7 @@ class TestInMemoryVectorStoreAdd:
 class TestInMemoryVectorStoreSearch:
     async def test_search_returns_ranked_results(self) -> None:
         store = InMemoryVectorStore()
-        await store.add("far", "far item", [0.0, 1.0])      # orthogonal to query
+        await store.add("far", "far item", [0.0, 1.0])  # orthogonal to query
         await store.add("close", "close item", [0.7, 0.7])  # somewhat similar
         await store.add("closest", "closest item", [1.0, 0.0])  # identical direction
 

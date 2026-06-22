@@ -30,6 +30,7 @@ from .config import (
     WriterConfig,
 )
 from .conversation import ConversationManager
+from .errors import SearchConfigError, SearchError
 from .pipeline import run_search_pipeline, stream_search_pipeline
 from .types import PipelineEvent, ResearchMode, SearchResponse, SearchSource
 
@@ -102,6 +103,8 @@ __all__: list[str] = [
     "ResearchMode",
     "RevisionConfig",
     "SearchConfig",
+    "SearchConfigError",
+    "SearchError",
     "SearchModels",
     "SearchResponse",
     "SearchSource",

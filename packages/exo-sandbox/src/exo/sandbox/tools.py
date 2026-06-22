@@ -7,6 +7,7 @@ import logging
 import platform
 import shlex
 import sys
+import warnings
 from pathlib import Path
 from typing import Any, Literal
 
@@ -245,7 +246,10 @@ class ShellTool(Tool):
         sandbox: Any | None = None,
     ) -> None:
         if mode not in ("allowlist", "blacklist"):
-            raise ValueError(f"mode must be 'allowlist' or 'blacklist', got {mode!r}")
+            raise ToolError(
+                f"mode must be 'allowlist' or 'blacklist', got {mode!r}",
+                hint="Valid modes: 'allowlist' (explicit permitted commands) or 'blacklist' (block dangerous commands).",
+            )
         self._mode = mode
         self._allowed: list[str] = (
             list(allowed_commands)
@@ -266,7 +270,14 @@ class ShellTool(Tool):
     # -- allowlist helpers --------------------------------------------------
 
     def _validate_command(self, command: str) -> list[str]:
-        """Parse *command* and verify the base executable is in the allowlist."""
+        """Parse *command* and verify the base executable is in the allowlist.
+
+        The executable must be a bare binary name (no path separators).  Absolute
+        or relative paths such as ``/tmp/evil_ls`` or ``../ls`` are rejected even
+        if their basename appears in the allowlist, because the *path* — not the
+        name — determines what actually executes.  Allowed commands are resolved
+        via PATH at exec time by the OS.
+        """
         stripped = command.strip()
         if not stripped:
             raise ToolError("Empty command")
@@ -276,9 +287,15 @@ class ShellTool(Tool):
             raise ToolError(f"Invalid command syntax: {exc}") from exc
         if not parts:
             raise ToolError("Empty command")
-        base = parts[0].rsplit("/", maxsplit=1)[-1]
-        if base not in self._allowed:
-            raise ToolError(f"Command {base!r} is not in the allowed list: {self._allowed}")
+        exe = parts[0]
+        if "/" in exe or "\\" in exe:
+            raise ToolError(
+                f"Command {exe!r} must be a bare binary name, not a path. "
+                "Use the binary name only (e.g. 'ls', not '/bin/ls' or '../ls'). "
+                "The OS resolves it via PATH, which prevents path-traversal substitution."
+            )
+        if exe not in self._allowed:
+            raise ToolError(f"Command {exe!r} is not in the allowed list: {self._allowed}")
         return parts
 
     @staticmethod
@@ -370,6 +387,7 @@ class ShellTool(Tool):
             except Exception as exc:
                 raise ToolError(f"Sandbox shell execution failed: {exc}") from exc
 
+        proc: asyncio.subprocess.Process | None = None
         try:
             proc = await asyncio.create_subprocess_exec(
                 *parts,
@@ -378,10 +396,32 @@ class ShellTool(Tool):
             )
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=self._timeout)
         except TimeoutError as exc:
-            proc.kill()  # type: ignore[union-attr]
-            raise ToolError(f"Command timed out after {self._timeout}s") from exc
+            if proc is not None:
+                proc.kill()
+                # Reap the process so it does not become a zombie; guard the
+                # wait so that a concurrent CancelledError still propagates.
+                try:
+                    await proc.wait()
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    pass
+            raise ToolError(
+                f"Command timed out after {self._timeout}s",
+                context={"command": parts[0]},
+                hint=f"Increase the timeout (currently {self._timeout}s) or verify the command completes quickly.",
+            ) from exc
+        except asyncio.CancelledError:
+            if proc is not None:
+                proc.kill()
+                await proc.wait()
+            logger.debug("ShellTool (allowlist): cancelled, killed subprocess for %r", parts[0])
+            raise
         except FileNotFoundError as exc:
-            raise ToolError(f"Command not found: {parts[0]!r}") from exc
+            raise ToolError(
+                f"Command not found: {parts[0]!r}",
+                hint=f"Ensure {parts[0]!r} is installed and on PATH, or add it to allowed_commands.",
+            ) from exc
         except Exception as exc:
             raise ToolError(f"Command execution failed: {exc}") from exc
 
@@ -391,6 +431,7 @@ class ShellTool(Tool):
             "exit_code": proc.returncode,
             "stdout": self._truncate(stdout_str),
             "stderr": self._truncate(stderr_str),
+            "platform": self.platform,
         }
 
     async def _exec_blacklist(self, command: str) -> dict[str, Any]:
@@ -426,10 +467,12 @@ class ShellTool(Tool):
             if proc is not None:
                 proc.kill()
                 await proc.wait()
-            logger.warning(
-                "ShellTool: command timed out after %.1fs: %r", self._timeout, command
-            )
-            raise ToolError(f"Command timed out after {self._timeout}s") from exc
+            logger.warning("ShellTool: command timed out after %.1fs: %r", self._timeout, command)
+            raise ToolError(
+                f"Command timed out after {self._timeout}s",
+                context={"command": command[:120]},
+                hint=f"Increase the timeout (currently {self._timeout}s) or check that the command terminates.",
+            ) from exc
         except asyncio.CancelledError:
             if proc is not None:
                 proc.kill()
@@ -446,8 +489,8 @@ class ShellTool(Tool):
         logger.debug("ShellTool: %r exited with code %s", command, proc.returncode)
         return {
             "exit_code": proc.returncode,
-            "stdout": stdout.decode(errors="replace") if stdout else "",
-            "stderr": stderr.decode(errors="replace") if stderr else "",
+            "stdout": self._truncate(stdout.decode(errors="replace") if stdout else ""),
+            "stderr": self._truncate(stderr.decode(errors="replace") if stderr else ""),
             "platform": self.platform,
         }
 
@@ -470,6 +513,11 @@ class TerminalTool(ShellTool):
         timeout: float = 30.0,
         sandbox: Any | None = None,
     ) -> None:
+        warnings.warn(
+            "TerminalTool is deprecated; use ShellTool(mode='blacklist', ...) directly.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         super().__init__(
             mode="blacklist",
             blacklist=blacklist,
@@ -524,11 +572,28 @@ def _build_runner_script(code: str, blocked_names: list[str]) -> str:
 
 
 class CodeTool(Tool):
-    """Sandboxed Python code execution tool.
+    """Python code execution tool with optional sandbox delegation.
 
-    When a ``Sandbox`` is provided, execution is delegated to the sandbox.
-    Otherwise, code runs locally in a restricted namespace with stdout
-    capture and a configurable timeout.
+    When a ``Sandbox`` is provided, execution is delegated to the sandbox
+    (E2B, Kubernetes, etc.) which provides genuine process isolation.
+
+    **Local execution (no sandbox) — NOT isolated.**
+    If no ``sandbox`` is given, code runs in a subprocess on the host.
+    The ``blocked_names`` filter only restricts the child's ``__builtins__``
+    namespace, which is trivially bypassed via Python's object-graph
+    (e.g. ``().__class__.__bases__[0].__subclasses__()``).  Local mode
+    provides *no real security boundary* — it is a convenience for trusted
+    code in development environments only.
+
+    To opt-in to local execution without a sandbox, pass
+    ``allow_unsafe_local=True`` explicitly.  Without this flag,
+    :meth:`execute` raises :class:`~exo.tool.ToolError` if no sandbox is
+    configured, prompting callers to supply a real execution backend.
+
+    For production use, always supply a sandbox::
+
+        from exo.sandbox.e2b import E2BSandbox
+        tool = CodeTool(sandbox=E2BSandbox(...))
     """
 
     name = "code"
@@ -541,12 +606,14 @@ class CodeTool(Tool):
         sandbox: Any | None = None,
         blocked_names: frozenset[str] | None = None,
         timeout: float = 10.0,
+        allow_unsafe_local: bool = False,
     ) -> None:
         self._sandbox = sandbox
         self._blocked: frozenset[str] = (
             blocked_names if blocked_names is not None else _DEFAULT_BLOCKED_NAMES
         )
         self._timeout = timeout
+        self._allow_unsafe_local = allow_unsafe_local
 
     async def execute(self, **kwargs: Any) -> str | dict[str, Any]:
         code: str = kwargs.get("code", "")
@@ -560,7 +627,21 @@ class CodeTool(Tool):
             except Exception as exc:
                 raise ToolError(f"Sandbox execution failed: {exc}") from exc
 
+        if not self._allow_unsafe_local:
+            raise ToolError(
+                "CodeTool has no sandbox configured and allow_unsafe_local=False (default). "
+                "Local execution is NOT isolated — the blocked_names filter can be bypassed "
+                "via Python's object graph. "
+                "Supply a real sandbox (e.g. E2BSandbox, KubernetesSandbox) or pass "
+                "allow_unsafe_local=True to acknowledge the risk and run locally.",
+                hint=(
+                    "For production use: CodeTool(sandbox=E2BSandbox(...)). "
+                    "For trusted local dev only: CodeTool(allow_unsafe_local=True)."
+                ),
+            )
+
         blocked_list = list(self._blocked)
+        proc: asyncio.subprocess.Process | None = None
         try:
             proc = await asyncio.create_subprocess_exec(
                 sys.executable,
@@ -571,8 +652,27 @@ class CodeTool(Tool):
             )
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=self._timeout)
         except TimeoutError as exc:
-            proc.kill()  # type: ignore[union-attr]
-            raise ToolError(f"Code execution timed out after {self._timeout}s") from exc
+            if proc is not None:
+                proc.kill()
+                # Reap the process so it does not become a zombie; guard the
+                # wait so that a concurrent CancelledError still propagates.
+                try:
+                    await proc.wait()
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    pass
+            raise ToolError(
+                f"Code execution timed out after {self._timeout}s",
+                context={"timeout": self._timeout},
+                hint=f"Increase the timeout (currently {self._timeout}s) or simplify the code.",
+            ) from exc
+        except asyncio.CancelledError:
+            if proc is not None:
+                proc.kill()
+                await proc.wait()
+            logger.debug("CodeTool: cancelled, killed subprocess")
+            raise
 
         stdout_str = stdout.decode(errors="replace") if stdout else ""
         stderr_str = stderr.decode(errors="replace") if stderr else ""
@@ -592,6 +692,18 @@ def code_tool(
     *,
     blocked_names: frozenset[str] | None = None,
     timeout: float = 10.0,
+    allow_unsafe_local: bool = False,
 ) -> CodeTool:
-    """Factory that creates a sandboxed code execution tool."""
-    return CodeTool(sandbox=sandbox, blocked_names=blocked_names, timeout=timeout)
+    """Factory that creates a code execution tool.
+
+    When no *sandbox* is provided and ``allow_unsafe_local=False`` (default),
+    executing code raises :class:`~exo.tool.ToolError` — see :class:`CodeTool`
+    for the rationale.  Pass ``allow_unsafe_local=True`` only for trusted local
+    development use.
+    """
+    return CodeTool(
+        sandbox=sandbox,
+        blocked_names=blocked_names,
+        timeout=timeout,
+        allow_unsafe_local=allow_unsafe_local,
+    )

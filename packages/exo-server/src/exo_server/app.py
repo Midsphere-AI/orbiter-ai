@@ -15,19 +15,18 @@ Usage::
 
 from __future__ import annotations
 
-import json
 import logging
-from collections.abc import AsyncIterator
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from exo.runner import run as _run_agent
+from exo_server._constants import AGENTS_KEY, DEFAULT_AGENT_KEY
 from exo_server.agents import agent_router
 from exo_server.sessions import session_router
-from exo_server.streaming import stream_router
+from exo_server.streaming import _sse_iter, stream_router
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +56,7 @@ class InjectRequest(BaseModel):
 
     Attributes:
         message: The message to inject into the running agent's context.
+            Must be a non-empty string.
         agent_name: Name of the agent to inject into (optional; uses default if omitted).
     """
 
@@ -64,6 +64,13 @@ class InjectRequest(BaseModel):
 
     message: str
     agent_name: str | None = None
+
+    @field_validator("message")
+    @classmethod
+    def _message_not_empty(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("message must not be empty")
+        return v
 
 
 class ChatResponse(BaseModel):
@@ -88,9 +95,6 @@ class ChatResponse(BaseModel):
 # Agent registry (per-app state)
 # ---------------------------------------------------------------------------
 
-_AGENTS_KEY = "exo_agents"
-_DEFAULT_AGENT_KEY = "exo_default_agent"
-
 
 def register_agent(app: FastAPI, agent: Any, *, default: bool = False) -> None:
     """Register an agent with the FastAPI app.
@@ -101,7 +105,7 @@ def register_agent(app: FastAPI, agent: Any, *, default: bool = False) -> None:
         default: If ``True``, set this agent as the default for requests
             that don't specify ``agent_name``.
     """
-    agents: dict[str, Any] = getattr(app.state, _AGENTS_KEY, {})
+    agents: dict[str, Any] = getattr(app.state, AGENTS_KEY, {})
     name = getattr(agent, "name", "agent")
     agents[name] = agent
     app.state.exo_agents = agents  # type: ignore[attr-defined]
@@ -111,7 +115,7 @@ def register_agent(app: FastAPI, agent: Any, *, default: bool = False) -> None:
 
 def _get_agent(app: FastAPI, name: str | None) -> Any:
     """Resolve an agent by name, falling back to the default."""
-    agents: dict[str, Any] = getattr(app.state, _AGENTS_KEY, {})
+    agents: dict[str, Any] = getattr(app.state, AGENTS_KEY, {})
     if not agents:
         raise HTTPException(status_code=503, detail="No agents registered")
 
@@ -121,7 +125,7 @@ def _get_agent(app: FastAPI, name: str | None) -> Any:
             raise HTTPException(status_code=404, detail=f"Agent '{name}' not found")
         return agent
 
-    default_name: str | None = getattr(app.state, _DEFAULT_AGENT_KEY, None)
+    default_name: str | None = getattr(app.state, DEFAULT_AGENT_KEY, None)
     if default_name and default_name in agents:
         return agents[default_name]
 
@@ -129,51 +133,28 @@ def _get_agent(app: FastAPI, name: str | None) -> Any:
 
 
 # ---------------------------------------------------------------------------
-# SSE streaming helper
-# ---------------------------------------------------------------------------
-
-
-async def _sse_stream(agent: Any, message: str) -> AsyncIterator[str]:
-    """Yield SSE-formatted events from the agent's stream."""
-    stream_fn = getattr(_run_agent, "stream", None)
-    if stream_fn is None:
-        yield f"data: {json.dumps({'error': 'Streaming not available'})}\n\n"
-        return
-
-    try:
-        async for event in stream_fn(agent, message):
-            event_type = getattr(event, "type", "text")
-            if event_type == "text":
-                payload = {"type": "text", "text": getattr(event, "text", "")}
-            else:
-                payload = {
-                    "type": "tool_call",
-                    "tool_name": getattr(event, "tool_name", ""),
-                    "tool_call_id": getattr(event, "tool_call_id", ""),
-                }
-            yield f"data: {json.dumps(payload)}\n\n"
-    except Exception as exc:
-        yield f"data: {json.dumps({'error': str(exc)})}\n\n"
-
-    yield "data: [DONE]\n\n"
-
-
-# ---------------------------------------------------------------------------
 # App factory
 # ---------------------------------------------------------------------------
 
 
-def serve(host: str = "0.0.0.0", port: int = 8000) -> None:
+def serve(host: str = "0.0.0.0", port: int = 8000, agents: list[Any] | None = None) -> None:
     """Start the Exo Server with uvicorn.
 
     Parameters:
         host: Host address to bind to.
         port: Port to listen on.
+        agents: Optional list of ``Agent`` (or ``Swarm``) instances to register
+            before the server starts.  The first agent in the list becomes the
+            default.  Without agents every ``/chat`` request returns 503, so
+            pass at least one agent here (or call ``register_agent`` on the
+            app returned by ``create_app()`` before handing it to uvicorn).
     """
     import uvicorn  # pyright: ignore[reportMissingImports]
 
     logger.info("Starting Exo Server on %s:%d", host, port)
     app = create_app()
+    for agent in agents or []:
+        register_agent(app, agent)
     uvicorn.run(app, host=host, port=port)
 
 
@@ -189,12 +170,13 @@ def create_app() -> FastAPI:
         """Run an agent and return the response.
 
         When ``stream=True``, returns Server-Sent Events instead of JSON.
+        Delegates to the shared ``_sse_iter`` helper in ``streaming.py``.
         """
         agent = _get_agent(app, request.agent_name)
 
         if request.stream:
             return StreamingResponse(
-                _sse_stream(agent, request.message),
+                _sse_iter(agent, request.message),
                 media_type="text/event-stream",
             )
 
@@ -225,9 +207,14 @@ def create_app() -> FastAPI:
         """Inject a message into a running agent's context.
 
         The message is picked up before the agent's next LLM call.
+        Returns 422 if the message is empty (validated by ``InjectRequest``).
+        Returns 404 / 503 if the named agent is not registered.
         """
         agent = _get_agent(app, request.agent_name)
-        agent.inject_message(request.message)
+        try:
+            agent.inject_message(request.message)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
         return {"status": "injected"}
 
     return app

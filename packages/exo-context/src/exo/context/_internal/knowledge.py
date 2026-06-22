@@ -56,17 +56,22 @@ def chunk_text(
     chunk_size: int = 512,
     chunk_overlap: int = 64,
 ) -> list[str]:
-    """Split *text* into overlapping segments.
+    """Split *text* into overlapping fixed-stride segments.
 
-    Tries to break at paragraph (``\\n\\n``) or line (``\\n``) boundaries
-    when possible.  Falls back to character-level splitting.
+    Slides a window of *chunk_size* characters over the text with a step of
+    ``chunk_size - chunk_overlap`` characters.  Splitting is strictly by
+    character offset — no paragraph or line-boundary detection is performed.
     """
     if chunk_size <= 0:
-        msg = "chunk_size must be positive"
-        raise KnowledgeError(msg)
+        raise KnowledgeError(
+            "chunk_size must be positive.",
+            hint="chunk_size must be >= 1 (e.g. chunk_size=512).",
+        )
     if chunk_overlap < 0 or chunk_overlap >= chunk_size:
-        msg = "chunk_overlap must be in [0, chunk_size)"
-        raise KnowledgeError(msg)
+        raise KnowledgeError(
+            "chunk_overlap must be in [0, chunk_size).",
+            hint=f"chunk_overlap must satisfy 0 <= chunk_overlap < chunk_size ({chunk_size}).",
+        )
 
     if len(text) <= chunk_size:
         return [text] if text else []
@@ -127,8 +132,10 @@ class KnowledgeStore:
     def add(self, name: str, content: str) -> list[Chunk]:
         """Index an artifact's content.  Re-indexes if already present."""
         if not name:
-            msg = "artifact name is required"
-            raise KnowledgeError(msg)
+            raise KnowledgeError(
+                "artifact name is required.",
+                hint="Pass a non-empty string as the artifact name.",
+            )
 
         segments = chunk_text(
             content,
@@ -173,8 +180,9 @@ class KnowledgeStore:
     def search(self, query: str, *, top_k: int = 5) -> list[SearchResult]:
         """Keyword search across all indexed artifacts.
 
-        Uses TF-IDF-like scoring: term frequency normalised by chunk length.
-        Returns up to *top_k* results sorted by descending score.
+        Scores each chunk using ``sum(log(1 + tf))`` for each query term that
+        appears in the chunk (raw term frequency, **not** normalised by chunk
+        length).  Returns up to *top_k* results sorted by descending score.
         """
         if not query.strip():
             return []
@@ -226,7 +234,10 @@ def _tokenize(text: str) -> list[str]:
 
 
 def _score_chunk(content: str, query_terms: list[str]) -> float:
-    """TF-IDF-like score: sum of log(1 + tf) for each matching query term."""
+    """Score a chunk: ``sum(log(1 + tf))`` for each matching query term.
+
+    ``tf`` is the raw count of the term in *content* (not normalised by chunk length).
+    """
     tokens = _tokenize(content)
     if not tokens:
         return 0.0

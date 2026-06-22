@@ -5,7 +5,7 @@ This guide covers configuring, deploying, and scaling distributed workers for `e
 ## Prerequisites
 
 - **Redis 7+** — Required for Redis Streams with consumer groups
-- **Python 3.11+** — Required by exo packages
+- **Python 3.13+** — Required by exo packages
 - **exo-distributed** — `pip install exo-distributed`
 - **exo-cli** (optional) — `pip install exo-cli` for the `exo` command
 
@@ -332,10 +332,64 @@ asyncio.run(worker.start())
 
 1. Worker claims task from Redis queue (same as local mode)
 2. Instead of executing directly, submits an `AgentExecutionWorkflow` to Temporal
-3. Temporal activity (`execute_agent_activity`) reconstructs agent and runs `run.stream()`
-4. Activity sends heartbeats every 10 events for liveness detection
-5. If the worker crashes, Temporal retries the activity on another worker
-6. `timeout_seconds` from `TaskPayload` sets the Temporal `start_to_close_timeout`
+3. Temporal activity (`execute_agent_activity`) reconstructs the agent and runs `run.stream()`
+4. The activity heartbeats progress (`{"step", "chars"}`) every 10 events for liveness
+   detection, and stops promptly when Temporal cancels the run
+5. If the worker crashes, Temporal reassigns the activity to another worker
+6. Failures are mapped onto Temporal `ApplicationError`s whose `non_retryable` flag respects
+   exo's error taxonomy — deterministic errors (config/parse/validation) are not retried,
+   transient ones (rate limits, network) are
+7. `timeout_seconds` from `TaskPayload` sets the activity `start_to_close_timeout` unless an
+   explicit `TimeoutConfig` is supplied
+
+!!! note "Crash-resumable, not auto-checkpoint-restore"
+    The whole agent run executes inside a **single activity**. Temporal re-runs a crashed
+    activity **from the start** (it does not replay it step-by-step), so this tier is
+    *crash-resumable via heartbeat checkpointing* — a dead worker's task is picked up by
+    another — but it is **not** Temporal's automatic per-step checkpoint-restore. That
+    requires lifting the agent loop into the workflow and is a later phase.
+
+#### Production connection, encryption, retries, and tuning
+
+Construct a `TemporalExecutor` directly to configure Temporal Cloud (TLS / mTLS / API key),
+encrypt payloads at rest, and set default retry/timeout/tuning policies. All configuration is
+grouped and additive — flat `host=`/`namespace=` still work, or pass a `ConnectionConfig`.
+
+```python
+from exo.distributed.temporal import (
+    AESGCMPayloadCodec,
+    ConnectionConfig,
+    RetryConfig,
+    TemporalExecutor,
+    TimeoutConfig,
+    WorkerTuningConfig,
+)
+
+executor = TemporalExecutor(
+    # Temporal Cloud over TLS with an API key:
+    connection=ConnectionConfig(
+        host="my-ns.acct.tmprl.cloud:7233",
+        namespace="my-ns.acct",
+        api_key="…",          # implies TLS
+        # or mTLS: client_cert=…, client_private_key=…, server_root_ca_cert=…
+    ),
+    # Encrypt agent payloads (prompts, configs, outputs) at rest in Temporal history:
+    codec=AESGCMPayloadCodec.from_env("EXO_TEMPORAL_CODEC_KEY"),
+    # Default per-task activity retry (deterministic errors marked non-retryable by default):
+    retry=RetryConfig(maximum_attempts=5),
+    # Activity- and workflow-level timeouts:
+    timeouts=TimeoutConfig(start_to_close_seconds=300, execution_timeout_seconds=3600),
+    # Map worker concurrency onto Temporal's tuner:
+    tuning=WorkerTuningConfig.from_concurrency(8),
+    # OTel + exo-baggage interceptors give workflow→activity trace continuity (on by default):
+    interceptors=True,
+)
+```
+
+`ConnectionConfig.from_env()` reads `TEMPORAL_HOST`, `TEMPORAL_NAMESPACE`, `TEMPORAL_API_KEY`,
+`TEMPORAL_TLS`, and the `TEMPORAL_TLS_*_PATH` cert paths. Serialization uses Temporal's pydantic
+data converter, so `TaskPayload`/configs/events round-trip cleanly. Large tool outputs can be
+offloaded with the claim-check codec (`ClaimCheckCodec` + a `BlobStore`, e.g. `RedisBlobStore`).
 
 ## Redis Configuration
 

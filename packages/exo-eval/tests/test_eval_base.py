@@ -42,15 +42,25 @@ class _ConstantScorer(Scorer):
 
 
 class _ToggleScorer(Scorer):
-    """Alternates between 1.0 and 0.0 on successive calls."""
+    """Alternates between 1.0 and 0.0 based on the repeat number embedded in case_id.
+
+    The repeat suffix ``-r<n>`` appended by the Evaluator is parsed from
+    ``case_id`` so the toggle is stable regardless of asyncio.gather order.
+    If no suffix is found, repeat index 0 is assumed.
+    """
 
     def __init__(self, name: str = "toggle") -> None:
         self._name = name
-        self._calls = 0
 
     async def score(self, case_id: str, input: Any, output: Any) -> ScorerResult:
-        val = 1.0 if self._calls % 2 == 0 else 0.0
-        self._calls += 1
+        # Extract repeat index from case_id (e.g. "c1-r0", "c1-r1", "c1-r2").
+        repeat_idx = 0
+        if "-r" in case_id:
+            try:
+                repeat_idx = int(case_id.rsplit("-r", 1)[1])
+            except ValueError:
+                repeat_idx = 0
+        val = 1.0 if repeat_idx % 2 == 0 else 0.0
         return ScorerResult(scorer_name=self._name, score=val)
 
 
@@ -288,6 +298,29 @@ class TestEvaluatorEvaluate:
         assert len(result.case_results) == 1
         # Case ID falls back to a generated string
         assert result.case_results[0].case_id.startswith("case-")
+
+    async def test_summarize_skips_sentinel_keys(self) -> None:
+        """__error__ sentinel inserted by _run_safe must not appear in summary."""
+
+        class _RaisingTarget(EvalTarget):
+            async def predict(self, case_id: str, input: Any) -> Any:
+                raise RuntimeError("boom")
+
+        ev = Evaluator(scorers=[_ConstantScorer(score=0.9)])
+        dataset = [{"id": "c1", "input": "x"}, {"id": "c2", "input": "y"}]
+        result = await ev.evaluate(_RaisingTarget(), dataset)
+        # Both cases fail → only __error__ sentinel in scores; summary must be empty.
+        assert "__error__" not in result.summary
+        assert result.summary == {}
+
+    async def test_repeat_case_ids_include_suffix(self) -> None:
+        """With repeat_times > 1, case_ids embed the repeat index for stable scorer dispatch."""
+        ev = Evaluator(scorers=[_ConstantScorer()], repeat_times=3)
+        dataset = [{"id": "c1", "input": "x"}]
+        result = await ev.evaluate(_EchoTarget(), dataset)
+        assert len(result.case_results) == 3
+        case_ids = {cr.case_id for cr in result.case_results}
+        assert case_ids == {"c1-r0", "c1-r1", "c1-r2"}
 
 
 # ---------------------------------------------------------------------------

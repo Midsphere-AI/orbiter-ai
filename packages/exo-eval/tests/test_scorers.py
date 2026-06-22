@@ -7,6 +7,7 @@ from typing import Any
 
 import pytest
 
+from exo.eval.base import EvalError  # pyright: ignore[reportMissingImports]
 from exo.eval.scorers import (  # pyright: ignore[reportMissingImports]
     FormatValidationScorer,
     OutputCompletenessScorer,
@@ -31,7 +32,7 @@ class TestFormatValidationScorerInit:
         assert s._name == "my_xml"
 
     def test_unsupported_format(self) -> None:
-        with pytest.raises(ValueError, match="Unsupported format"):
+        with pytest.raises(EvalError, match="Unsupported format"):
             FormatValidationScorer("html")
 
 
@@ -294,8 +295,20 @@ class TestOutputCompletenessScorer:
         s = OutputCompletenessScorer([])
         sr = await s.score("c1", None, "anything")
         assert sr.score == 0.0
+        assert "error" in sr.details
 
     async def test_case_insensitive(self) -> None:
         s = OutputCompletenessScorer(["Summary"])
         sr = await s.score("c1", None, "Here is the summary of findings.")
         assert sr.score == 1.0
+
+    async def test_sections_kwarg(self) -> None:
+        """New callers should be able to use the kw-only ``sections=`` parameter."""
+        s = OutputCompletenessScorer(sections=["intro", "conclusion"])
+        sr = await s.score("c1", None, "intro and conclusion are here")
+        assert sr.score == 1.0
+
+    def test_both_args_raises(self) -> None:
+        """Providing both positional and kw-only form must raise EvalError."""
+        with pytest.raises(EvalError):
+            OutputCompletenessScorer(["intro"], sections=["intro"])

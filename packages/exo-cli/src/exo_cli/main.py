@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+from collections.abc import Coroutine
 from pathlib import Path
 from typing import Annotated, Any
 from urllib.parse import urlparse
@@ -35,9 +36,40 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from exo._internal.errors import unwrap_exception_group  # pyright: ignore[reportMissingImports]
 from exo.types import ExoError  # pyright: ignore[reportMissingImports]
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Shared async boundary
+# ---------------------------------------------------------------------------
+
+
+def _cli_run(coro: Coroutine[Any, Any, Any], *, verbose: bool = False) -> None:
+    """Run *coro* under ``asyncio.run`` with a clean error boundary.
+
+    Handles:
+    - ``KeyboardInterrupt`` → prints "Interrupted." and exits 130.
+    - ``ExoError`` → prints the structured teaching block and exits 1.
+    - ``BaseExceptionGroup`` → unwraps to the real cause, prints it,
+      and exits 1 (re-raises the full group when *verbose* is True).
+    """
+    try:
+        asyncio.run(coro)
+    except KeyboardInterrupt:
+        console.print("\n[dim]Interrupted.[/dim]")
+        raise typer.Exit(code=130) from None
+    except ExoError as exc:
+        console.print(f"[bold red]Error:[/bold red] {exc}")
+        raise typer.Exit(code=1) from exc
+    except BaseExceptionGroup as eg:
+        real = unwrap_exception_group(eg)
+        console.print(f"[bold red]Error:[/bold red] {real}")
+        if verbose:
+            raise
+        raise typer.Exit(code=1) from real
+
 
 # ---------------------------------------------------------------------------
 # Config file discovery
@@ -74,14 +106,21 @@ def load_config(path: str | Path) -> dict[str, Any]:
     """
     p = Path(path)
     if not p.is_file():
-        raise CLIError(f"Config file not found: {p}")
+        raise CLIError(
+            f"Config file not found: {p}",
+            hint="Use --config to specify a path, or create .exo.yaml in the current directory.",
+        )
 
     from exo.loader import LoaderError, load_yaml  # lazy import
 
     try:
         data = load_yaml(p)
     except LoaderError as exc:
-        raise CLIError(f"Invalid config: {exc}") from exc
+        raise CLIError(
+            f"Invalid config: {exc}",
+            context={"path": str(p)},
+            hint="Check that the file is valid YAML and contains a top-level 'agents' key.",
+        ) from exc
     return data
 
 
@@ -154,37 +193,31 @@ def run(
         {"input": input_text, "config": config, "model": model, "stream": stream},
     )
 
-    # Resolve config
-    cfg = resolve_config(config)
-    if verbose and cfg:
-        console.print(f"[dim]Loaded config with keys: {list(cfg.keys())}[/dim]")
-
-    if not cfg:
+    # Resolve config path once; reuse for both metadata display and agent loading.
+    config_path = config or str(find_config() or "")
+    if not config_path:
         console.print("[yellow]No config file found. Use --config or create .exo.yaml[/yellow]")
         raise typer.Exit(code=1)
 
+    cfg = load_config(config_path)
     if verbose:
+        console.print(f"[dim]Loaded config with keys: {list(cfg.keys())}[/dim]")
         console.print(f"[dim]Model: {model or 'auto'}[/dim]")
         console.print(f"[dim]Streaming: {stream}[/dim]")
 
     console.print(f"[green]Running with input:[/green] {input_text}")
 
-    # Load agents from config
+    # Load agents from config (same file, already validated above)
     from exo_cli.loader import AgentLoadError, load_yaml_agents  # lazy import
-
-    config_path = config or str(find_config() or "")
-    if not config_path:
-        console.print("[red]Error: cannot determine config path.[/red]")
-        raise typer.Exit(code=1)
 
     try:
         agents = load_yaml_agents(Path(config_path))
     except AgentLoadError as exc:
-        console.print(f"[red]Error loading agents: {exc}[/red]")
+        console.print(f"[bold red]Error:[/bold red] loading agents: {exc}")
         raise typer.Exit(code=1) from exc
 
     if not agents:
-        console.print("[red]Error: no agents defined in config.[/red]")
+        console.print("[bold red]Error:[/bold red] no agents defined in config.")
         raise typer.Exit(code=1)
 
     # Pick the first agent (config determines which agent to run)
@@ -194,9 +227,11 @@ def run(
     if model:
         agent.model = model
 
-    from exo_cli.executor import ExecutionResult, ExecutorError, LocalExecutor  # lazy import
+    from exo_cli.executor import ExecutionResult, LocalExecutor  # lazy import
 
-    executor = LocalExecutor(agent=agent, verbose=verbose)
+    # Pass main.console so primary output goes to stdout; executor diagnostics
+    # also land on stdout for the run command (streaming already does this).
+    executor = LocalExecutor(agent=agent, verbose=verbose, console=console)
 
     async def _run() -> None:
         if stream:
@@ -207,11 +242,7 @@ def run(
             result: ExecutionResult = await executor.execute(input_text)
             executor.print_result(result)
 
-    try:
-        asyncio.run(_run())
-    except ExecutorError as exc:
-        executor.print_error(exc)
-        raise typer.Exit(code=1) from exc
+    _cli_run(_run(), verbose=verbose)
 
 
 # ---------------------------------------------------------------------------
@@ -238,25 +269,26 @@ def chat(
     """Start an interactive chat session with an agent."""
     verbose: bool = ctx.obj.get("verbose", False)
 
-    cfg = resolve_config(config)
-    if verbose and cfg:
-        console.print(f"[dim]Loaded config with keys: {list(cfg.keys())}[/dim]")
-
-    if not cfg:
+    # Resolve config path once; reuse for both metadata display and agent loading.
+    config_path = config or str(find_config() or "")
+    if not config_path:
         console.print("[yellow]No config file found. Use --config or create .exo.yaml[/yellow]")
         raise typer.Exit(code=1)
 
+    cfg = load_config(config_path)
+    if verbose:
+        console.print(f"[dim]Loaded config with keys: {list(cfg.keys())}[/dim]")
+
     from exo_cli.loader import AgentLoadError, load_yaml_agents  # lazy import
 
-    config_path = config or str(find_config() or "")
     try:
         agents = load_yaml_agents(Path(config_path))
     except AgentLoadError as exc:
-        console.print(f"[red]Error loading agents: {exc}[/red]")
+        console.print(f"[bold red]Error:[/bold red] loading agents: {exc}")
         raise typer.Exit(code=1) from exc
 
     if not agents:
-        console.print("[red]Error: no agents defined in config.[/red]")
+        console.print("[bold red]Error:[/bold red] no agents defined in config.")
         raise typer.Exit(code=1)
 
     if model:
@@ -272,9 +304,10 @@ def chat(
         run_fn=run_fn,
         stream_fn=stream_fn,
         streaming=stream,
+        debug=verbose,
     )
 
-    asyncio.run(repl.start())
+    _cli_run(repl.start(), verbose=verbose)
 
 
 # ---------------------------------------------------------------------------
@@ -313,13 +346,15 @@ def batch(
     """Run an agent against a batch of inputs from a file."""
     verbose: bool = ctx.obj.get("verbose", False)
 
-    cfg = resolve_config(config)
-    if verbose and cfg:
-        console.print(f"[dim]Loaded config with keys: {list(cfg.keys())}[/dim]")
-
-    if not cfg:
+    # Resolve config path once; reuse for both metadata display and agent loading.
+    config_path = config or str(find_config() or "")
+    if not config_path:
         console.print("[yellow]No config file found. Use --config or create .exo.yaml[/yellow]")
         raise typer.Exit(code=1)
+
+    cfg = load_config(config_path)
+    if verbose:
+        console.print(f"[dim]Loaded config with keys: {list(cfg.keys())}[/dim]")
 
     from exo_cli.batch import (  # lazy import
         BatchError,
@@ -330,15 +365,14 @@ def batch(
     )
     from exo_cli.loader import AgentLoadError, load_yaml_agents  # lazy import
 
-    config_path = config or str(find_config() or "")
     try:
         agents = load_yaml_agents(Path(config_path))
     except AgentLoadError as exc:
-        console.print(f"[red]Error loading agents: {exc}[/red]")
+        console.print(f"[bold red]Error:[/bold red] loading agents: {exc}")
         raise typer.Exit(code=1) from exc
 
     if not agents:
-        console.print("[red]Error: no agents defined in config.[/red]")
+        console.print("[bold red]Error:[/bold red] no agents defined in config.")
         raise typer.Exit(code=1)
 
     agent = next(iter(agents.values()))
@@ -348,7 +382,7 @@ def batch(
     try:
         items = load_batch_items(inputs_file)
     except BatchError as exc:
-        console.print(f"[red]Error loading inputs: {exc}[/red]")
+        console.print(f"[bold red]Error:[/bold red] loading inputs: {exc}")
         raise typer.Exit(code=1) from exc
 
     console.print(f"[green]Running batch:[/green] {len(items)} items, concurrency={concurrency}")
@@ -366,7 +400,7 @@ def batch(
         else:
             console.print(results_to_jsonl(result))
 
-    asyncio.run(_run_batch())
+    _cli_run(_run_batch(), verbose=verbose)
 
 
 # ---------------------------------------------------------------------------
@@ -425,7 +459,7 @@ def start_worker(
     url = redis_url or os.environ.get("EXO_REDIS_URL")
     if not url:
         console.print(
-            "[red]Error: --redis-url required or set EXO_REDIS_URL environment variable.[/red]"
+            "[bold red]Error:[/bold red] --redis-url required or set EXO_REDIS_URL environment variable."
         )
         raise typer.Exit(code=1)
 
@@ -447,7 +481,7 @@ def start_worker(
     console.print()
     console.print("[dim]Press Ctrl+C to stop.[/dim]")
 
-    asyncio.run(worker.start())
+    _cli_run(worker.start())
 
 
 # ---------------------------------------------------------------------------
@@ -467,7 +501,7 @@ def _resolve_redis_url(redis_url: str | None) -> str:
     url = redis_url or os.environ.get("EXO_REDIS_URL")
     if not url:
         console.print(
-            "[red]Error: --redis-url required or set EXO_REDIS_URL environment variable.[/red]"
+            "[bold red]Error:[/bold red] --redis-url required or set EXO_REDIS_URL environment variable."
         )
         raise typer.Exit(code=1)
     return url
@@ -556,7 +590,7 @@ def task_status(
                 preview = preview[:200] + "..."
             console.print(f"  Result:      {preview}")
 
-    asyncio.run(_show())
+    _cli_run(_show())
 
 
 @task_app.command("cancel")
@@ -586,7 +620,7 @@ def task_cancel(
 
         console.print(f"[green]Task {task_id} cancelled.[/green]")
 
-    asyncio.run(_cancel())
+    _cli_run(_cancel())
 
 
 @task_app.command("list")
@@ -620,7 +654,9 @@ def task_list(
             status_filter = TaskStatus(status)
         except ValueError as err:
             valid = ", ".join(s.value for s in TaskStatus)
-            console.print(f"[red]Invalid status: {status}. Valid values: {valid}[/red]")
+            console.print(
+                f"[bold red]Error:[/bold red] invalid status: {status}. Valid values: {valid}"
+            )
             raise typer.Exit(code=1) from err
 
     async def _list() -> None:
@@ -656,7 +692,7 @@ def task_list(
 
         console.print(table)
 
-    asyncio.run(_list())
+    _cli_run(_list())
 
 
 # ---------------------------------------------------------------------------
@@ -728,4 +764,79 @@ def worker_list(
 
         console.print(table)
 
-    asyncio.run(_list_workers())
+    _cli_run(_list_workers())
+
+
+@worker_app.command("status")
+def worker_status(
+    worker_id: Annotated[
+        str,
+        typer.Argument(help="Worker ID to inspect."),
+    ],
+    redis_url: Annotated[
+        str | None,
+        typer.Option("--redis-url", help="Redis connection URL (default: EXO_REDIS_URL env var)."),
+    ] = None,
+) -> None:
+    """Show detailed health status for a specific worker."""
+    logger.debug("CLI command=%s args=%r", "worker status", {"worker_id": worker_id})
+    url = _resolve_redis_url(redis_url)
+
+    async def _show_worker() -> None:
+        from exo.distributed.health import (  # pyright: ignore[reportMissingImports]
+            get_worker_fleet_status,
+        )
+
+        workers = await get_worker_fleet_status(url)
+        match = next((w for w in workers if w.worker_id == worker_id), None)
+        if match is None:
+            console.print(f"[yellow]Worker not found: {worker_id}[/yellow]")
+            raise typer.Exit(code=1)
+
+        status_color = "green" if match.alive else "red"
+        status_text = match.status if match.alive else "dead"
+        console.print(f"[bold]Worker {match.worker_id}[/bold]")
+        console.print(f"  Status:        [{status_color}]{status_text}[/{status_color}]")
+        console.print(f"  Hostname:      {match.hostname}")
+        console.print(f"  Concurrency:   {match.concurrency}")
+        console.print(f"  Tasks done:    {match.tasks_processed}")
+        console.print(f"  Tasks failed:  {match.tasks_failed}")
+        console.print(f"  Current task:  {match.current_task_id or '-'}")
+        console.print(f"  Last heartbeat: {_format_timestamp(match.last_heartbeat)}")
+
+    _cli_run(_show_worker())
+
+
+@worker_app.command("stop")
+def worker_stop(
+    worker_id: Annotated[
+        str,
+        typer.Argument(help="Worker ID to stop gracefully."),
+    ],
+    redis_url: Annotated[
+        str | None,
+        typer.Option("--redis-url", help="Redis connection URL (default: EXO_REDIS_URL env var)."),
+    ] = None,
+) -> None:
+    """Send a graceful stop signal to a worker.
+
+    The worker will finish its current task and then exit.
+    Use ``exo start worker`` to start a new one.
+    """
+    logger.debug("CLI command=%s args=%r", "worker stop", {"worker_id": worker_id})
+    url = _resolve_redis_url(redis_url)
+
+    async def _stop_worker() -> None:
+        from exo.distributed.broker import TaskBroker  # pyright: ignore[reportMissingImports]
+
+        broker = TaskBroker(url)
+        await broker.connect()
+        try:
+            await broker.stop_worker(worker_id)
+        finally:
+            await broker.disconnect()
+
+        console.print(f"[green]Stop signal sent to worker {worker_id}.[/green]")
+        console.print("[dim]The worker will finish its current task and then exit.[/dim]")
+
+    _cli_run(_stop_worker())

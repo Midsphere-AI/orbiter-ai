@@ -42,6 +42,32 @@ from exo.types import (
 
 _log = logging.getLogger(__name__)
 
+
+# ---------------------------------------------------------------------------
+# Error helper
+# ---------------------------------------------------------------------------
+
+
+def _openai_error_hint(exc: openai.APIError) -> tuple[str, str | None]:
+    """Return (message, hint) for an OpenAI API error."""
+    status = getattr(exc, "status_code", None)
+    msg = str(exc)
+    if status == 401:
+        return msg, "Check that OPENAI_API_KEY is set correctly and has not expired."
+    if status == 429:
+        return msg, "Rate limited — reduce request frequency or add a delay between calls."
+    if status == 400:
+        body = str(getattr(exc, "body", "") or "")
+        if "context" in body.lower() or "too long" in body.lower() or "max_tokens" in body.lower():
+            return msg, (
+                "Reduce prompt length or increase max_tokens to fit within the model's context window."
+            )
+        return msg, None
+    if status in (500, 502, 503, 529):
+        return msg, "The OpenAI API is experiencing issues — retry after a short delay."
+    return msg, None
+
+
 # ---------------------------------------------------------------------------
 # Finish reason mapping
 # ---------------------------------------------------------------------------
@@ -158,16 +184,26 @@ def _to_openai_messages(messages: list[Message]) -> list[dict[str, Any]]:
             result.append(entry)
         elif isinstance(msg, ToolResult):
             if isinstance(msg.content, list):
-                # OpenAI tool role only accepts str — use placeholder text and
-                # collect media blocks for a synthetic follow-up user message.
-                media_parts = _content_blocks_to_openai(msg.content)
-                text_content = msg.error if msg.error else "[media result]"
+                # OpenAI tool role only accepts str — extract text, then collect
+                # non-text media blocks for a synthetic follow-up user message.
+                if msg.error:
+                    text_content = msg.error
+                else:
+                    # Extract text from any TextBlocks; fall back to placeholder
+                    # only when there are no text blocks at all.
+                    text_parts = [b.text for b in msg.content if isinstance(b, TextBlock)]
+                    text_content = " ".join(text_parts) if text_parts else "[media result]"
                 result.append(
                     {
                         "role": "tool",
                         "tool_call_id": msg.tool_call_id,
                         "content": text_content,
                     }
+                )
+                # Only inject a synthetic user turn for genuinely non-text blocks
+                # (images, audio) — text is already carried in the tool role above.
+                media_parts = _content_blocks_to_openai(
+                    [b for b in msg.content if not isinstance(b, TextBlock)]
                 )
                 if media_parts:
                     result.append({"role": "user", "content": media_parts})
@@ -349,7 +385,13 @@ class OpenAIProvider(ModelProvider):
                 exc,
                 exc_info=True,
             )
-            raise ModelError(str(exc), model=f"openai:{self.config.model_name}") from exc
+            msg, hint = _openai_error_hint(exc)
+            raise ModelError(
+                msg,
+                model=f"openai:{self.config.model_name}",
+                context={"status_code": getattr(exc, "status_code", None)},
+                hint=hint,
+            ) from exc
         return _parse_response(response, self.config.model_name)
 
     async def stream(
@@ -396,7 +438,13 @@ class OpenAIProvider(ModelProvider):
                 exc,
                 exc_info=True,
             )
-            raise ModelError(str(exc), model=f"openai:{self.config.model_name}") from exc
+            msg, hint = _openai_error_hint(exc)
+            raise ModelError(
+                msg,
+                model=f"openai:{self.config.model_name}",
+                context={"status_code": getattr(exc, "status_code", None)},
+                hint=hint,
+            ) from exc
 
     def _build_kwargs(
         self,

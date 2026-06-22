@@ -357,6 +357,22 @@ async def _stream(
 
         raise AgentError(f"Agent '{agent.name}' requires a provider for stream()")
 
+    # Expose the resolved provider + running flag so spawn_self / spawn_background
+    # work when the parent is streamed, and so background children route their
+    # results HOT (live) vs WAKEUP (next run).  Reset at every exit below.
+    agent._current_provider = resolved
+    agent._is_running = True
+
+    def _bg_teardown() -> None:
+        agent._current_provider = None
+        agent._is_running = False
+
+    # Flush background results that completed while idle (WAKEUP merge).
+    _bg_handler = getattr(agent, "_bg_handler", None)
+    if _bg_handler is not None and not _bg_handler.pending_queue.empty:
+        async for _bg in _bg_handler.drain_pending():
+            agent.inject_message(agent._format_bg_result(_bg))
+
     input, messages = await prepare_planned_execution(
         agent,
         input,
@@ -465,7 +481,7 @@ async def _stream(
     _update_system_token_info: Any = None
     if _agent_context is not None:
         try:
-            from exo.agent import (  # pyright: ignore[reportMissingImports]
+            from exo._internal.context_helpers import (
                 _get_context_window_tokens,
                 _update_system_token_info,
             )
@@ -482,7 +498,7 @@ async def _stream(
     # ---- Context: apply windowing and summarization ----
     # Skip initial windowing when loaded from snapshot.
     if _agent_context is not None and not _snapshot_loaded:
-        from exo.agent import _apply_context_windowing  # pyright: ignore[reportMissingImports]
+        from exo._internal.context_helpers import _apply_context_windowing
 
         msg_list, _ctx_actions = await _apply_context_windowing(
             msg_list,
@@ -512,9 +528,7 @@ async def _stream(
     _agent_memory_lt = getattr(agent, "memory", None)
     if _agent_memory_lt is not None:
         try:
-            from exo.agent import (
-                _inject_long_term_knowledge,  # pyright: ignore[reportMissingImports]
-            )
+            from exo._internal.context_helpers import _inject_long_term_knowledge
 
             msg_list = await _inject_long_term_knowledge(_agent_memory_lt, input, msg_list)
         except ImportError:
@@ -739,6 +753,7 @@ async def _stream(
                     tool_calls,
                 )
                 _record_stream_metrics()
+                _bg_teardown()
                 return
 
             # Yield ToolCallEvent for each tool call.
@@ -799,8 +814,8 @@ async def _stream(
                                 )
                             if _passes_filter(progress_evt):
                                 yield progress_evt
-                        except Exception:
-                            break
+                        except asyncio.QueueEmpty:
+                            break  # Drained — expected race against the empty() guard
 
             # Drain inner agent events pushed by tools via ToolContext.emit()
             # and PTC inner tool events. ToolResultEvent respects the detailed
@@ -906,8 +921,8 @@ async def _stream(
                     if _passes_filter(_tb_ev):
                         yield _tb_ev
 
-                from exo.agent import (
-                    _apply_context_windowing as _acw,  # pyright: ignore[reportMissingImports]
+                from exo._internal.context_helpers import (
+                    _apply_context_windowing as _acw,
                 )
 
                 msg_list, _step_actions = await _acw(
@@ -957,7 +972,11 @@ async def _stream(
             # Fire ERROR hook (parity with run() path)
             await agent.hook_manager.run(HookPoint.ERROR, agent=agent, error=exc)
             _record_stream_metrics()
+            _bg_teardown()
             raise
+
+    # Loop exhausted all steps without a text-only completion.
+    _bg_teardown()
 
 
 async def _save_stream_snapshot(

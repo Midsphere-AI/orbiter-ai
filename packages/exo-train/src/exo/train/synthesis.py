@@ -176,20 +176,20 @@ class DataSynthesizer(ABC):
     __slots__ = ()
 
     @abstractmethod
-    async def synthesise(
-        self,
-        source: Sequence[dict[str, Any]],
-        config: SynthesisConfig,
-    ) -> list[dict[str, Any]]:
-        """Generate synthetic items from *source* data. (Deprecated spelling — override synthesize instead.)"""
-
     async def synthesize(
         self,
         source: Sequence[dict[str, Any]],
         config: SynthesisConfig,
     ) -> list[dict[str, Any]]:
         """Generate synthetic items from *source* data."""
-        return await self.synthesise(source, config)
+
+    async def synthesise(
+        self,
+        source: Sequence[dict[str, Any]],
+        config: SynthesisConfig,
+    ) -> list[dict[str, Any]]:
+        """Deprecated spelling — override synthesize instead."""
+        return await self.synthesize(source, config)
 
 
 DataSynthesiser = DataSynthesizer  # Deprecated alias — use DataSynthesizer
@@ -208,7 +208,7 @@ class TemplateSynthesizer(DataSynthesizer):
             tuple(transforms) if transforms else (augment_swap_io,)
         )
 
-    async def synthesise(
+    async def synthesize(
         self,
         source: Sequence[dict[str, Any]],
         config: SynthesisConfig,

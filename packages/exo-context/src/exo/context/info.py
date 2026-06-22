@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,6 +109,7 @@ def build_context_window_info(
 
         _msg_types: tuple[type, ...] = (SystemMessage, UserMessage, AssistantMessage, ToolResult)
     except ImportError:
+        logger.debug("exo.types unavailable in build_context_window_info; message counts will be 0")
         _msg_types = (type(None), type(None), type(None), type(None))
 
     system_count = sum(1 for m in msg_list if isinstance(m, _msg_types[0]))
@@ -132,8 +136,13 @@ def build_context_window_info(
             trajectory = tuple(traj_list)
             cumulative_input = sum(getattr(s, "prompt_tokens", 0) for s in traj_list)
             cumulative_output = sum(getattr(s, "output_tokens", 0) for s in traj_list)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug(
+                "trajectory unavailable for %r: %s",
+                agent_name,
+                exc,
+                exc_info=True,
+            )
 
     # Config fields (duck-typed for both ContextConfig and bare objects)
     overflow = str(getattr(config, "overflow", "summarize"))

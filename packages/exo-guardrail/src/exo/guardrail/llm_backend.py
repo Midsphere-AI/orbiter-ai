@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import Any
@@ -66,6 +67,9 @@ class LLMGuardrailBackend(GuardrailBackend):
             so traffic is blocked rather than silently permitted.
             Set to ``True`` only when you prefer availability over
             security (e.g. non-critical dev environments).
+        timeout: Seconds to wait for the LLM provider to respond.
+            Defaults to 10 seconds.  On timeout, the ``fail_open``
+            policy is applied (fail-closed by default).
 
     Example::
 
@@ -81,12 +85,14 @@ class LLMGuardrailBackend(GuardrailBackend):
         api_key: str | None = None,
         provider: Any | None = None,
         fail_open: bool = False,
+        timeout: float = 10.0,
     ) -> None:
         self._model = model
         self._prompt_template = prompt_template
         self._api_key = api_key
         self._provider = provider
         self._fail_open = fail_open
+        self._timeout = timeout
 
     def _get_provider(self) -> Any:
         """Lazily build or return the model provider."""
@@ -123,12 +129,26 @@ class LLMGuardrailBackend(GuardrailBackend):
             provider = self._get_provider()
             from exo.types import UserMessage
 
-            response = await provider.complete(
-                [UserMessage(content=prompt)],
-                temperature=0.0,
-                max_tokens=256,
+            response = await asyncio.wait_for(
+                provider.complete(
+                    [UserMessage(content=prompt)],
+                    temperature=0.0,
+                    max_tokens=256,
+                ),
+                timeout=self._timeout,
             )
-            return _parse_llm_response(response.content)
+            assessment = _parse_llm_response(response.content, model=self._model)
+            # If _parse_llm_response flagged a parse failure (risk_type="parse_failure"),
+            # and the caller chose fail_open=True, downgrade to SAFE so the flag is
+            # respected consistently with other backend failures.
+            if assessment.risk_type == "parse_failure" and self._fail_open:
+                logger.warning(
+                    "Guardrail LLM response parse failure, fail_open=True so defaulting to SAFE"
+                    " (model=%s)",
+                    self._model,
+                )
+                return RiskAssessment(has_risk=False, risk_level=RiskLevel.SAFE)
+            return assessment
         except Exception as exc:
             if self._fail_open:
                 logger.warning(
@@ -159,18 +179,26 @@ class LLMGuardrailBackend(GuardrailBackend):
 # ---------------------------------------------------------------------------
 
 
-def _parse_llm_response(content: str) -> RiskAssessment:
+def _parse_llm_response(content: str, *, model: str = "llm") -> RiskAssessment:
     """Parse the LLM's JSON response into a ``RiskAssessment``.
 
     Attempts to extract JSON from the response content, handling
     cases where the LLM wraps its output in markdown fences.
 
+    **Fail-safe contract:** any parse error or unrecognised field value
+    returns a HIGH-risk assessment (``risk_type="parse_failure"``).
+    Returning SAFE on a malformed guardrail response would allow an
+    attacker to bypass the guardrail simply by making the model produce
+    garbled output.  The caller (``LLMGuardrailBackend.analyze``) may
+    downgrade this to SAFE when ``fail_open=True``.
+
     Args:
         content: Raw text response from the LLM.
+        model: Model identifier for logging and ``details["model"]``.
 
     Returns:
-        A ``RiskAssessment`` parsed from the response, or a safe
-        default if parsing fails.
+        A ``RiskAssessment`` parsed from the response, or a HIGH-risk
+        assessment if parsing fails.
     """
     cleaned = content.strip()
 
@@ -183,16 +211,55 @@ def _parse_llm_response(content: str) -> RiskAssessment:
 
     try:
         result = json.loads(cleaned)
-    except (json.JSONDecodeError, ValueError):
-        logger.warning("Failed to parse LLM guardrail response: %s", content[:200])
-        return RiskAssessment(has_risk=False, risk_level=RiskLevel.SAFE)
+    except (json.JSONDecodeError, ValueError) as exc:
+        # SECURITY: fail-safe — do NOT return SAFE on a malformed response.
+        # A broken/truncated LLM judge response must not wave through an attack.
+        logger.warning(
+            "Failed to parse LLM guardrail response (model=%s): %s — raw: %r",
+            model,
+            exc,
+            content[:200],
+        )
+        return RiskAssessment(
+            has_risk=True,
+            risk_level=RiskLevel.HIGH,
+            risk_type="parse_failure",
+            details={"raw": content[:200], "model": model},
+        )
 
     if not isinstance(result, dict):
-        return RiskAssessment(has_risk=False, risk_level=RiskLevel.SAFE)
+        # SECURITY: non-dict JSON (array, scalar, null) — fail-safe.
+        logger.warning(
+            "LLM guardrail response is not a JSON object (model=%s): %r",
+            model,
+            content[:200],
+        )
+        return RiskAssessment(
+            has_risk=True,
+            risk_level=RiskLevel.HIGH,
+            risk_type="parse_failure",
+            details={"raw": content[:200], "model": model},
+        )
 
-    has_risk = bool(result.get("has_risk", False))
     raw_level = str(result.get("risk_level", "safe")).lower()
-    risk_level = RiskLevel(raw_level) if raw_level in _VALID_RISK_LEVELS else RiskLevel.SAFE
+    if raw_level in _VALID_RISK_LEVELS:
+        risk_level = RiskLevel(raw_level)
+    else:
+        # SECURITY: unknown risk_level string — fail-safe to HIGH.
+        logger.warning(
+            "LLM guardrail returned unrecognised risk_level=%r (model=%s); "
+            "treating as HIGH (fail-safe). Valid levels: %s",
+            raw_level,
+            model,
+            ", ".join(sorted(_VALID_RISK_LEVELS)),
+        )
+        risk_level = RiskLevel.HIGH
+
+    # SECURITY: reconcile has_risk vs risk_level.
+    # If the LLM says risk_level is non-SAFE, treat it as risky regardless
+    # of the boolean field — a mismatch could indicate an adversarial response.
+    has_risk_from_field = bool(result.get("has_risk", False))
+    has_risk = has_risk_from_field or (risk_level != RiskLevel.SAFE)
 
     risk_type = result.get("risk_type")
     if risk_type is not None:
@@ -207,7 +274,7 @@ def _parse_llm_response(content: str) -> RiskAssessment:
     reasoning = result.get("reasoning")
     if reasoning:
         details["reasoning"] = str(reasoning)
-    details["model"] = "llm"
+    details["model"] = model
 
     return RiskAssessment(
         has_risk=has_risk,

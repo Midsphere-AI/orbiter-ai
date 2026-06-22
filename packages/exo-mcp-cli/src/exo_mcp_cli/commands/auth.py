@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from typing import Annotated
 
 import typer
@@ -21,14 +22,42 @@ auth_app = typer.Typer(
 def auth_set(
     ctx: typer.Context,
     name: Annotated[str, typer.Argument(help="Secret name (used in ${vault:NAME} references).")],
-    value: Annotated[str, typer.Argument(help="Secret value to store.")],
+    value: Annotated[
+        str | None,
+        typer.Argument(
+            help=(
+                "Secret value to store. "
+                "Omit to be prompted interactively (recommended — avoids shell history). "
+                "Use --stdin to read from standard input."
+            )
+        ),
+    ] = None,
+    stdin: Annotated[
+        bool,
+        typer.Option("--stdin", help="Read the secret value from stdin (for scripting)."),
+    ] = False,
 ) -> None:
-    """Store a secret in the encrypted vault."""
+    """Store a secret in the encrypted vault.
+
+    The secret value is read from an interactive hidden prompt by default so
+    that it never appears in shell history or process listings.  Pass the value
+    as a positional argument only when you are sure the environment is safe
+    (e.g. inside CI where history is not persisted), or use --stdin to pipe it
+    in from a file / password-manager.
+    """
     from exo_mcp_cli.main import get_vault
+
+    # Resolve value: explicit arg > --stdin > interactive prompt
+    if value is not None:
+        secret = value
+    elif stdin:
+        secret = sys.stdin.readline().rstrip("\n")
+    else:
+        secret = typer.prompt(f"Value for '{name}'", hide_input=True, confirmation_prompt=True)
 
     try:
         vault = get_vault(ctx)
-        vault.set(name, value)
+        vault.set(name, secret)
     except VaultError as exc:
         print_error(str(exc))
         raise typer.Exit(code=1) from exc

@@ -7,11 +7,19 @@ Requires the ``chromadb`` package::
 
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 from typing import Any
 
-from exo.retrieval.types import Chunk, RetrievalResult  # pyright: ignore[reportMissingImports]
+from exo.retrieval.types import (  # pyright: ignore[reportMissingImports]
+    Chunk,
+    RetrievalError,
+    RetrievalResult,
+)
 from exo.retrieval.vector_store import VectorStore  # pyright: ignore[reportMissingImports]
+
+logger = logging.getLogger(__name__)
 
 try:
     import chromadb  # type: ignore[import-untyped]
@@ -23,6 +31,10 @@ except ImportError as exc:
     raise ImportError(msg) from exc
 
 _DEFAULT_COLLECTION = "exo_vectors"
+
+# Flat scalar metadata fields stored directly on ChromaDB metadata records.
+# These support exact-match filtering via ChromaDB's $eq operator.
+_FLAT_FILTER_FIELDS = {"document_id", "chunk_index", "start_offset", "end_offset"}
 
 
 class ChromaVectorStore(VectorStore):
@@ -36,6 +48,13 @@ class ChromaVectorStore(VectorStore):
         path: Directory path for persistent storage.  When *None*, an
             ephemeral (in-memory) client is used.
         client: Optional pre-existing ``chromadb.ClientAPI`` instance.
+
+    Notes:
+        ``add()`` uses ChromaDB's ``upsert`` semantics: adding a chunk with the
+        same ``(document_id, chunk_index)`` identity as an existing record will
+        overwrite it rather than insert a duplicate.  This matches the behaviour
+        of most other backends and is the recommended contract for ``VectorStore``
+        implementations.
     """
 
     def __init__(
@@ -55,20 +74,38 @@ class ChromaVectorStore(VectorStore):
         else:
             self._client = chromadb.EphemeralClient()
 
-        self._collection = self._client.get_or_create_collection(
-            name=collection_name,
-            metadata={"hnsw:space": "cosine"},
-        )
+        try:
+            self._collection = self._client.get_or_create_collection(
+                name=collection_name,
+                metadata={"hnsw:space": "cosine"},
+            )
+        except Exception as exc:
+            raise RetrievalError(
+                f"ChromaDB collection init failed: {exc}",
+                context={"collection": collection_name, "path": path},
+                hint=(
+                    "Check that the collection name is valid, the path is writable,"
+                    " and chromadb is installed correctly."
+                ),
+            ) from exc
 
     async def add(
         self,
         chunks: list[Chunk],
         embeddings: list[list[float]],
     ) -> None:
-        """Add chunks with their embedding vectors."""
+        """Add (upsert) chunks with their embedding vectors.
+
+        Uses ChromaDB's ``upsert`` so that re-adding a chunk with the same
+        ``(document_id, chunk_index)`` ID overwrites the existing record.
+        """
         if len(chunks) != len(embeddings):
             msg = f"Number of chunks ({len(chunks)}) and embeddings ({len(embeddings)}) must match"
-            raise ValueError(msg)
+            raise RetrievalError(
+                msg,
+                context={"collection": self._collection_name, "operation": "add"},
+                hint="Ensure embed_batch() is called on the same chunk list before calling add().",
+            )
 
         if not chunks:
             return
@@ -83,6 +120,9 @@ class ChromaVectorStore(VectorStore):
             documents.append(chunk.content)
             # ChromaDB metadata must be flat (str/int/float/bool values).
             # Store full chunk info so we can reconstruct on retrieval.
+            # The four scalar fields (document_id, chunk_index, start_offset,
+            # end_offset) are stored as flat values so they can be used as
+            # exact-match ($eq) filter targets.
             meta: dict[str, Any] = {
                 "document_id": chunk.document_id,
                 "chunk_index": chunk.index,
@@ -92,7 +132,9 @@ class ChromaVectorStore(VectorStore):
             }
             metadatas.append(meta)
 
-        self._collection.upsert(
+        collection = self._collection
+        await asyncio.to_thread(
+            collection.upsert,
             ids=ids,
             embeddings=embeddings,
             documents=documents,
@@ -110,21 +152,35 @@ class ChromaVectorStore(VectorStore):
         Returns results ranked by similarity (highest score first).
         ChromaDB returns cosine distances; we convert to similarity via
         ``1 - distance``.
+
+        Filtering uses ChromaDB's ``$eq`` operator on the flat scalar metadata
+        fields (``document_id``, ``chunk_index``, ``start_offset``,
+        ``end_offset``).  Filtering on arbitrary chunk metadata keys stored
+        inside the ``chunk_metadata`` JSON blob is not supported; add those
+        fields as top-level document metadata to enable filtering.
         """
         where: dict[str, Any] | None = None
         if filter:
-            if len(filter) == 1:
-                key, value = next(iter(filter.items()))
-                where = {"chunk_metadata": {"$contains": json.dumps({key: value})[1:-1]}}
-            else:
-                where = {
-                    "$and": [
-                        {"chunk_metadata": {"$contains": json.dumps({k: v})[1:-1]}}
-                        for k, v in filter.items()
-                    ]
-                }
+            conditions: list[dict[str, Any]] = []
+            for key, value in filter.items():
+                if key not in _FLAT_FILTER_FIELDS:
+                    logger.warning(
+                        "ChromaVectorStore: filter key %r is not a flat metadata field "
+                        "(%s); it will be ignored. Only %s support filtering.",
+                        key,
+                        key,
+                        sorted(_FLAT_FILTER_FIELDS),
+                    )
+                    continue
+                conditions.append({key: {"$eq": value}})
+            if len(conditions) == 1:
+                where = conditions[0]
+            elif len(conditions) > 1:
+                where = {"$and": conditions}
 
-        query_result = self._collection.query(
+        collection = self._collection
+        query_result = await asyncio.to_thread(
+            collection.query,
             query_embeddings=[query_embedding],
             n_results=top_k,
             where=where,
@@ -147,7 +203,9 @@ class ChromaVectorStore(VectorStore):
             query_result["distances"][0] if query_result["distances"] else [0.0] * len(ids_list)
         )
 
-        for doc, meta, distance in zip(documents_list, metadatas_list, distances_list):
+        for doc, meta, distance in zip(
+            documents_list, metadatas_list, distances_list, strict=False
+        ):
             chunk_metadata = {}
             raw_meta = meta.get("chunk_metadata", "{}") if meta else "{}"
             if isinstance(raw_meta, str):
@@ -170,7 +228,9 @@ class ChromaVectorStore(VectorStore):
 
     async def delete(self, document_id: str) -> None:
         """Delete all chunks belonging to a document."""
-        self._collection.delete(
+        collection = self._collection
+        await asyncio.to_thread(
+            collection.delete,
             where={"document_id": document_id},
         )
 
@@ -179,8 +239,20 @@ class ChromaVectorStore(VectorStore):
 
         Deletes and re-creates the collection to clear all data.
         """
-        self._client.delete_collection(self._collection_name)
-        self._collection = self._client.get_or_create_collection(
-            name=self._collection_name,
-            metadata={"hnsw:space": "cosine"},
-        )
+        client = self._client
+        collection_name = self._collection_name
+
+        def _clear() -> chromadb.Collection:  # type: ignore[return]
+            client.delete_collection(collection_name)
+            return client.get_or_create_collection(
+                name=collection_name,
+                metadata={"hnsw:space": "cosine"},
+            )
+
+        self._collection = await asyncio.to_thread(_clear)
+
+    async def close(self) -> None:
+        """No-op: ChromaDB clients do not require explicit cleanup.
+
+        Provided for API symmetry with ``PgVectorStore.close()``.
+        """

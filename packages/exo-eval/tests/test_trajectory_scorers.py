@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from exo.eval.base import Scorer, ScorerResult  # pyright: ignore[reportMissingImports]
+from exo.eval.base import EvalError, Scorer, ScorerResult  # pyright: ignore[reportMissingImports]
 from exo.eval.trajectory_scorers import (  # pyright: ignore[reportMissingImports]
     AnswerAccuracyLLMScorer,
     LabelDistributionScorer,
@@ -38,9 +38,7 @@ class TestScorerRegistry:
         assert "label_distribution" in names
 
     def test_get_scorer_missing(self) -> None:
-        import pytest
-
-        with pytest.raises(KeyError):
+        with pytest.raises(EvalError, match="not registered"):
             get_scorer("nonexistent_scorer")
 
     def test_list_scorers_sorted(self) -> None:
@@ -189,7 +187,7 @@ class TestTimeCostScorer:
 class TestAnswerAccuracyLLMScorer:
     async def test_no_judge(self) -> None:
         scorer = AnswerAccuracyLLMScorer()
-        with pytest.raises(ValueError, match="judge callable"):
+        with pytest.raises(EvalError, match="judge callable"):
             await scorer.score("c1", {"question": "Q", "answer": "A"}, "response")
 
     async def test_with_judge(self) -> None:

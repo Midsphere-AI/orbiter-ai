@@ -19,6 +19,7 @@ string values at connection time.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 from dataclasses import InitVar, dataclass, field
@@ -28,9 +29,22 @@ from typing import Any
 from exo.mcp.client import HttpConfig, StdioConfig  # pyright: ignore[reportMissingImports]
 from exo.types import ExoError  # pyright: ignore[reportMissingImports]
 
+logger = logging.getLogger(__name__)
+
 _ENV_PATTERN = re.compile(r"\$\{([^}:]+)\}")
+# Shared vault-ref pattern — single definition reused across mcp-cli modules.
+VAULT_PATTERN = re.compile(r"\$\{vault:([^}]+)\}")
 _DEFAULT_CONFIG_NAMES = ("mcp.json",)
 _HOME_CONFIG_DIR = Path.home() / ".exo-mcp"
+
+
+def _cwd() -> Path:
+    """Return the current working directory.
+
+    A thin wrapper around :meth:`Path.cwd` that tests can monkeypatch without
+    touching the global process cwd (which is unsafe under xdist workers).
+    """
+    return Path.cwd()
 
 
 class MCPConfigError(ExoError):
@@ -125,9 +139,15 @@ class ServerEntry:
     def validate(self) -> None:
         """Validate transport-specific requirements."""
         if self.transport == "stdio" and not self.command:
-            raise MCPConfigError(f"Server '{self.name}': stdio transport requires 'command'")
+            raise MCPConfigError(
+                f"Server '{self.name}': stdio transport requires 'command'",
+                hint=f"Run `exo-mcp server add {self.name} --command <cmd>` to supply a command.",
+            )
         if self.transport in ("sse", "streamable_http", "websocket") and not self.url:
-            raise MCPConfigError(f"Server '{self.name}': {self.transport} transport requires 'url'")
+            raise MCPConfigError(
+                f"Server '{self.name}': {self.transport} transport requires 'url'",
+                hint=f"Run `exo-mcp server add {self.name} --url <url>` to supply a URL.",
+            )
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to a JSON-compatible dict (for saving back to mcp.json)."""
@@ -154,25 +174,60 @@ class ServerEntry:
 # ---------------------------------------------------------------------------
 
 
-def substitute_env_vars(value: str) -> str:
+def substitute_env_vars(value: str, *, warn_missing: bool = False) -> str:
     """Replace ``${VAR}`` placeholders with environment variable values.
 
     Unset variables are replaced with empty strings.  Vault references
     (``${vault:...}``) are left untouched.
+
+    Args:
+        value: The string in which to substitute ``${VAR}`` references.
+        warn_missing: When ``True``, emit a :mod:`logging` warning for each
+            variable that is not set in the environment.  Useful for critical
+            fields (``command``, ``url``) where a silent empty substitution
+            would cause confusing downstream failures.
     """
+    missing: list[str] = []
 
     def _replace(match: re.Match[str]) -> str:
-        return os.environ.get(match.group(1), "")
+        var = match.group(1)
+        result = os.environ.get(var)
+        if result is None:
+            if warn_missing:
+                missing.append(var)
+            return ""
+        return result
 
-    return _ENV_PATTERN.sub(_replace, value)
+    substituted = _ENV_PATTERN.sub(_replace, value)
+    for var in missing:
+        logger.warning(
+            "Environment variable '%s' referenced in mcp.json is not set; "
+            "substituting empty string — this may cause connection failures.",
+            var,
+        )
+    return substituted
 
 
-def _substitute_recursive(obj: Any) -> Any:
-    """Recursively substitute env vars in strings within dicts/lists."""
+def _substitute_recursive(obj: Any, *, warn_missing_keys: set[str] | None = None) -> Any:
+    """Recursively substitute env vars in strings within dicts/lists.
+
+    Args:
+        obj: The value to process.
+        warn_missing_keys: When provided and *obj* is a dict, emit a warning
+            via :func:`substitute_env_vars` for any missing env var found in
+            the values of these keys.  Nested structures below those keys are
+            not recursed with the warning flag — only the top-level key values.
+    """
     if isinstance(obj, str):
         return substitute_env_vars(obj)
     if isinstance(obj, dict):
-        return {k: _substitute_recursive(v) for k, v in obj.items()}
+        result: dict[str, Any] = {}
+        for k, v in obj.items():
+            if warn_missing_keys and k in warn_missing_keys and isinstance(v, str):
+                result[k] = substitute_env_vars(v, warn_missing=True)
+            else:
+                result[k] = _substitute_recursive(v)
+        return result
     if isinstance(obj, list):
         return [_substitute_recursive(v) for v in obj]
     return obj
@@ -195,9 +250,12 @@ def find_config(explicit_path: str | Path | None = None) -> Path | None:
         p = Path(explicit_path)
         if p.is_file():
             return p
-        raise MCPConfigError(f"Config file not found: {p}")
+        raise MCPConfigError(
+            f"Config file not found: {p}",
+            hint="Check the path or omit --config to use ./mcp.json or ~/.exo-mcp/mcp.json.",
+        )
     for name in _DEFAULT_CONFIG_NAMES:
-        candidate = Path.cwd() / name
+        candidate = _cwd() / name
         if candidate.is_file():
             return candidate
     home_cfg = _HOME_CONFIG_DIR / "mcp.json"
@@ -224,7 +282,10 @@ def load_config(path: Path) -> dict[str, ServerEntry]:
         raw = path.read_text(encoding="utf-8")
         data = json.loads(raw)
     except (json.JSONDecodeError, OSError) as exc:
-        raise MCPConfigError(f"Failed to parse config '{path}': {exc}") from exc
+        raise MCPConfigError(
+            f"Failed to parse config: {exc}",
+            context={"config": str(path)},
+        ) from exc
 
     servers_raw = data.get("mcpServers", {})
     if not isinstance(servers_raw, dict):
@@ -232,7 +293,10 @@ def load_config(path: Path) -> dict[str, ServerEntry]:
 
     servers: dict[str, ServerEntry] = {}
     for name, cfg in servers_raw.items():
-        cfg = _substitute_recursive(cfg)
+        # Substitute env vars for all fields; warn on missing vars in the
+        # critical command/url fields where an empty substitution causes
+        # hard-to-diagnose failures at connection time.
+        cfg = _substitute_recursive(cfg, warn_missing_keys={"command", "url"})
         servers[name] = ServerEntry(
             name=name,
             transport=cfg.get("transport", "stdio"),
@@ -251,7 +315,14 @@ def save_config(path: Path, servers: dict[str, ServerEntry]) -> None:
     """Write server configs back to an mcp.json file."""
     data = {"mcpServers": {name: entry.to_dict() for name, entry in servers.items()}}
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    try:
+        path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    except OSError as exc:
+        raise MCPConfigError(
+            f"Failed to write config: {exc}",
+            context={"config": str(path)},
+            hint="Check you have write permissions to the config file and sufficient disk space.",
+        ) from exc
 
 
 def load_or_empty(path: Path) -> dict[str, ServerEntry]:
@@ -280,4 +351,4 @@ def remove_server(path: Path, name: str) -> bool:
 
 def default_config_path() -> Path:
     """Return the default path for creating a new mcp.json (current directory)."""
-    return Path.cwd() / "mcp.json"
+    return _cwd() / "mcp.json"

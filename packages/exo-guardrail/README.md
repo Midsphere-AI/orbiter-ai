@@ -19,7 +19,7 @@ import asyncio
 from exo import Agent, run
 from exo.guardrail import UserInputGuardrail, PatternBackend, RiskLevel
 
-backend = PatternBackend(block_level=RiskLevel.MEDIUM)
+backend = PatternBackend()
 guardrail = UserInputGuardrail(backend=backend)
 
 agent = Agent(

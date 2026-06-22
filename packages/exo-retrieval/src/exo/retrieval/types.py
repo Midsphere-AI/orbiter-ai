@@ -77,7 +77,19 @@ class RetrievalError(ExoError):
         *,
         operation: str = "",
         details: dict[str, Any] | None = None,
+        context: dict[str, Any] | None = None,
+        hint: str | None = None,
+        doc: str | None = None,
     ) -> None:
-        super().__init__(message)
+        # Merge operation/details into context for structured ExoError rendering,
+        # while keeping self.operation and self.details for backward compatibility.
+        merged_context: dict[str, Any] = {}
+        if operation:
+            merged_context["operation"] = operation
+        if details:
+            merged_context.update(details)
+        if context:
+            merged_context.update(context)
+        super().__init__(message, context=merged_context or None, hint=hint, doc=doc)
         self.operation = operation
         self.details = details or {}

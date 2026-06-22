@@ -38,8 +38,11 @@ class ShortTermMemory:
         max_rounds: int = 0,
     ) -> None:
         if scope not in ("user", "session", "task"):
-            msg = f"Invalid scope {scope!r}, must be 'user', 'session', or 'task'"
-            raise ExoMemoryError(msg)
+            raise ExoMemoryError(
+                f"Invalid scope {scope!r}.",
+                context={"scope": scope},
+                hint="Pass one of: 'user', 'session', or 'task'.",
+            )
         self.scope = scope
         self.max_rounds = max_rounds
         self._items: list[MemoryItem] = []

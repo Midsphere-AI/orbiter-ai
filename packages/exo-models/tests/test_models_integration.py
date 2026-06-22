@@ -305,10 +305,11 @@ class TestApiKeyErrors:
         from exo.models.types import ModelError  # pyright: ignore[reportMissingImports]
 
         env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}
-        with patch.dict(os.environ, env, clear=True), pytest.raises(ModelError, match="ANTHROPIC_API_KEY"):
-            AnthropicProvider(
-                ModelConfig(provider="anthropic", model_name="claude-sonnet-4-6")
-            )
+        with (
+            patch.dict(os.environ, env, clear=True),
+            pytest.raises(ModelError, match="ANTHROPIC_API_KEY"),
+        ):
+            AnthropicProvider(ModelConfig(provider="anthropic", model_name="claude-sonnet-4-6"))
 
     def test_gemini_no_key_raises(self) -> None:
         import os
@@ -318,10 +319,9 @@ class TestApiKeyErrors:
         from exo.models.gemini import GoogleProvider  # pyright: ignore[reportMissingImports]
         from exo.models.types import ModelError  # pyright: ignore[reportMissingImports]
 
-        env = {
-            k: v
-            for k, v in os.environ.items()
-            if k not in ("GOOGLE_API_KEY", "GEMINI_API_KEY")
-        }
-        with patch.dict(os.environ, env, clear=True), pytest.raises(ModelError, match="GOOGLE_API_KEY"):
+        env = {k: v for k, v in os.environ.items() if k not in ("GOOGLE_API_KEY", "GEMINI_API_KEY")}
+        with (
+            patch.dict(os.environ, env, clear=True),
+            pytest.raises(ModelError, match="GOOGLE_API_KEY"),
+        ):
             GoogleProvider(ModelConfig(provider="gemini", model_name="gemini-2.0-flash"))

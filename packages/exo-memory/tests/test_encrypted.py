@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 
 import pytest
@@ -117,11 +118,11 @@ class TestDeriveKey:
 
 class TestConstructor:
     def test_rejects_short_key(self, inner_store: _InMemoryStore) -> None:
-        with pytest.raises(ValueError, match="32 bytes"):
+        with pytest.raises(ExoMemoryError, match="32 bytes"):
             EncryptedMemoryStore(inner_store, b"too-short")
 
     def test_rejects_long_key(self, inner_store: _InMemoryStore) -> None:
-        with pytest.raises(ValueError, match="32 bytes"):
+        with pytest.raises(ExoMemoryError, match="32 bytes"):
             EncryptedMemoryStore(inner_store, os.urandom(64))
 
     def test_accepts_valid_key(self, inner_store: _InMemoryStore) -> None:
@@ -224,9 +225,72 @@ class TestWrongKey:
         item = MemoryItem(id="wk-2", content="only key A can read", memory_type="human")
         await store_a.add(item)
 
-        # search with wrong key silently skips undecryptable items
+        # search with wrong key skips undecryptable items (returns empty, not raises)
         results = await store_b.search(memory_type="human")
         assert len(results) == 0
+
+    @pytest.mark.anyio()
+    async def test_wrong_key_search_logs_warning(
+        self, inner_store: _InMemoryStore, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Undecryptable items during search must emit a warning, not drop silently."""
+        key_a = os.urandom(32)
+        key_b = os.urandom(32)
+        store_a = EncryptedMemoryStore(inner_store, key_a)
+        store_b = EncryptedMemoryStore(inner_store, key_b)
+
+        item = MemoryItem(id="log-warn-1", content="stored with key A", memory_type="human")
+        await store_a.add(item)
+
+        with caplog.at_level(logging.WARNING, logger="exo.memory.encrypted"):
+            results = await store_b.search(memory_type="human")
+
+        # Result is empty (skipped), but a warning must have been emitted
+        assert results == []
+        assert any("log-warn-1" in rec.message for rec in caplog.records), (
+            "Expected a warning log containing the item id, got: "
+            + str([r.message for r in caplog.records])
+        )
+
+
+# ---------------------------------------------------------------------------
+# Error detail tests
+# ---------------------------------------------------------------------------
+
+
+class TestErrorDetails:
+    def test_short_key_error_has_hint(self, inner_store: _InMemoryStore) -> None:
+        try:
+            EncryptedMemoryStore(inner_store, b"short")
+        except ExoMemoryError as exc:
+            assert exc.hint is not None
+            assert "derive_key" in exc.hint
+        else:
+            pytest.fail("Expected ExoMemoryError")
+
+    @pytest.mark.anyio()
+    async def test_get_wrong_key_error_has_hint(self, inner_store: _InMemoryStore) -> None:
+        key_a = os.urandom(32)
+        key_b = os.urandom(32)
+        store_a = EncryptedMemoryStore(inner_store, key_a)
+        store_b = EncryptedMemoryStore(inner_store, key_b)
+        item = MemoryItem(id="hint-1", content="secret", memory_type="human")
+        await store_a.add(item)
+        try:
+            await store_b.get("hint-1")
+        except ExoMemoryError as exc:
+            assert exc.hint is not None
+            assert "AES key" in exc.hint or "key" in exc.hint.lower()
+        else:
+            pytest.fail("Expected ExoMemoryError")
+
+    @pytest.mark.anyio()
+    async def test_search_with_query_raises_exo_error(
+        self, enc_store: EncryptedMemoryStore
+    ) -> None:
+        """search(query=...) on encrypted store must raise ExoMemoryError (not NotImplementedError)."""
+        with pytest.raises(ExoMemoryError, match="does not support"):
+            await enc_store.search(query="hello")
 
 
 # ---------------------------------------------------------------------------

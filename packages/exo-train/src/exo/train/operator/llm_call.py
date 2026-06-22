@@ -53,11 +53,13 @@ class LLMCallOperator(Operator):
         *,
         system_prompt: str = "",
         user_prompt: str = "",
+        max_traces: int = 1000,
     ) -> None:
         self._name = op_name
         self._llm_fn = llm_fn
         self._system_prompt = system_prompt
         self._user_prompt = user_prompt
+        self._max_traces = max_traces
         self._traces: list[LLMCallTrace] = []
 
     @property
@@ -101,6 +103,8 @@ class LLMCallOperator(Operator):
                     timestamp=time.time(),
                 )
             )
+            if len(self._traces) > self._max_traces:
+                self._traces = self._traces[-self._max_traces :]
 
     def get_tunables(self) -> list[TunableSpec]:
         return [

@@ -49,7 +49,12 @@ class TestSnapshotMemoryModel:
 
     def test_snapshot_id(self) -> None:
         sid = snapshot_id("my-agent", "conv-123")
-        assert sid == "snapshot_my-agent_conv-123"
+        # Uses "::" separator to prevent collision e.g. ("a_b","c") vs ("a","b_c")
+        assert sid == "snapshot_my-agent::conv-123"
+
+    def test_snapshot_id_no_collision(self) -> None:
+        """("a_b", "c") and ("a", "b_c") must produce different IDs."""
+        assert snapshot_id("a_b", "c") != snapshot_id("a", "b_c")
 
 
 # ---------------------------------------------------------------------------
@@ -254,7 +259,7 @@ class TestMakeSnapshot:
             latest_raw_id="item-5",
             latest_raw_created_at="2026-01-01",
         )
-        assert snap.id == "snapshot_bot_conv-1"
+        assert snap.id == "snapshot_bot::conv-1"
         assert snap.memory_type == "snapshot"
         assert snap.raw_item_count == 5
         assert snap.latest_raw_id == "item-5"

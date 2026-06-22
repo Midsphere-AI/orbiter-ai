@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from collections.abc import AsyncIterator
@@ -80,6 +81,9 @@ class AgentExecutor:
 
     def __init__(self, agent: Any, *, streaming: bool = False) -> None:
         self._agent = agent
+        # _streaming is reserved for future use (e.g. true async token streaming
+        # from the underlying agent). It is accepted to avoid breaking callers but
+        # is not consulted by the current implementation.
         self._streaming = streaming
 
     async def execute(self, text: str, *, provider: Any = None) -> str:
@@ -180,7 +184,10 @@ class A2AServer:
             from fastapi import FastAPI
             from fastapi.responses import JSONResponse
         except ImportError as exc:
-            raise A2AServerError("fastapi is required for A2AServer: pip install fastapi") from exc
+            raise A2AServerError(
+                "fastapi is not installed — A2AServer requires it.",
+                hint="Install with: pip install fastapi uvicorn",
+            ) from exc
 
         app = FastAPI(
             title=f"A2A: {self._executor.agent_name}",
@@ -188,12 +195,21 @@ class A2AServer:
         )
 
         server = self
+        # Normalise endpoint: strip trailing slash so we can append paths cleanly.
+        # "/" stays "/"; "/api/v1" stays "/api/v1"; "/api/v1/" → "/api/v1".
+        ep = server._config.endpoint.rstrip("/") or "/"
 
         @app.get("/.well-known/agent-card")
         async def get_agent_card() -> JSONResponse:
             return JSONResponse(server._agent_card.model_dump(mode="json"))
 
-        @app.post("/")
+        # Static route must be registered BEFORE the param route to avoid FastAPI
+        # matching "stream" as a task_id.  We register both at the configured
+        # endpoint so the client's card.url + "/" always resolves correctly.
+        task_path = (ep + "/tasks/{task_id}") if ep != "/" else "/tasks/{task_id}"
+        root_path = ep if ep != "/" else "/"
+
+        @app.post(root_path)
         async def execute_task(payload: dict[str, Any]) -> JSONResponse:
             text = payload.get("text", "")
             task_id = payload.get("task_id") or str(uuid.uuid4())
@@ -206,7 +222,7 @@ class A2AServer:
                 task_id,
                 {
                     "task_id": task_id,
-                    "status": status.model_dump(),
+                    "status": status.model_dump(mode="json"),
                     "text": text,
                 },
             )
@@ -220,7 +236,7 @@ class A2AServer:
                 task_id,
                 {
                     "task_id": task_id,
-                    "status": working.status.model_dump(),
+                    "status": working.status.model_dump(mode="json"),
                     "text": text,
                 },
             )
@@ -235,7 +251,7 @@ class A2AServer:
                     task_id,
                     {
                         "task_id": task_id,
-                        "status": completed_status.model_dump(),
+                        "status": completed_status.model_dump(mode="json"),
                         "result": result,
                     },
                 )
@@ -246,8 +262,8 @@ class A2AServer:
                 return JSONResponse(
                     {
                         "task_id": task_id,
-                        "status": completed_status.model_dump(),
-                        "artifact": artifact.model_dump(),
+                        "status": completed_status.model_dump(mode="json"),
+                        "artifact": artifact.model_dump(mode="json"),
                     }
                 )
 
@@ -259,24 +275,25 @@ class A2AServer:
                     exc,
                     exc_info=True,
                 )
-                failed_status = A2ATaskStatus(state=TaskState.FAILED, reason=str(exc))
+                reason = exc.message if isinstance(exc, ExoError) else str(exc)
+                failed_status = A2ATaskStatus(state=TaskState.FAILED, reason=reason)
                 await server._task_store.save(
                     task_id,
                     {
                         "task_id": task_id,
-                        "status": failed_status.model_dump(),
+                        "status": failed_status.model_dump(mode="json"),
                         "error": str(exc),
                     },
                 )
                 return JSONResponse(
                     {
                         "task_id": task_id,
-                        "status": failed_status.model_dump(),
+                        "status": failed_status.model_dump(mode="json"),
                     },
                     status_code=500,
                 )
 
-        @app.get("/tasks/{task_id}")
+        @app.get(task_path)
         async def get_task(task_id: str) -> JSONResponse:
             data = await server._task_store.get(task_id)
             if data is None:
@@ -284,8 +301,9 @@ class A2AServer:
             return JSONResponse(data)
 
         if server._config.streaming:
+            stream_path = (ep + "/stream") if ep != "/" else "/stream"
 
-            @app.post("/stream")
+            @app.post(stream_path)
             async def stream_task(payload: dict[str, Any]) -> Any:
                 from starlette.responses import StreamingResponse
 
@@ -300,12 +318,32 @@ class A2AServer:
                         task_id,
                         server._executor.agent_name,
                     )
+                    # Persist SUBMITTED state before streaming begins.
+                    await server._task_store.save(
+                        task_id,
+                        {
+                            "task_id": task_id,
+                            "status": A2ATaskStatus(state=TaskState.SUBMITTED).model_dump(
+                                mode="json"
+                            ),
+                            "text": text,
+                        },
+                    )
+                    working_status = A2ATaskStatus(state=TaskState.WORKING)
+                    await server._task_store.save(
+                        task_id,
+                        {
+                            "task_id": task_id,
+                            "status": working_status.model_dump(mode="json"),
+                            "text": text,
+                        },
+                    )
                     yield (
                         json.dumps(
                             TaskStatusUpdateEvent(
                                 task_id=task_id,
-                                status=A2ATaskStatus(state=TaskState.WORKING),
-                            ).model_dump()
+                                status=working_status,
+                            ).model_dump(mode="json")
                         )
                         + "\n"
                     )
@@ -317,11 +355,20 @@ class A2AServer:
                             task_id,
                             server._executor.agent_name,
                         )
+                        completed_status = A2ATaskStatus(state=TaskState.COMPLETED)
+                        await server._task_store.save(
+                            task_id,
+                            {
+                                "task_id": task_id,
+                                "status": completed_status.model_dump(mode="json"),
+                                "result": result,
+                            },
+                        )
                         yield (
                             json.dumps(
                                 TaskArtifactUpdateEvent(
                                     task_id=task_id, text=result, last_chunk=True
-                                ).model_dump()
+                                ).model_dump(mode="json")
                             )
                             + "\n"
                         )
@@ -329,11 +376,35 @@ class A2AServer:
                             json.dumps(
                                 TaskStatusUpdateEvent(
                                     task_id=task_id,
-                                    status=A2ATaskStatus(state=TaskState.COMPLETED),
-                                ).model_dump()
+                                    status=completed_status,
+                                ).model_dump(mode="json")
                             )
                             + "\n"
                         )
+                    except asyncio.CancelledError:
+                        logger.warning(
+                            "A2A stream cancelled: task_id=%s agent=%s",
+                            task_id,
+                            server._executor.agent_name,
+                        )
+                        canceled_status = A2ATaskStatus(state=TaskState.CANCELED)
+                        await server._task_store.save(
+                            task_id,
+                            {
+                                "task_id": task_id,
+                                "status": canceled_status.model_dump(mode="json"),
+                            },
+                        )
+                        yield (
+                            json.dumps(
+                                TaskStatusUpdateEvent(
+                                    task_id=task_id,
+                                    status=canceled_status,
+                                ).model_dump(mode="json")
+                            )
+                            + "\n"
+                        )
+                        raise
                     except Exception as exc:
                         logger.error(
                             "A2A stream failed: task_id=%s agent=%s error=%s",
@@ -342,12 +413,22 @@ class A2AServer:
                             exc,
                             exc_info=True,
                         )
+                        reason = exc.message if isinstance(exc, ExoError) else str(exc)
+                        failed_status = A2ATaskStatus(state=TaskState.FAILED, reason=reason)
+                        await server._task_store.save(
+                            task_id,
+                            {
+                                "task_id": task_id,
+                                "status": failed_status.model_dump(mode="json"),
+                                "error": str(exc),
+                            },
+                        )
                         yield (
                             json.dumps(
                                 TaskStatusUpdateEvent(
                                     task_id=task_id,
-                                    status=A2ATaskStatus(state=TaskState.FAILED, reason=str(exc)),
-                                ).model_dump()
+                                    status=failed_status,
+                                ).model_dump(mode="json")
                             )
                             + "\n"
                         )

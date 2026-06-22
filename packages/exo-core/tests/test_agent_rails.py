@@ -197,11 +197,10 @@ class TestRailAbortOnTool:
             rails=[BlockToolRail("greet")],
         )
 
-        # RailAbortError is raised inside a TaskGroup, so it gets wrapped
-        # in an ExceptionGroup on Python 3.11+
-        with pytest.raises(ExceptionGroup) as exc_info:
+        # GuardAbortError (and its RailAbortError subclass) is now unwrapped
+        # from the TaskGroup's ExceptionGroup and re-raised directly.
+        with pytest.raises(RailAbortError):
             await agent.run("Say hi", provider=provider)
-        assert any(isinstance(e, RailAbortError) for e in exc_info.value.exceptions)
 
     async def test_non_blocked_tool_continues(self) -> None:
         """A rail that only blocks specific tools lets others through."""

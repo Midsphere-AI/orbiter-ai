@@ -205,6 +205,36 @@ class TestWorkerExecuteTask:
         assert w.tasks_failed == 1
 
     @pytest.mark.asyncio
+    async def test_failed_execution_store_read_failure_acks_not_nacks(self) -> None:
+        """When get_status() fails, treat as retries-exhausted and ack (not nack).
+
+        A broken store must not trigger infinite nack/retry storm.
+        """
+        w = Worker("redis://localhost", worker_id="w1")
+        w._broker = AsyncMock()
+        w._broker.max_retries = 3
+        w._store = AsyncMock()
+        # Simulate store read failure
+        w._store.get_status.side_effect = RuntimeError("Redis connection lost")
+        w._publisher = AsyncMock()
+
+        task = TaskPayload(
+            task_id="task-store-fail",
+            agent_config={"name": "agent", "model": "openai:gpt-4o"},
+            input="fail",
+        )
+
+        with (
+            patch.object(w, "_reconstruct_agent", side_effect=RuntimeError("crash")),
+            patch.object(w, "_listen_for_cancel", new_callable=AsyncMock),
+        ):
+            await w._execute_task(task)
+
+        # Must ack (not nack) so the message doesn't loop forever
+        w._broker.ack.assert_called_once_with("task-store-fail")
+        w._broker.nack.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_current_task_id_tracked(self) -> None:
         w = Worker("redis://localhost", worker_id="w1")
         w._broker = AsyncMock()
@@ -217,11 +247,11 @@ class TestWorkerExecuteTask:
             input="hello",
         )
 
-        captured_task_id: str | None = None
+        captured_active: set[str] = set()
 
         async def capture_run(agent: object, t: TaskPayload, token: CancellationToken) -> str:
-            nonlocal captured_task_id
-            captured_task_id = w._current_task_id
+            nonlocal captured_active
+            captured_active = set(w._active_task_ids)
             return "done"
 
         with (
@@ -231,8 +261,8 @@ class TestWorkerExecuteTask:
         ):
             await w._execute_task(task)
 
-        assert captured_task_id == "task-4"
-        assert w._current_task_id is None  # cleared after execution
+        assert "task-4" in captured_active
+        assert "task-4" not in w._active_task_ids  # cleared after execution
 
 
 # ---------------------------------------------------------------------------
@@ -319,6 +349,97 @@ class TestWorkerRunAgent:
 
         # Only TextEvent text should be collected
         assert result == "result"
+
+    @pytest.mark.asyncio
+    async def test_terminal_status_event_published_when_not_detailed(self) -> None:
+        """When detailed=False, _run_agent must publish a terminal StatusEvent.
+
+        EventSubscriber.subscribe() exits only on a terminal StatusEvent.
+        When detailed=False, run.stream() never emits one, so the worker must
+        publish it itself to avoid leaving the subscriber hung forever.
+        """
+        w = Worker("redis://localhost", worker_id="w1")
+        w._publisher = AsyncMock()
+
+        task = TaskPayload(
+            task_id="task-terminal-nondtailed",
+            agent_config={"name": "agent", "model": "openai:gpt-4o"},
+            input="hello",
+            detailed=False,  # <-- key: no StatusEvent from run.stream()
+        )
+
+        from exo.types import StatusEvent, TextEvent  # pyright: ignore[reportMissingImports]
+
+        # Simulate a stream that emits only TextEvents (what detailed=False produces)
+        events = [
+            TextEvent(text="Hello", agent_name="agent"),
+        ]
+
+        mock_agent = MagicMock()
+        mock_agent.name = "agent"
+
+        mock_run = MagicMock()
+
+        async def _fake_stream_gen(*a: object, **kw: object) -> object:
+            for ev in events:
+                yield ev
+
+        mock_run.stream = _fake_stream_gen
+
+        token = CancellationToken()
+        with patch("exo.runner.run", mock_run):
+            result = await w._run_agent(mock_agent, task, token)
+
+        assert result == "Hello"
+
+        # One TextEvent published + one terminal StatusEvent appended by worker
+        assert w._publisher.publish.call_count == 2
+        _task_id, last_event = w._publisher.publish.call_args_list[-1].args
+        assert isinstance(last_event, StatusEvent)
+        assert last_event.status == "completed"
+
+    @pytest.mark.asyncio
+    async def test_no_duplicate_terminal_status_when_detailed(self) -> None:
+        """When detailed=True, run.stream() emits StatusEvent; worker must NOT double-publish."""
+        w = Worker("redis://localhost", worker_id="w1")
+        w._publisher = AsyncMock()
+
+        task = TaskPayload(
+            task_id="task-terminal-detailed",
+            agent_config={"name": "agent", "model": "openai:gpt-4o"},
+            input="hello",
+            detailed=True,
+        )
+
+        from exo.types import StatusEvent, TextEvent  # pyright: ignore[reportMissingImports]
+
+        # Simulate what run.stream() produces with detailed=True
+        events = [
+            TextEvent(text="Hi", agent_name="agent"),
+            StatusEvent(status="completed", agent_name="agent", message="done"),
+        ]
+
+        mock_agent = MagicMock()
+        mock_agent.name = "agent"
+
+        mock_run = MagicMock()
+
+        async def _fake_stream_gen(*a: object, **kw: object) -> object:
+            for ev in events:
+                yield ev
+
+        mock_run.stream = _fake_stream_gen
+
+        token = CancellationToken()
+        with patch("exo.runner.run", mock_run):
+            result = await w._run_agent(mock_agent, task, token)
+
+        assert result == "Hi"
+        # Worker should publish exactly the events from run.stream() — no extra one
+        assert w._publisher.publish.call_count == 2
+        _task_id, last_event = w._publisher.publish.call_args_list[-1].args
+        assert isinstance(last_event, StatusEvent)
+        assert last_event.status == "completed"
 
 
 # ---------------------------------------------------------------------------
@@ -1121,3 +1242,191 @@ class TestConversationHistoryLoading:
 
         # Should still complete despite search failure
         assert result == "ok"
+
+
+# ---------------------------------------------------------------------------
+# Task timeout enforcement (P0)
+# ---------------------------------------------------------------------------
+
+
+class TestWorkerTaskTimeout:
+    @pytest.mark.asyncio
+    async def test_timeout_raises_exo_error(self) -> None:
+        """When _run_agent exceeds timeout_seconds, ExoError is raised."""
+        w = Worker("redis://localhost", worker_id="w1")
+        w._broker = AsyncMock()
+        w._broker.max_retries = 3
+        w._store = AsyncMock()
+        w._store.get_status = AsyncMock(
+            return_value=TaskResult(task_id="task-timeout-1", status=TaskStatus.RUNNING, retries=0)
+        )
+        w._publisher = AsyncMock()
+
+        task = TaskPayload(
+            task_id="task-timeout-1",
+            agent_config={"name": "agent", "model": "openai:gpt-4o"},
+            input="hello",
+            timeout_seconds=0.01,  # very short timeout
+        )
+
+        async def _slow_run(agent: object, t: TaskPayload, token: object) -> str:
+            import asyncio
+
+            await asyncio.sleep(10)  # will be cancelled by wait_for
+            return "never"
+
+        with (
+            patch.object(w, "_reconstruct_agent", return_value=MagicMock()),
+            patch.object(w, "_run_agent", side_effect=_slow_run),
+            patch.object(w, "_listen_for_cancel", new_callable=AsyncMock),
+        ):
+            await w._execute_task(task)
+
+        # Should have set FAILED and acked (exhausted retries, since retries=0 and max=3)
+        status_calls = w._store.set_status.call_args_list
+        statuses = [c.args[1] for c in status_calls]
+        assert TaskStatus.RUNNING in statuses
+        assert TaskStatus.FAILED in statuses
+        assert w.tasks_failed == 1
+
+    @pytest.mark.asyncio
+    async def test_zero_timeout_is_unlimited(self) -> None:
+        """timeout_seconds=0 means no timeout limit (wait_for gets None)."""
+        w = Worker("redis://localhost", worker_id="w1")
+        w._broker = AsyncMock()
+        w._store = AsyncMock()
+        w._publisher = AsyncMock()
+
+        task = TaskPayload(
+            task_id="task-timeout-2",
+            agent_config={"name": "agent", "model": "openai:gpt-4o"},
+            input="hello",
+            timeout_seconds=0,  # zero → no timeout enforcement
+        )
+
+        async def _fast_run(agent: object, t: TaskPayload, token: object) -> str:
+            return "done"
+
+        with (
+            patch.object(w, "_reconstruct_agent", return_value=MagicMock()),
+            patch.object(w, "_run_agent", side_effect=_fast_run),
+            patch.object(w, "_listen_for_cancel", new_callable=AsyncMock),
+        ):
+            await w._execute_task(task)
+
+        assert w.tasks_processed == 1
+
+
+# ---------------------------------------------------------------------------
+# PEL-safe ack on Redis failure in error path (P0)
+# ---------------------------------------------------------------------------
+
+
+class TestWorkerPELSafeAck:
+    @pytest.mark.asyncio
+    async def test_ack_called_even_when_set_status_fails(self) -> None:
+        """The message must be acked even if the FAILED status update throws."""
+        w = Worker("redis://localhost", worker_id="w1")
+        w._broker = AsyncMock()
+        w._broker.max_retries = 0
+
+        # set_status always raises after the first call (RUNNING succeeds)
+        call_count = 0
+
+        async def flaky_set_status(*args: object, **kwargs: object) -> None:
+            nonlocal call_count
+            call_count += 1
+            if call_count > 1:
+                raise ConnectionError("Redis down")
+
+        w._store = AsyncMock()
+        w._store.set_status = flaky_set_status
+        # get_status also fails (retry count unreadable)
+        w._store.get_status = AsyncMock(side_effect=ConnectionError("Redis down"))
+        w._publisher = AsyncMock()
+
+        task = TaskPayload(
+            task_id="task-pel-1",
+            agent_config={"name": "agent", "model": "openai:gpt-4o"},
+            input="fail",
+        )
+
+        with (
+            patch.object(w, "_reconstruct_agent", side_effect=RuntimeError("boom")),
+            patch.object(w, "_listen_for_cancel", new_callable=AsyncMock),
+        ):
+            await w._execute_task(task)
+
+        # Despite store failures, the broker ack must still have been called
+        w._broker.ack.assert_called_once_with("task-pel-1")
+
+    @pytest.mark.asyncio
+    async def test_nack_called_when_retries_remain(self) -> None:
+        """When retries remain, nack is called even if intermediate store ops fail."""
+        w = Worker("redis://localhost", worker_id="w1")
+        w._broker = AsyncMock()
+        w._broker.max_retries = 3
+        w._store = AsyncMock()
+        w._store.get_status = AsyncMock(
+            return_value=TaskResult(task_id="task-pel-2", status=TaskStatus.RUNNING, retries=0)
+        )
+        w._publisher = AsyncMock()
+
+        task = TaskPayload(
+            task_id="task-pel-2",
+            agent_config={"name": "agent", "model": "openai:gpt-4o"},
+            input="fail",
+        )
+
+        with (
+            patch.object(w, "_reconstruct_agent", side_effect=RuntimeError("boom")),
+            patch.object(w, "_listen_for_cancel", new_callable=AsyncMock),
+        ):
+            await w._execute_task(task)
+
+        w._broker.nack.assert_called_once_with("task-pel-2")
+        w._broker.ack.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# _listen_for_cancel reconnect on ConnectionError (P1)
+# ---------------------------------------------------------------------------
+
+
+class TestListenForCancelReconnect:
+    @pytest.mark.asyncio
+    async def test_reconnects_after_connection_error(self) -> None:
+        """_listen_for_cancel rebuilds the connection on aioredis.ConnectionError."""
+
+        import redis.asyncio as aioredis
+
+        w = Worker("redis://localhost", worker_id="w1")
+        token = CancellationToken()
+
+        call_count = 0
+
+        async def _fake_get_message(
+            ignore_subscribe_messages: bool = False, timeout: float = 1.0
+        ) -> dict | None:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise aioredis.ConnectionError("disconnected")
+            # On reconnect, deliver cancel signal
+            return {"type": "message", "data": "cancel"}
+
+        mock_pubsub = AsyncMock()
+        mock_pubsub.get_message = _fake_get_message
+        mock_pubsub.subscribe = AsyncMock()
+        mock_pubsub.unsubscribe = AsyncMock()
+        mock_pubsub.aclose = AsyncMock()
+
+        mock_redis = MagicMock()
+        mock_redis.pubsub.return_value = mock_pubsub
+        mock_redis.aclose = AsyncMock()
+
+        with patch("redis.asyncio.from_url", return_value=mock_redis):
+            # Should complete without raising (reconnects and receives cancel)
+            await w._listen_for_cancel("task-reconnect", token)
+
+        assert token.cancelled

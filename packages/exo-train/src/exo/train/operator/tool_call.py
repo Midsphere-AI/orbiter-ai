@@ -50,10 +50,12 @@ class ToolCallOperator(Operator):
         tool_fn: Any,
         *,
         tool_description: str = "",
+        max_traces: int = 1000,
     ) -> None:
         self._name = op_name
         self._tool_fn = tool_fn
         self._tool_description = tool_description
+        self._max_traces = max_traces
         self._traces: list[ToolCallTrace] = []
 
     @property
@@ -92,6 +94,8 @@ class ToolCallOperator(Operator):
                     timestamp=time.time(),
                 )
             )
+            if len(self._traces) > self._max_traces:
+                self._traces = self._traces[-self._max_traces :]
 
     def get_tunables(self) -> list[TunableSpec]:
         return [

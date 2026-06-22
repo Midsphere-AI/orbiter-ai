@@ -11,6 +11,7 @@ from exo.guardrail.llm_backend import (  # pyright: ignore[reportMissingImports]
 )
 from exo.guardrail.types import (  # pyright: ignore[reportMissingImports]
     GuardrailBackend,
+    GuardrailConfigError,
     GuardrailError,
     GuardrailResult,
     RiskAssessment,
@@ -29,6 +30,7 @@ except PackageNotFoundError:
 __all__: list[str] = [
     "BaseGuardrail",
     "GuardrailBackend",
+    "GuardrailConfigError",
     "GuardrailError",
     "GuardrailResult",
     "LLMGuardrailBackend",

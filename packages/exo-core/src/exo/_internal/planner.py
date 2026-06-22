@@ -104,7 +104,7 @@ def _build_planner_agent(agent: Any, planner_model: str, planner_instructions: s
     would leak as direct schemas on the planner and the planner could
     call tools that should only be reachable through PTC.
     """
-    from exo.agent import Agent
+    from exo.agent import _SUBAGENT_TOOL_NAMES, Agent
 
     planner_tools = []
     allow_self_spawn = bool(getattr(agent, "allow_self_spawn", False))
@@ -118,7 +118,9 @@ def _build_planner_agent(agent: Any, planner_model: str, planner_instructions: s
             # constructor below will register a fresh PTCTool on the
             # planner when ``ptc`` is propagated.
             continue
-        if allow_self_spawn and tool_name == "spawn_self":
+        if allow_self_spawn and tool_name in _SUBAGENT_TOOL_NAMES:
+            # Parent-bound spawn_self / background tools; the planner
+            # constructor re-registers fresh ones when self-spawn is on.
             continue
         planner_tools.append(tool)
 
@@ -185,8 +187,8 @@ def _clone_provider_for_model(provider: Any, model: str) -> Any | None:
         )
 
         update_fields["context_window_tokens"] = MODEL_CONTEXT_WINDOWS.get(model_name)
-    except Exception:
-        pass
+    except Exception as exc:
+        _log.debug("Could not look up context window for model '%s': %s", model_name, exc)
 
     try:
         return type(provider)(config.model_copy(update=update_fields))

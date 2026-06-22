@@ -17,6 +17,7 @@ if TYPE_CHECKING:
 
 from pydantic import BaseModel
 
+from exo._internal.errors import unwrap_exception_group
 from exo._internal.message_builder import build_messages
 from exo._internal.output_parser import OutputParseError, parse_response, parse_tool_arguments
 from exo._internal.run_helpers import (
@@ -39,6 +40,7 @@ from exo.namespaces import (
     PlannerConfig,
     SubagentsConfig,
     ToolBatchConfig,
+    WorkspaceConfig,
 )
 from exo.observability.logging import get_logger  # pyright: ignore[reportMissingImports]
 from exo.rail import Guard, GuardAbortError, GuardManager
@@ -65,6 +67,12 @@ _MEMORY_UNSET: Any = object()
 _CONTEXT_UNSET: Any = object()
 _SPAWN_UNSET: Any = object()
 _RENAMED_UNSET: Any = object()
+
+# Parent-bound sub-agent tools that must never be cloned onto a child agent
+# (they capture the parent instance in their closures).
+_SUBAGENT_TOOL_NAMES = frozenset(
+    {"spawn_self", "spawn_background", "check_subagent", "list_subagents"}
+)
 
 
 def _resolve_renamed(
@@ -224,53 +232,16 @@ def _make_default_memory(db_path: str | None = None) -> Any:
         return None
 
 
-async def _inject_long_term_knowledge(
-    agent_memory: Any,
-    user_input: str,
-    msg_list: list[Message],
-    limit: int = 5,
-) -> list[Message]:
-    """Search long-term memory and inject relevant results into the system message.
-
-    When long_term is a VectorMemoryStore or ChromaVectorMemoryStore, uses
-    vector/semantic search. When it's SQLiteMemoryStore or LongTermMemory,
-    uses keyword search. Results are injected in KnowledgeNeuron <knowledge> format.
-    """
-    long_term = getattr(agent_memory, "long_term", None)
-    if long_term is None:
-        return msg_list
-
-    try:
-        items = await long_term.search(query=user_input, limit=limit)
-    except Exception as exc:
-        _log.debug("long-term search failed: %s", exc)
-        return msg_list
-
-    if not items:
-        return msg_list
-
-    # Format as KnowledgeNeuron <knowledge> block
-    lines = ["<knowledge>"]
-    for item in items:
-        lines.append(f"  [long_term_memory]: {item.content}")
-    lines.append("</knowledge>")
-    knowledge_block = "\n".join(lines)
-
-    # Inject into system message (append) or insert new SystemMessage at front
-    new_msg_list = list(msg_list)
-    sys_idx = next((i for i, m in enumerate(new_msg_list) if isinstance(m, SystemMessage)), None)
-    if sys_idx is not None:
-        existing = new_msg_list[sys_idx]
-        existing_content = existing.content if isinstance(existing.content, str) else ""
-        new_content = (
-            f"{existing_content}\n\n{knowledge_block}" if existing_content else knowledge_block
-        )
-        new_msg_list[sys_idx] = SystemMessage(content=new_content)
-    else:
-        new_msg_list.insert(0, SystemMessage(content=knowledge_block))
-
-    _log.debug("injected %d long-term memory items into system message", len(items))
-    return new_msg_list
+# Shared context helpers — moved to _internal/context_helpers.py so that
+# runner.py can import them without coupling to agent.py internals.
+from exo._internal.context_helpers import (
+    _ContextAction,
+    _ProviderSummarizer,
+    _apply_context_windowing,
+    _get_context_window_tokens,
+    _inject_long_term_knowledge,
+    _update_system_token_info,
+)
 
 
 def _make_default_context() -> Any:
@@ -331,364 +302,6 @@ def _make_context_from_mode(mode: Any) -> Any:
         return None
 
 
-def _get_context_window_tokens(model_name: str) -> int | None:
-    """Look up context window token count from the model registry.
-
-    Returns ``None`` if exo-models is not installed or the model is unknown.
-    """
-    try:
-        from exo.models.context_windows import (
-            MODEL_CONTEXT_WINDOWS,  # pyright: ignore[reportMissingImports]
-        )
-
-        return MODEL_CONTEXT_WINDOWS.get(model_name)
-    except ImportError:
-        return None
-
-
-def _update_system_token_info(
-    msg_list: list[Message],
-    used: int,
-    total: int,
-) -> list[Message]:
-    """Insert/replace ``[Context: {used}/{total} tokens ({pct}% full)]`` in the system message.
-
-    If a :class:`SystemMessage` is present it is updated in-place (replacing
-    any prior context tag). If no system message is present a new one is
-    inserted at position 0 with just the tag.
-
-    Parameters
-    ----------
-    msg_list:
-        Current message list (not mutated — a new list is returned).
-    used:
-        Number of tokens currently used (last LLM call's input_tokens).
-    total:
-        Context window capacity in tokens.
-
-    Returns
-    -------
-    Updated message list with the context tag injected into the system message.
-    """
-    pct = round(100.0 * used / total) if total > 0 else 0
-    tag = f"[Context: {used}/{total} tokens ({pct}% full)]"
-    result: list[Message] = list(msg_list)
-    for i, msg in enumerate(result):
-        if isinstance(msg, SystemMessage):
-            # Strip any prior [Context: ...] tag line then append new one
-            lines = msg.content.splitlines()
-            lines = [ln for ln in lines if not ln.startswith("[Context:")]
-            base = "\n".join(lines).rstrip()
-            content = f"{base}\n{tag}" if base else tag
-            result[i] = SystemMessage(content=content)
-            return result
-    # No system message — insert one with just the tag
-    result.insert(0, SystemMessage(content=tag))
-    return result
-
-
-class _ProviderSummarizer:
-    """Wraps a model provider for use with exo-memory's generate_summary()."""
-
-    def __init__(self, provider: Any) -> None:
-        self._provider = provider
-
-    async def summarize(self, prompt: str) -> str:
-        """Call provider.complete() to generate a summary string."""
-        try:
-            response = await self._provider.complete(
-                [UserMessage(content=prompt)],
-                tools=None,
-                temperature=0.3,
-                max_tokens=512,
-            )
-            return str(response.content or "")
-        except Exception as exc:
-            _log.warning("Context summarization provider call failed: %s", exc)
-            return ""
-
-
-class _ContextAction:
-    """Metadata about a context windowing action that was applied."""
-
-    __slots__ = ("action", "after_count", "before_count", "details")
-
-    def __init__(
-        self,
-        action: str,
-        before_count: int,
-        after_count: int,
-        details: dict[str, Any] | None = None,
-    ) -> None:
-        self.action = action
-        self.before_count = before_count
-        self.after_count = after_count
-        self.details = details or {}
-
-
-async def _apply_context_windowing(
-    msg_list: list[Message],
-    context: Any,
-    provider: Any,
-    *,
-    force_summarize: bool = False,
-    hook_manager: Any | None = None,
-    agent: Any | None = None,
-    step: int = -1,
-    max_steps: int = 0,
-    agent_name: str = "",
-    model_name: str = "",
-    context_window_tokens: int | None = None,
-    last_usage: Any | None = None,
-    token_tracker: Any | None = None,
-) -> tuple[list[Message], list[_ContextAction]]:
-    """Apply context windowing and optional summarization to *msg_list*.
-
-    Behaviour depends on the ``overflow`` strategy:
-
-    - **none**: no windowing at all — messages grow unbounded.
-    - **truncate**: drop oldest non-system messages when count > limit.
-    - **summarize** (default): three-stage cascade —
-      1. Emergency offload when far over limit.
-      2. LLM summarization when over threshold.
-      3. Hard window to ``history_rounds``.
-
-    When *force_summarize* is ``True`` (token pressure exceeded), summarization
-    fires regardless of message count.
-
-    Returns:
-        ``(processed_msg_list, actions)`` — callers use *actions* to emit
-        streaming ``ContextEvent`` instances.
-    """
-    # Resolve config attrs: supports both Context (has .config) and ContextConfig directly
-    _cfg = getattr(context, "config", context)
-    overflow_strategy: str = getattr(_cfg, "overflow", "summarize")
-    history_rounds: int = getattr(_cfg, "_history_rounds", getattr(_cfg, "history_rounds", 20))
-    summary_threshold: int = getattr(
-        _cfg, "_summary_threshold", getattr(_cfg, "summary_threshold", 10)
-    )
-    offload_threshold: int = getattr(
-        _cfg, "_offload_threshold", getattr(_cfg, "offload_threshold", 50)
-    )
-    keep_recent_cfg: int = getattr(_cfg, "keep_recent", 5)
-
-    actions: list[_ContextAction] = []
-
-    # ── overflow="hook" — delegate entirely to hooks ────────────────────
-    if overflow_strategy == "hook":
-        if hook_manager is not None:
-            try:
-                from exo.context.info import (  # pyright: ignore[reportMissingImports]
-                    build_context_window_info,
-                )
-            except ImportError:
-                _log.debug("exo-context not installed, skipping CONTEXT_WINDOW hook")
-            else:
-                _info = build_context_window_info(
-                    msg_list,
-                    _cfg,
-                    step=step,
-                    max_steps=max_steps,
-                    agent_name=agent_name,
-                    model=model_name,
-                    context_window_tokens=context_window_tokens,
-                    last_usage=last_usage,
-                    token_tracker=token_tracker,
-                    force=force_summarize,
-                )
-                await hook_manager.run(
-                    HookPoint.CONTEXT_WINDOW,
-                    agent=agent,
-                    messages=msg_list,
-                    info=_info,
-                    provider=provider,
-                    actions=actions,
-                )
-        return msg_list, actions
-
-    # Separate system messages from conversation history
-    system_msgs: list[Message] = [m for m in msg_list if isinstance(m, SystemMessage)]
-    non_system: list[Message] = [m for m in msg_list if not isinstance(m, SystemMessage)]
-    msg_count = len(non_system)
-
-    # ── CONTEXT_WINDOW hook registered — bypass ALL built-in strategies ──
-    # When a user registers a CONTEXT_WINDOW hook, it becomes the sole owner
-    # of context reduction regardless of the configured overflow strategy.
-    _has_ctx_hook = hook_manager is not None and hook_manager.has_hooks(HookPoint.CONTEXT_WINDOW)
-    if _has_ctx_hook:
-        result_list = system_msgs + non_system
-        try:
-            from exo.context.info import (  # pyright: ignore[reportMissingImports]
-                build_context_window_info,
-            )
-        except ImportError:
-            _log.debug("exo-context not installed, skipping CONTEXT_WINDOW hook")
-        else:
-            _info = build_context_window_info(
-                result_list,
-                _cfg,
-                step=step,
-                max_steps=max_steps,
-                agent_name=agent_name,
-                model=model_name,
-                context_window_tokens=context_window_tokens,
-                last_usage=last_usage,
-                token_tracker=token_tracker,
-                force=force_summarize,
-            )
-            await hook_manager.run(
-                HookPoint.CONTEXT_WINDOW,
-                agent=agent,
-                messages=result_list,
-                info=_info,
-                provider=provider,
-                actions=actions,
-            )
-        return result_list, actions
-
-    # ── overflow="none" — no context management ──────────────────────────
-    if overflow_strategy == "none":
-        return system_msgs + non_system, actions
-
-    # ── overflow="truncate" — simple drop of oldest messages ─────────────
-    if overflow_strategy == "truncate":
-        if msg_count > history_rounds:
-            before = msg_count
-            _log.debug(
-                "context truncate: %d messages > limit=%d, dropping oldest",
-                msg_count,
-                history_rounds,
-            )
-            non_system = non_system[-history_rounds:]
-            actions.append(
-                _ContextAction(
-                    "truncate",
-                    before,
-                    len(non_system),
-                    {"limit": history_rounds},
-                )
-            )
-    # ── overflow="summarize" — three-stage cascade ───────────────────────
-    elif overflow_strategy == "summarize":
-        # 1. Offload threshold: aggressive trim when far over limit
-        if msg_count > offload_threshold:
-            before = msg_count
-            _log.debug(
-                "context offload: %d messages > offload_threshold=%d, trimming to %d",
-                msg_count,
-                offload_threshold,
-                summary_threshold,
-            )
-            non_system = non_system[-summary_threshold:]
-            msg_count = len(non_system)
-            actions.append(
-                _ContextAction(
-                    "offload",
-                    before,
-                    msg_count,
-                    {"offload_threshold": offload_threshold},
-                )
-            )
-
-        # 2. Summary threshold: attempt summarization via exo-memory.
-        # Also fires when force_summarize=True (token budget exceeded) as long as
-        # there are at least 2 messages to summarize.
-        elif msg_count >= summary_threshold or (force_summarize and msg_count >= 2):
-            try:
-                from exo.memory.base import (  # pyright: ignore[reportMissingImports]
-                    AIMemory,
-                    HumanMemory,
-                    MemoryItem,
-                    ToolMemory,
-                )
-                from exo.memory.summary import (  # pyright: ignore[reportMissingImports]
-                    SummaryConfig,
-                    check_trigger,
-                    generate_summary,
-                )
-
-                # Convert messages to MemoryItems for trigger check
-                items: list[MemoryItem] = []
-                for msg in non_system:
-                    content = str(getattr(msg, "content", "") or "")
-                    if isinstance(msg, UserMessage):
-                        items.append(HumanMemory(content=content))
-                    elif isinstance(msg, AssistantMessage):
-                        items.append(AIMemory(content=content))
-                    else:
-                        items.append(ToolMemory(content=content))
-
-                # When force_summarize=True, use a tighter keep_recent so that even
-                # a small message list gets meaningfully compressed (keep half).
-                if force_summarize:
-                    keep_recent = max(2, msg_count // 2)
-                else:
-                    keep_recent = max(2, keep_recent_cfg)
-                summary_cfg = SummaryConfig(
-                    message_threshold=summary_threshold,
-                    keep_recent=keep_recent,
-                )
-
-                # Bypass check_trigger() when force_summarize is set — the token
-                # budget decision has already been made by the caller.
-                should_summarize = force_summarize or check_trigger(items, summary_cfg).triggered
-
-                if should_summarize and provider is not None:
-                    before = msg_count
-                    summarizer = _ProviderSummarizer(provider)
-                    result = await generate_summary(items, summary_cfg, summarizer)
-                    if result.summaries:
-                        summary_text = "\n\n".join(result.summaries.values())
-                        keep_count = len(result.compressed_items)
-                        recent_msgs = non_system[-keep_count:] if keep_count > 0 else []
-                        summary_msg = SystemMessage(
-                            content=f"[Conversation Summary]\n{summary_text}"
-                        )
-                        non_system = [summary_msg, *recent_msgs]
-                        msg_count = len(non_system)
-                        _log.debug(
-                            "context summarization applied: %d -> %d messages"
-                            " (summary + %d recent)",
-                            len(items),
-                            msg_count,
-                            keep_count,
-                        )
-                        actions.append(
-                            _ContextAction(
-                                "summarize",
-                                before,
-                                msg_count,
-                                {
-                                    "summary_threshold": summary_threshold,
-                                    "keep_recent": keep_count,
-                                    "forced": force_summarize,
-                                },
-                            )
-                        )
-            except ImportError:
-                pass
-
-        # 3. History windowing: keep last history_rounds messages
-        if msg_count > history_rounds:
-            before = msg_count
-            _log.debug(
-                "context windowing: trimming %d -> %d messages (history_rounds=%d)",
-                msg_count,
-                history_rounds,
-                history_rounds,
-            )
-            non_system = non_system[-history_rounds:]
-            actions.append(
-                _ContextAction(
-                    "window",
-                    before,
-                    history_rounds,
-                    {"history_rounds": history_rounds},
-                )
-            )
-
-    return system_msgs + non_system, actions
-
 
 class AgentError(ExoError):
     """Raised for agent-level errors (duplicate tools, invalid config, etc.)."""
@@ -715,6 +328,38 @@ def _normalize_hitl_tools(hitl_tools: list[str] | None) -> list[str]:
             raise AgentError("hitl_tools entries must be non-empty strings")
         normalized.append(tool_name)
     return normalized
+
+
+# Env keys that auto-enable tracing when ``tracing`` is left at its default.
+_TRACING_ENV_KEYS: tuple[str, ...] = (
+    "EXO_TRACING",
+    "LANGFUSE_PUBLIC_KEY",
+    "LANGSMITH_API_KEY",
+    "LANGCHAIN_API_KEY",
+    "PHOENIX_API_KEY",
+    "PHOENIX_COLLECTOR_ENDPOINT",
+    "BRAINTRUST_API_KEY",
+    "OTEL_EXPORTER_OTLP_ENDPOINT",
+)
+
+
+def _tracing_requested(tracing: bool | str | list[str] | None) -> bool:
+    """Decide whether to attempt tracing wiring without importing observability.
+
+    Explicit truthy specs always request it; ``False``/``"off"`` always disable.
+    A ``None`` default falls through to cheap env auto-detect (on-by-default when
+    a backend's keys are present), so a bare ``Agent(...)`` stays zero-overhead.
+    """
+    import os
+
+    if tracing is False or tracing == "off":
+        return False
+    if tracing is not None:
+        return bool(tracing)
+    env = os.environ.get("EXO_TRACING")
+    if env is not None:
+        return env.strip().lower() != "off"
+    return any(os.environ.get(k) for k in _TRACING_ENV_KEYS)
 
 
 class Agent:
@@ -847,6 +492,9 @@ class Agent:
         allow_self_spawn: bool = _SPAWN_UNSET,
         max_spawn_depth: int = 3,
         max_spawn_children: int = 4,
+        background_subagents: bool = True,
+        background_timeout: float | None = None,
+        background_max: int = 8,
         batch_tools: bool | ToolBatchConfig = _RENAMED_UNSET,
         batch_tools_timeout: int = _RENAMED_UNSET,
         batch_tools_max_output_bytes: int = _RENAMED_UNSET,
@@ -860,6 +508,8 @@ class Agent:
         skills: SkillRegistry | None = None,
         tool_resolver: ToolResolver | dict[str, Tool | list[Tool]] | None = None,
         tool_gate: dict[str, list[Tool]] | None = None,
+        workspace: WorkspaceConfig | None = None,
+        tracing: bool | str | list[str] | None = None,
     ) -> None:
         if max_steps < 1:
             raise AgentError(f"max_steps must be >= 1, got {max_steps}")
@@ -890,6 +540,9 @@ class Agent:
             subagents = _sub_cfg.enabled
             max_spawn_depth = _sub_cfg.max_depth
             max_spawn_children = _sub_cfg.max_children
+            background_subagents = _sub_cfg.background
+            background_timeout = _sub_cfg.background_timeout
+            background_max = _sub_cfg.background_max
 
         if isinstance(batch_tools, ToolBatchConfig):
             if ptc or any(
@@ -1025,6 +678,17 @@ class Agent:
         self._spawn_depth: int = 0
         # Internal: provider reference stored during run() for use by spawn_self tool
         self._current_provider: Any = None
+        # ---- Background sub-agents (fire-and-forget) ----
+        self._background_subagents: bool = bool(background_subagents)
+        self._bg_timeout: float | None = background_timeout
+        self._bg_max: int = background_max
+        # Lazily constructed on first spawn_background call.
+        self._bg_handler: Any = None
+        # Live registry of detached background tasks (owner for cancel/cleanup).
+        self._bg_tasks: dict[str, asyncio.Task] = {}
+        # True while a run() is in flight — drives HOT (inject live) vs
+        # WAKEUP (queue for next run) routing of background results.
+        self._is_running: bool = False
         # Skills: lazy activation via activate_skill tool
         self._skill_registry: SkillRegistry | None = skills
         self._tool_resolver: ToolResolver | None = None
@@ -1171,8 +835,14 @@ class Agent:
             self.context = _make_default_context()
             self._context_is_auto = True
         self._memory_persistence: Any = None
-        # Workspace for large-output tool result offloading (lazy-created on first use)
+        # Workspace for large-output tool result offloading (lazy-created on first use).
+        # When workspace=WorkspaceConfig(enabled=True) it is created eagerly with an
+        # attached KnowledgeStore so the opt-in knowledge tools can search artifacts.
         self._workspace: Any = None
+        self._knowledge_store: Any = None
+        # Opt-in workspace-backed knowledge/file tools (off by default).
+        self.workspace = workspace if workspace is not None else WorkspaceConfig()
+        self._working_dir = self.workspace.working_dir
 
         # Tools indexed by name for O(1) lookup during execution
         self.tools: dict[str, Tool] = {}
@@ -1241,6 +911,11 @@ class Agent:
         # Auto-register spawn_self tool when self-spawn is enabled
         if _effective_self_spawn:
             self._register_tool(self._make_spawn_self_tool())
+            # Background (fire-and-forget) sub-agent tools ride on self-spawn.
+            if self._background_subagents:
+                self._register_tool(self._make_spawn_background_tool())
+                self._register_tool(self._make_check_subagent_tool())
+                self._register_tool(self._make_list_subagents_tool())
 
         self.hitl_tools = normalized_hitl_tools
         self._human_input_handler: HumanInputHandler | None = human_input_handler
@@ -1312,12 +987,31 @@ class Agent:
             enabled=self.allow_self_spawn,
             max_depth=self.max_spawn_depth,
             max_children=self.max_spawn_children,
+            background=self._background_subagents,
+            background_timeout=self._bg_timeout,
+            background_max=self._bg_max,
         )
         self.guardrails = GuardrailsConfig(
             guards=list(_guards) if _guards else [],
             approval_tools=list(self.hitl_tools),
             human_input_handler=self._human_input_handler,
         )
+
+        # ---- Optional tracing wiring (exo-observability, lazy) --------------
+        # Registered last so the root span opens first (START runs in order) and
+        # closes last (FINISHED runs in order) — guard/memory hooks nest inside.
+        self.tracing = tracing
+        self._tracer: Any = None
+        if _tracing_requested(tracing):
+            try:
+                from exo.observability.tracer import install_tracing
+
+                self._tracer = install_tracing(self, tracing)
+            except ImportError:
+                _log.debug(
+                    "tracing requested on agent %r but exo-observability is not installed",
+                    self.name,
+                )
 
     # ---- Canonical-name read aliases (Tier-2 vocabulary) -------------------
     # The constructor accepts modern names (``transfers``/``approval_tools``/
@@ -1482,6 +1176,13 @@ class Agent:
         ``self.context`` is ``None``, exo-context is not installed, or the
         overflow strategy is ``hook`` (context management fully delegated to hooks).
         Context tools are fresh instances per agent to avoid shared mutable state.
+
+        Planning tools (``add_todo``/``complete_todo``/``get_todo``) are always
+        registered — they manage their own state and have no backing store.  The
+        workspace-backed knowledge tools (``search_knowledge``/``get_knowledge``/
+        ``grep_knowledge``) and the ``read_file`` tool are **opt-in** via
+        ``workspace=WorkspaceConfig(...)``; without it they are not advertised to
+        the LLM (otherwise they would always error for lack of a backing store).
         """
         if self.context is None:
             return
@@ -1496,10 +1197,29 @@ class Agent:
         except (ImportError, AttributeError):
             pass
         try:
-            from exo.context.tools import get_context_tools  # pyright: ignore[reportMissingImports]
+            from exo.context.tools import (  # pyright: ignore[reportMissingImports]
+                get_file_tools,
+                get_knowledge_tools,
+                get_planning_tools,
+            )
+
+            # Planning tools are always on (no backing store required).
+            tools_to_load = get_planning_tools()
+
+            # Knowledge tools require a workspace + knowledge store wired into the
+            # context state — opt in via WorkspaceConfig(enabled=True).
+            if self.workspace.enabled:
+                self._ensure_workspace()
+                tools_to_load += get_knowledge_tools()
+
+            # read_file is registered only when a working_dir is configured, and
+            # is scoped to that directory.
+            if self._working_dir is not None:
+                self.context.state.set("working_dir", self._working_dir)
+                tools_to_load += get_file_tools()
 
             added = False
-            for t in get_context_tools():
+            for t in tools_to_load:
                 t.bind(self.context)
                 # Skip if user already registered a tool with the same name
                 if t.name not in self.tools:
@@ -1520,6 +1240,40 @@ class Agent:
         except ImportError:
             pass
 
+    def _ensure_workspace(self) -> Any:
+        """Get-or-create the agent's workspace, with a KnowledgeStore attached.
+
+        Creates a :class:`~exo.context.workspace.Workspace` backed by a
+        ``KnowledgeStore`` (so every artifact write auto-indexes) and wires both
+        into the context state under ``"workspace"`` / ``"knowledge_store"`` so
+        the knowledge tools can reach them.  Idempotent — returns the existing
+        workspace on subsequent calls.  Returns ``None`` when exo-context is not
+        installed.
+        """
+        if self._workspace is not None:
+            return self._workspace
+        try:
+            from exo.context._internal.knowledge import (  # pyright: ignore[reportMissingImports]
+                KnowledgeStore,
+            )
+            from exo.context.workspace import Workspace  # pyright: ignore[reportMissingImports]
+        except ImportError:
+            return None
+
+        self._knowledge_store = KnowledgeStore(
+            chunk_size=self.workspace.chunk_size,
+            chunk_overlap=self.workspace.chunk_overlap,
+        )
+        self._workspace = Workspace(
+            workspace_id=f"agent_{self.name}",
+            storage_path=self.workspace.storage_path,
+            knowledge_store=self._knowledge_store,
+        )
+        if self.context is not None:
+            self.context.state.set("workspace", self._workspace)
+            self.context.state.set("knowledge_store", self._knowledge_store)
+        return self._workspace
+
     async def _offload_large_result(self, tool_name: str, content: str) -> str:
         """Store a large tool result in the workspace and return a pointer string.
 
@@ -1537,18 +1291,14 @@ class Agent:
         """
         artifact_id = f"tool_result_{tool_name}_{uuid.uuid4().hex[:8]}"
 
-        # Lazy-create workspace when first needed
-        if self._workspace is None:
-            try:
-                from exo.context.workspace import Workspace  # pyright: ignore[reportMissingImports]
-
-                self._workspace = Workspace(workspace_id=f"agent_{self.name}")
-            except ImportError:
-                _log.debug(
-                    "ToolResultOffloader: exo-context not installed, skipping offload for %s",
-                    tool_name,
-                )
-                return content
+        # Lazy-create workspace when first needed (shares the same instance and
+        # KnowledgeStore wiring as the opt-in knowledge tools).
+        if self._workspace is None and self._ensure_workspace() is None:
+            _log.debug(
+                "ToolResultOffloader: exo-context not installed, skipping offload for %s",
+                tool_name,
+            )
+            return content
 
         await self._workspace.write(artifact_id, content)
         _log.debug(
@@ -1638,7 +1388,7 @@ class Agent:
                 child_tools = [
                     t
                     for name, t in parent.tools.items()
-                    if name != "spawn_self"
+                    if name not in _SUBAGENT_TOOL_NAMES
                     and not getattr(t, "_is_context_tool", False)
                     and not getattr(t, "_is_ptc_tool", False)
                 ]
@@ -1694,9 +1444,11 @@ class Agent:
                     async with asyncio.TaskGroup() as tg:
                         for i in range(len(tasks)):
                             tg.create_task(_run_child(i))
+                except asyncio.CancelledError:
+                    raise  # Cancellation must propagate — never swallow into a tool result
                 except BaseException as exc:
                     return tool_error(
-                        f"Spawn execution failed: {exc}",
+                        f"Spawn execution failed: {unwrap_exception_group(exc)}",
                         hint=(
                             "One or more spawned agents failed. Handle the "
                             "tasks directly without spawning."
@@ -1720,6 +1472,301 @@ class Agent:
                 )
 
         return FunctionTool(spawn_self, name="spawn_self")
+
+    # ------------------------------------------------------------------
+    # Background (fire-and-forget) sub-agents
+    # ------------------------------------------------------------------
+
+    def _ensure_bg_handler(self) -> Any:
+        """Lazily build the per-agent background task handler.
+
+        The handler is created on first ``spawn_background`` use and the
+        hot-merge callback (which injects completed results) is wired once.
+        """
+        if self._bg_handler is None:
+            from exo._internal.background import BackgroundTaskHandler
+
+            handler = BackgroundTaskHandler(state=None)
+            handler.on_merge(self._on_bg_merge)
+            self._bg_handler = handler
+        return self._bg_handler
+
+    async def _on_bg_merge(self, task: Any, mode: Any) -> None:
+        """Hot-merge callback: inject a finished child's result into this run."""
+        self.inject_message(self._format_bg_result(task))
+
+    def _format_bg_result(self, task: Any) -> str:
+        """Format a completed background task for injection into the parent."""
+        from exo._internal.state import RunNodeStatus
+
+        if task.status == RunNodeStatus.FAILED:
+            return f"[background subagent {task.task_id} failed] {task.error or 'unknown error'}"
+        return f"[background subagent {task.task_id} completed]\n{task.result or ''}"
+
+    def _format_bg_status(self, task: Any, *, brief: bool = False) -> str:
+        """Format a background task's live status for check/list tools."""
+        from exo._internal.state import RunNodeStatus
+
+        if task.status == RunNodeStatus.SUCCESS:
+            head = f"{task.task_id}: completed"
+            return head if brief else f"{head}\nresult: {task.result or ''}"
+        if task.status == RunNodeStatus.FAILED:
+            return f"{task.task_id}: failed ({task.error or 'unknown error'})"
+
+        p = task.progress
+        head = f"{task.task_id}: running (step {p.step_number}"
+        if p.current_tool:
+            head += f", tool={p.current_tool}"
+        head += ")"
+        if brief or not p.partial_output:
+            return head
+        return f"{head}\npartial: {p.partial_output[-500:]}"
+
+    async def _run_bg_child(
+        self,
+        task_id: str,
+        task: str,
+        child_tools: list[Tool],
+        provider: Any,
+        handler: Any,
+        task_obj: Any,
+    ) -> None:
+        """Detached coroutine driving one background sub-agent.
+
+        Builds a child agent (same contract as ``spawn_self``), streams it
+        for live progress, then routes the final result through the handler
+        (HOT merge if the parent is still running, WAKEUP otherwise).
+        """
+        parent = self
+        try:
+            from exo.runner import run
+            from exo.types import (
+                StepEvent,
+                TextEvent,
+                ToolCallEvent,
+                ToolResultEvent,
+                UsageEvent,
+            )
+
+            child_memory = _build_child_memory(parent)
+            child_name = f"{parent.name}_bg_{task_id}"
+            child_context = _build_child_context(parent, child_name)
+            child_agent = Agent(
+                name=child_name,
+                model=parent.model,
+                instructions=parent.instructions,
+                tools=child_tools,
+                max_steps=parent.max_steps,
+                temperature=parent.temperature,
+                max_tokens=parent.max_tokens,
+                store=child_memory,
+                context=child_context,
+                subagents=False,
+                batch_tools=parent.ptc,
+                batch_tools_timeout=parent.ptc_timeout,
+                batch_tools_max_output_bytes=parent.ptc_max_output_bytes,
+                batch_tools_max_tool_calls=parent.ptc_max_tool_calls,
+                batch_tools_extra_args=dict(parent.ptc_extra_args) or None,
+            )
+            child_agent._spawn_depth = parent._spawn_depth + 1
+
+            final_text = ""
+
+            async def _drive() -> str:
+                nonlocal final_text
+                async for ev in run.stream(child_agent, task, provider=provider, detailed=True):
+                    if isinstance(ev, StepEvent):
+                        task_obj.update_progress(step_number=ev.step_number, step_status=ev.status)
+                    elif isinstance(ev, ToolCallEvent):
+                        task_obj.update_progress(
+                            current_tool=ev.tool_name, current_tool_args=ev.arguments
+                        )
+                        # Text emitted before a tool call is reasoning, not the
+                        # final answer — reset so only post-last-tool text remains.
+                        final_text = ""
+                    elif isinstance(ev, ToolResultEvent):
+                        task_obj.update_progress(
+                            last_tool_result=str(ev.result)[:500],
+                            last_tool_error=ev.error,
+                        )
+                    elif isinstance(ev, TextEvent):
+                        final_text += ev.text
+                        task_obj.append_partial(ev.text)
+                    elif isinstance(ev, UsageEvent):
+                        task_obj.update_progress(tokens_used=ev.usage.total_tokens)
+                return final_text
+
+            if parent._bg_timeout:
+                result_text = await asyncio.wait_for(_drive(), timeout=parent._bg_timeout)
+            else:
+                result_text = await _drive()
+
+            # Snapshot _is_running immediately after the child finishes (before
+            # the next await) so the routing decision is race-safe: the parent
+            # cannot clear the flag between the snapshot and handle_result.
+            _parent_still_running = parent._is_running
+            await handler.handle_result(task_id, result_text, is_main_running=_parent_still_running)
+        except asyncio.CancelledError:
+            handler.handle_error(task_id, "cancelled")
+            raise
+        except TimeoutError:
+            handler.handle_error(task_id, f"timed out after {parent._bg_timeout}s")
+        except Exception as exc:
+            handler.handle_error(task_id, str(exc))
+        finally:
+            parent._bg_tasks.pop(task_id, None)
+
+    async def _cancel_background(self) -> None:
+        """Cancel and reap every still-running background sub-agent."""
+        if not self._bg_tasks:
+            return
+        items = list(self._bg_tasks.items())
+        for _tid, t in items:
+            t.cancel()
+        await asyncio.gather(*(t for _, t in items), return_exceptions=True)
+        # A task cancelled before it reached its first await never runs its
+        # own CancelledError handler, so finalize any still-running records.
+        if self._bg_handler is not None:
+            for tid, _t in items:
+                bg = self._bg_handler.get_task(tid)
+                if bg is not None and not bg.is_complete:
+                    self._bg_handler.handle_error(tid, "cancelled")
+        self._bg_tasks.clear()
+
+    async def aclose(self) -> None:
+        """Cancel and reap any detached background sub-agents.
+
+        Background sub-agents are intentionally left running across
+        ``run()`` calls (fire-and-forget).  Call this for deterministic
+        cleanup when you are done with the agent.
+        """
+        await self._cancel_background()
+
+    def _make_spawn_background_tool(self) -> Tool:
+        """Create the ``spawn_background`` FunctionTool closure for this agent."""
+        parent = self
+
+        async def spawn_background(task: str) -> str:
+            """Spawn a sub-agent that runs in the background (fire-and-forget).
+
+            Returns immediately with a ``task_id`` — the sub-agent runs
+            concurrently while you keep working.  When it finishes, its
+            result is injected back into your conversation automatically.
+            Call ``check_subagent(task_id)`` to see what it is doing at any
+            time, or ``list_subagents()`` to see them all.
+
+            Args:
+                task: The sub-task prompt for the background agent to work on.
+
+            Returns:
+                A ``task_id`` string (e.g. ``"bg_ab12cd34"``), or a structured
+                error with a recovery hint if it could not be launched.
+            """
+            try:
+                if not task or not task.strip():
+                    return tool_error(
+                        "Empty task",
+                        hint="Provide a non-empty task describing the sub-problem to run.",
+                    )
+                if parent._spawn_depth >= parent.max_spawn_depth:
+                    return tool_error(
+                        f"Maximum spawn depth ({parent.max_spawn_depth}) reached",
+                        hint=(
+                            "Cannot spawn further sub-agents. Handle this "
+                            "task directly without spawning."
+                        ),
+                    )
+                if len(parent._bg_tasks) >= parent._bg_max:
+                    return tool_error(
+                        f"Too many background sub-agents running ({len(parent._bg_tasks)})",
+                        hint=(
+                            f"Wait for some to finish (max {parent._bg_max}). "
+                            "Use list_subagents() to check their status."
+                        ),
+                        background_max=parent._bg_max,
+                    )
+                provider = parent._current_provider
+                if provider is None:
+                    return tool_error(
+                        "No provider available for background sub-agent",
+                        hint=(
+                            "The agent has no active provider. Handle this "
+                            "task directly without spawning."
+                        ),
+                    )
+
+                # Snapshot the provider into the closure NOW: _current_provider
+                # is cleared when run() returns, but this child outlives the run.
+                child_tools = [
+                    t
+                    for name, t in parent.tools.items()
+                    if name not in _SUBAGENT_TOOL_NAMES
+                    and not getattr(t, "_is_context_tool", False)
+                    and not getattr(t, "_is_ptc_tool", False)
+                ]
+
+                handler = parent._ensure_bg_handler()
+                task_id = f"bg_{uuid.uuid4().hex[:8]}"
+                task_obj = handler.submit(task_id, parent.name, payload={"task": task})
+
+                bg_task = asyncio.create_task(
+                    parent._run_bg_child(task_id, task, child_tools, provider, handler, task_obj),
+                    name=f"bg:{parent.name}:{task_id}",
+                )
+                parent._bg_tasks[task_id] = bg_task
+                _log.info(
+                    "spawn_background: parent=%s task_id=%s depth=%d",
+                    parent.name,
+                    task_id,
+                    parent._spawn_depth,
+                )
+                return task_id
+            except Exception as exc:
+                return tool_error(
+                    f"spawn_background failed: {exc}",
+                    hint="Handle the task directly without spawning.",
+                )
+
+        return FunctionTool(spawn_background, name="spawn_background")
+
+    def _make_check_subagent_tool(self) -> Tool:
+        """Create the ``check_subagent`` FunctionTool closure for this agent."""
+        parent = self
+
+        async def check_subagent(task_id: str) -> str:
+            """Check the live status of a background sub-agent.
+
+            Reports whether the sub-agent is still running (and which step /
+            tool it is currently on, plus partial output) or — once it has
+            finished — its result or error.
+
+            Args:
+                task_id: The id returned by ``spawn_background``.
+            """
+            handler = parent._bg_handler
+            bg = handler.get_task(task_id) if handler is not None else None
+            if bg is None:
+                return tool_error(
+                    f"No background sub-agent '{task_id}'",
+                    hint="Use list_subagents() to see active sub-agents.",
+                )
+            return parent._format_bg_status(bg)
+
+        return FunctionTool(check_subagent, name="check_subagent")
+
+    def _make_list_subagents_tool(self) -> Tool:
+        """Create the ``list_subagents`` FunctionTool closure for this agent."""
+        parent = self
+
+        async def list_subagents() -> str:
+            """List all background sub-agents spawned this session and their status."""
+            handler = parent._bg_handler
+            tasks = handler.list_tasks() if handler is not None else []
+            if not tasks:
+                return "No background sub-agents."
+            return "\n".join(parent._format_bg_status(t, brief=True) for t in tasks)
+
+        return FunctionTool(list_subagents, name="list_subagents")
 
     def _make_activate_skill_tool(self) -> Tool:
         """Create the ``activate_skill`` FunctionTool for lazy skill loading.
@@ -1932,9 +1979,8 @@ class Agent:
     def remove_tool(self, tool_name: str) -> None:
         """Unregister a tool by name.
 
-        Safe to call without holding the lock — dict.pop() is atomic in
-        CPython's single-threaded asyncio event loop (no await between
-        check and removal).
+        Uses a single dict.pop() for atomic check-and-remove (no gap
+        between the existence check and the deletion).
 
         Args:
             tool_name: Name of the tool to remove.
@@ -1942,9 +1988,9 @@ class Agent:
         Raises:
             AgentError: If no tool with that name is registered.
         """
-        if tool_name not in self.tools:
+        _sentinel = object()
+        if self.tools.pop(tool_name, _sentinel) is _sentinel:
             raise AgentError(f"Tool '{tool_name}' is not registered on agent '{self.name}'")
-        del self.tools[tool_name]
         self._cached_tool_schemas = None
 
     def _apply_ptc_setting(self, enabled: bool) -> None:
@@ -2095,8 +2141,11 @@ class Agent:
             if self.ptc:
                 from exo.ptc import get_ptc_eligible_tools
 
-                ptc_names = set(get_ptc_eligible_tools(self).keys())
-                schemas = [t.to_schema() for name, t in self.tools.items() if name not in ptc_names]
+                # Single pass: tools NOT in the PTC-eligible set go to direct schemas.
+                ptc_eligible = get_ptc_eligible_tools(self)
+                schemas = [
+                    t.to_schema() for name, t in self.tools.items() if name not in ptc_eligible
+                ]
             else:
                 schemas = [t.to_schema() for t in self.tools.values()]
             if self.injected_tool_args:
@@ -2221,6 +2270,7 @@ class Agent:
         # Store provider reference so spawn_self tool can access it during execution.
         # Always cleaned up in the finally block below.
         self._current_provider = provider
+        self._is_running = True
         try:
             return await self._run_inner(
                 input,
@@ -2229,8 +2279,14 @@ class Agent:
                 max_retries=max_retries,
                 conversation_id=conversation_id,
             )
+        except TaskLoopAbort:
+            # An aborted run reaps its detached background children; a normal
+            # run intentionally leaves them running (fire-and-forget).
+            await self._cancel_background()
+            raise
         finally:
             self._current_provider = None
+            self._is_running = False
 
     async def _run_inner(
         self,
@@ -2379,6 +2435,13 @@ class Agent:
             except ImportError:
                 pass
         # ---- end Token tracking init ----
+
+        # ---- Background sub-agents: flush results that completed while idle ----
+        # Children that finished after a previous run ended were queued
+        # (WAKEUP); inject them now so they surface on this run's first call.
+        if self._bg_handler is not None and not self._bg_handler.pending_queue.empty:
+            async for _bg in self._bg_handler.drain_pending():
+                self.inject_message(self._format_bg_result(_bg))
 
         # Tool loop — iterate up to max_steps
         for _step in range(self.max_steps):
@@ -2750,7 +2813,7 @@ class Agent:
                             tool_name=action.tool_name,
                             content=content,
                         )
-                    except (ToolError, Exception) as exc:
+                    except Exception as exc:
                         _log.warning(
                             "Tool '%s' failed on '%s': %s",
                             action.tool_name,
@@ -2768,15 +2831,22 @@ class Agent:
                 )
             except GuardAbortError:
                 raise  # Security blocks must propagate — never swallow
+            except asyncio.CancelledError:
+                raise  # Cancellation must propagate — never convert it to a tool result
             except BaseException as exc:
                 _log.warning("Tool '%s' failed on '%s': %s", action.tool_name, self.name, exc)
                 result = _tool_error(action.tool_name, action.tool_call_id, str(exc))
 
             results[idx] = result
 
-        async with asyncio.TaskGroup() as tg:
-            for i in range(len(actions)):
-                tg.create_task(_run_one(i))
+        try:
+            async with asyncio.TaskGroup() as tg:
+                for i in range(len(actions)):
+                    tg.create_task(_run_one(i))
+        except* GuardAbortError as eg:
+            # Re-raise the first GuardAbortError directly so security blocks
+            # propagate as their own type instead of wrapped in ExceptionGroup.
+            raise eg.exceptions[0]
 
         return results
 
@@ -2842,12 +2912,14 @@ class Agent:
         }
 
         # Serialize tools as importable dotted paths.
-        # Skip retrieve_artifact (auto-registered), spawn_self (auto-registered),
-        # context tools (auto-loaded), and __exo_ptc__ (PTC auto-registered).
+        # Skip retrieve_artifact (auto-registered), the spawn_self / background
+        # sub-agent tools (auto-registered closures), activate_skill, context
+        # tools (auto-loaded), and __exo_ptc__ (PTC auto-registered).
         user_tools = [
             t
             for name, t in self.tools.items()
-            if name not in ("retrieve_artifact", "spawn_self", "activate_skill")
+            if name not in _SUBAGENT_TOOL_NAMES
+            and name not in ("retrieve_artifact", "activate_skill")
             and not getattr(t, "_is_context_tool", False)
             and not getattr(t, "_is_ptc_tool", False)
         ]

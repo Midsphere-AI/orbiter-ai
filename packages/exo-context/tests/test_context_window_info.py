@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import types
+from typing import Any
 
 from exo.context.info import ContextWindowInfo, build_context_window_info
 from exo.context.token_tracker import TokenTracker
@@ -201,3 +202,39 @@ def test_build_no_tracker_no_usage_gives_zeros():
     assert info.cumulative_input_tokens == 0
     assert info.cumulative_output_tokens == 0
     assert info.trajectory == ()
+
+
+# ---------------------------------------------------------------------------
+# 11. Token-tracker failure is logged at DEBUG, not silently dropped
+# ---------------------------------------------------------------------------
+
+
+def test_token_tracker_failure_is_logged_not_swallowed(caplog: Any) -> None:
+    """A broken token tracker must log at DEBUG, not silently discard the error."""
+
+    class BrokenTracker:
+        def get_trajectory(self, agent_name: str) -> list[object]:
+            raise RuntimeError("tracker exploded")
+
+    msg_list = [UserMessage(content="hi")]
+    cfg = types.SimpleNamespace(overflow="summarize", limit=20, keep_recent=5, history_rounds=20)
+
+    import logging
+
+    with caplog.at_level(logging.DEBUG, logger="exo.context.info"):
+        info = build_context_window_info(
+            msg_list,
+            cfg,
+            agent_name="test-agent",
+            token_tracker=BrokenTracker(),
+        )
+
+    # The result must be usable (trajectory empty, no exception raised)
+    assert info.trajectory == ()
+    assert info.cumulative_input_tokens == 0
+
+    # A DEBUG log record must have been emitted mentioning the agent name
+    debug_records = [r for r in caplog.records if r.levelno == logging.DEBUG]
+    assert debug_records, "Expected at least one DEBUG log entry for the tracker failure"
+    combined = " ".join(r.getMessage() for r in debug_records)
+    assert "test-agent" in combined or "trajectory" in combined

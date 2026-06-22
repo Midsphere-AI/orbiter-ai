@@ -221,6 +221,21 @@ class TestMerge:
         with pytest.raises(ContextError, match="not a child"):
             parent2.merge(child)
 
+    def test_merge_removes_child_from_children(self) -> None:
+        parent = Context("parent")
+        child = parent.fork("child")
+        assert len(parent.children) == 1
+        parent.merge(child)
+        assert len(parent.children) == 0
+
+    def test_double_merge_raises(self) -> None:
+        """Merging the same child twice must raise ContextError."""
+        parent = Context("parent")
+        child = parent.fork("child")
+        parent.merge(child)
+        with pytest.raises(ContextError, match="already been merged"):
+            parent.merge(child)
+
 
 # ── Hierarchical state isolation ─────────────────────────────────────
 

@@ -83,10 +83,11 @@ def resolve_config(ctx: typer.Context) -> tuple[Path | None, dict[str, ServerEnt
 
 def get_server(ctx: typer.Context, name: str) -> ServerEntry:
     """Look up a server by name from the config, or exit with error."""
-    _, servers = resolve_config(ctx)
+    path, servers = resolve_config(ctx)
     if name not in servers:
         available = ", ".join(servers) if servers else "(none)"
-        print_error(f"Server '{name}' not found. Available: {available}")
+        location = f" in {path}" if path else ""
+        print_error(f"Server '{name}' not found{location}. Available: {available}")
         raise typer.Exit(code=1)
     return servers[name]
 

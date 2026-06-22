@@ -7,6 +7,7 @@ trajectory analysis, cost aggregation, and budget enforcement.
 from __future__ import annotations
 
 import logging
+from collections import defaultdict
 from dataclasses import dataclass
 from typing import Any
 
@@ -69,10 +70,14 @@ class TokenTracker:
         assert usage.total_tokens == 610
     """
 
-    __slots__ = ("_steps",)
+    __slots__ = ("_agent_step_counts", "_agent_totals", "_global_total", "_steps")
 
     def __init__(self) -> None:
         self._steps: list[TokenStep] = []
+        # Running counters — avoids O(n) scans in add_step debug logging.
+        self._agent_totals: defaultdict[str, int] = defaultdict(int)
+        self._agent_step_counts: defaultdict[str, int] = defaultdict(int)
+        self._global_total: int = 0
 
     def add_step(
         self,
@@ -96,15 +101,19 @@ class TokenTracker:
         -------
         The created :class:`TokenStep`.
         """
-        # Step index is per-agent (count of existing steps for this agent)
-        step_index = sum(1 for s in self._steps if s.agent_id == agent_id)
+        # Step index is per-agent O(1) via running counter.
+        step_index = self._agent_step_counts[agent_id]
         token_step = TokenStep(
             agent_id=agent_id,
             step=step_index,
             prompt_tokens=prompt_tokens,
             output_tokens=output_tokens,
         )
+        total = prompt_tokens + output_tokens
         self._steps.append(token_step)
+        self._agent_step_counts[agent_id] += 1
+        self._agent_totals[agent_id] += total
+        self._global_total += total
         logger.debug(
             "token step recorded: agent=%r step=%d prompt=%d output=%d",
             agent_id,
@@ -112,13 +121,13 @@ class TokenTracker:
             prompt_tokens,
             output_tokens,
         )
-        agent_used = sum(s.total_tokens for s in self._steps if s.agent_id == agent_id)
-        all_total = sum(s.total_tokens for s in self._steps)
         logger.debug(
-            "TokenTracker: used=%d / total=%d (%.0f%%)",
-            agent_used,
-            all_total,
-            100.0 * agent_used / all_total if all_total > 0 else 0.0,
+            "TokenTracker: agent_used=%d / global_total=%d (%.0f%%)",
+            self._agent_totals[agent_id],
+            self._global_total,
+            100.0 * self._agent_totals[agent_id] / self._global_total
+            if self._global_total > 0
+            else 0.0,
         )
         return token_step
 

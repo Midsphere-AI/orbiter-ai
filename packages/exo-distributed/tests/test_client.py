@@ -337,6 +337,91 @@ class TestTaskHandleResult:
         assert result == {"output": "done"}
         assert store.get_status.await_count == 3
 
+    @pytest.mark.asyncio
+    async def test_result_timeout_raises_on_hung_worker(self) -> None:
+        """result(timeout=...) raises asyncio.TimeoutError when worker never responds."""
+        import asyncio
+
+        store = MagicMock()
+        # get_status always returns RUNNING (simulates a hung/crashed worker)
+        store.get_status = AsyncMock(
+            return_value=TaskResult(task_id="t-hung", status=TaskStatus.RUNNING)
+        )
+
+        handle = TaskHandle(
+            "t-hung",
+            broker=MagicMock(),
+            store=store,
+            subscriber=MagicMock(),
+        )
+        with pytest.raises(asyncio.TimeoutError):
+            await handle.result(poll_interval=0.01, timeout=0.05)
+
+    @pytest.mark.asyncio
+    async def test_result_timeout_none_polls_without_deadline(self) -> None:
+        """result(timeout=None) waits indefinitely — completes normally when task finishes."""
+        store = MagicMock()
+        store.get_status = AsyncMock(
+            return_value=TaskResult(
+                task_id="t-none",
+                status=TaskStatus.COMPLETED,
+                result={"output": "hi"},
+            )
+        )
+
+        handle = TaskHandle(
+            "t-none",
+            broker=MagicMock(),
+            store=store,
+            subscriber=MagicMock(),
+        )
+        result = await handle.result(timeout=None)
+        assert result == {"output": "hi"}
+
+
+# ---------------------------------------------------------------------------
+# distributed() connection cleanup on submit failure (P1)
+# ---------------------------------------------------------------------------
+
+
+class TestDistributedSubmitFailureCleanup:
+    @pytest.mark.asyncio
+    async def test_disconnects_all_on_submit_failure(self) -> None:
+        """When broker.submit() raises, all three connections are disconnected."""
+        agent = MagicMock()
+        agent.to_dict.return_value = {"name": "test"}
+
+        with (
+            patch("exo.distributed.client.TaskBroker") as mock_broker_cls,
+            patch("exo.distributed.client.TaskStore") as mock_store_cls,
+            patch("exo.distributed.client.EventSubscriber") as mock_sub_cls,
+        ):
+            mock_broker = MagicMock()
+            mock_broker.connect = AsyncMock()
+            mock_broker.submit = AsyncMock(side_effect=ConnectionError("Redis gone"))
+            mock_broker.disconnect = AsyncMock()
+            mock_broker_cls.return_value = mock_broker
+
+            mock_store = MagicMock()
+            mock_store.connect = AsyncMock()
+            mock_store.disconnect = AsyncMock()
+            mock_store_cls.return_value = mock_store
+
+            mock_sub = MagicMock()
+            mock_sub.connect = AsyncMock()
+            mock_sub.disconnect = AsyncMock()
+            mock_sub_cls.return_value = mock_sub
+
+            from exo.distributed.client import distributed  # pyright: ignore[reportMissingImports]
+
+            with pytest.raises(ConnectionError):
+                await distributed(agent, "hello", redis_url="redis://localhost:6379")
+
+            # All three must be disconnected even though submit raised
+            mock_broker.disconnect.assert_awaited_once()
+            mock_store.disconnect.assert_awaited_once()
+            mock_sub.disconnect.assert_awaited_once()
+
 
 # ---------------------------------------------------------------------------
 # TaskHandle.stream

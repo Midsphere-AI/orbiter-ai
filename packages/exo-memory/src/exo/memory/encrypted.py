@@ -11,6 +11,7 @@ Requires the ``cryptography`` package::
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
 from typing import Any
 
@@ -25,6 +26,8 @@ from exo.memory.base import (  # pyright: ignore[reportMissingImports]
     MemoryMetadata,
     MemoryStatus,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def derive_key(password: str, salt: bytes | None = None) -> tuple[bytes, bytes]:
@@ -58,8 +61,10 @@ class EncryptedMemoryStore:
 
     def __init__(self, store: Any, key: bytes) -> None:
         if len(key) != 32:
-            msg = f"Key must be exactly 32 bytes (got {len(key)})"
-            raise ValueError(msg)
+            raise ExoMemoryError(
+                f"AES key must be exactly 32 bytes (got {len(key)}).",
+                hint="Use derive_key(password) to generate a valid 32-byte key.",
+            )
         self._store = store
         self._cipher = AESGCM(key)
 
@@ -97,8 +102,14 @@ class EncryptedMemoryStore:
         try:
             decrypted = self._decrypt(item.content)
         except Exception as exc:
-            msg = f"Failed to decrypt memory item {item_id}"
-            raise ExoMemoryError(msg) from exc
+            raise ExoMemoryError(
+                f"Failed to decrypt memory item {item_id!r}.",
+                context={"item_id": item_id},
+                hint=(
+                    "Verify the AES key is the same one used when storing this item. "
+                    "Data may also be corrupted."
+                ),
+            ) from exc
         return item.model_copy(update={"content": decrypted})
 
     async def search(
@@ -120,10 +131,10 @@ class EncryptedMemoryStore:
                 Metadata, memory_type, category, and status filters still work.
         """
         if query:
-            raise NotImplementedError(
+            raise ExoMemoryError(
                 "EncryptedMemoryStore does not support keyword/semantic search: "
-                "the inner store indexes ciphertext, not plaintext.  "
-                "Pass query='' and use metadata/type/status filters instead."
+                "the inner store indexes ciphertext, not plaintext.",
+                hint="Pass query='' and use metadata/type/status filters instead.",
             )
         items = await self._store.search(
             query="",
@@ -137,8 +148,16 @@ class EncryptedMemoryStore:
         for item in items:
             try:
                 decrypted = self._decrypt(item.content)
-            except Exception:
-                # Skip items that can't be decrypted (e.g., stored with different key)
+            except Exception as exc:
+                # Log the failure so it is visible — silent drops mask key mismatches
+                # and data corruption. We skip the item rather than raising so a
+                # partial result is returned (caller can inspect the log).
+                logger.warning(
+                    "EncryptedMemoryStore: failed to decrypt item id=%r; skipping. "
+                    "Check that the AES key matches the one used at write time. error=%s",
+                    item.id,
+                    exc,
+                )
                 continue
             result.append(item.model_copy(update={"content": decrypted}))
         return result

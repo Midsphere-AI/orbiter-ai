@@ -11,6 +11,7 @@ from exo.agent import Agent
 from exo.guardrail.base import BaseGuardrail
 from exo.guardrail.types import (
     GuardrailBackend,
+    GuardrailConfigError,
     GuardrailError,
     RiskAssessment,
     RiskLevel,
@@ -97,13 +98,20 @@ def _mock_provider(content: str = "Hello!") -> AsyncMock:
 
 
 class TestBaseGuardrailConstruction:
-    def test_no_backend_raises_value_error(self) -> None:
-        """BaseGuardrail(backend=None) must raise ValueError — no silent no-ops."""
-        with pytest.raises(ValueError, match="requires a backend"):
+    def test_no_backend_raises_config_error(self) -> None:
+        """BaseGuardrail(backend=None) must raise GuardrailConfigError — no silent no-ops."""
+        with pytest.raises(GuardrailConfigError, match="requires a backend"):
             BaseGuardrail()
 
-    def test_explicit_none_backend_raises_value_error(self) -> None:
-        with pytest.raises(ValueError, match="requires a backend"):
+    def test_explicit_none_backend_raises_config_error(self) -> None:
+        with pytest.raises(GuardrailConfigError, match="requires a backend"):
+            BaseGuardrail(backend=None)
+
+    def test_no_backend_is_exo_error(self) -> None:
+        """GuardrailConfigError must be catchable as ExoError."""
+        from exo.types import ExoError
+
+        with pytest.raises(ExoError):
             BaseGuardrail(backend=None)
 
     def test_with_backend_and_events(self) -> None:
@@ -243,9 +251,41 @@ class TestAttachDetach:
         assert hooks[0] is existing_hook
 
     def test_invalid_event_raises(self) -> None:
-        # Invalid events are now caught eagerly at construction time, not at attach().
-        with pytest.raises(ValueError, match="Unknown hook point"):
+        # Invalid events are caught eagerly at construction time.
+        with pytest.raises(GuardrailConfigError, match="Unknown hook point"):
             BaseGuardrail(backend=SafeBackend(), events=["not_a_real_event"])
+
+    def test_invalid_event_is_exo_error(self) -> None:
+        from exo.types import ExoError
+
+        with pytest.raises(ExoError):
+            BaseGuardrail(backend=SafeBackend(), events=["not_a_real_event"])
+
+    def test_no_id_reuse_after_gc(self) -> None:
+        """Finding #2: second agent must be guarded even if its id() == deleted agent's id().
+
+        WeakKeyDictionary keying ensures the guardrail never mistakes a new
+        agent for an already-attached one just because Python reused the
+        same memory address.
+        """
+        import gc
+
+        guard = BaseGuardrail(backend=SafeBackend(), events=["pre_llm_call"])
+
+        # Attach to agent1, then delete it to free the object (and its id).
+        agent1 = Agent(name="bot1")
+        guard.attach(agent1)
+        assert agent1 in guard._hooks  # sanity
+        del agent1
+        gc.collect()
+
+        # Create agent2 — Python may reuse the same id.
+        agent2 = Agent(name="bot2")
+        guard.attach(agent2)
+
+        # agent2 must be tracked and have hooks registered.
+        assert agent2 in guard._hooks
+        assert agent2.hook_manager.has_hooks(HookPoint.PRE_LLM_CALL)
 
 
 # ---------------------------------------------------------------------------
@@ -356,3 +396,26 @@ class TestGuardrailHookIntegration:
         assert call["event"] == "pre_llm_call"
         assert "agent" in call
         assert "messages" in call
+
+    async def test_medium_risk_logs_warning(self) -> None:
+        """Finding #5: sub-blocking detections (MEDIUM) must emit a warning log."""
+        import io
+        import logging
+
+        provider = _mock_provider(content="Proceeding.")
+        agent = Agent(name="bot")
+        guard = BaseGuardrail(backend=MediumRiskBackend(), events=["pre_llm_call"])
+        guard.attach(agent)
+
+        log_stream = io.StringIO()
+        handler = logging.StreamHandler(log_stream)
+        handler.setLevel(logging.WARNING)
+        guardrail_logger = logging.getLogger("exo.guardrail.base")
+        guardrail_logger.addHandler(handler)
+        try:
+            await agent.run("Suspicious input", provider=provider)
+        finally:
+            guardrail_logger.removeHandler(handler)
+
+        log_output = log_stream.getvalue()
+        assert "sub-blocking" in log_output or "medium" in log_output.lower()

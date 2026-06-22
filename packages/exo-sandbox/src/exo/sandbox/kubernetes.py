@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import inspect
 import logging
 import os
 from typing import Any
@@ -44,7 +43,6 @@ class KubernetesSandbox(Sandbox):
         "_k8s_client",
         "_namespace",
         "_pod_name",
-        "_tools",
     )
 
     def __init__(
@@ -70,7 +68,12 @@ class KubernetesSandbox(Sandbox):
         self._image = image or os.environ.get("EXO_K8S_IMAGE", _DEFAULT_IMAGE)
         self._pod_name: str | None = None
         self._k8s_client: Any = None
-        self._tools: dict[str, Any] = dict(tools) if tools else {}
+        # Seed the shared registry from the constructor `tools` mapping.  Use
+        # register_tool() so the duplicate-key guard fires for callers who pass
+        # the same name twice (e.g. via both positional and keyword args).
+        if tools:
+            for name, tool in tools.items():
+                self.register_tool(name, self._tool_to_handler(tool))
 
     # -- properties ---------------------------------------------------------
 
@@ -105,11 +108,22 @@ class KubernetesSandbox(Sandbox):
             else:
                 config.load_incluster_config()
         except Exception:
+            # In-cluster config failed (or an explicit KUBECONFIG was bad).
+            # Fall back to the default kubeconfig.  Python's implicit exception
+            # chaining preserves the first failure as __context__; the second
+            # failure is chained explicitly via ``raise ... from``.
             try:
                 config.load_kube_config()
             except Exception as cfg_exc:
-                msg = "Failed to load Kubernetes configuration"
-                raise SandboxError(msg) from cfg_exc
+                raise SandboxError(
+                    "Failed to load Kubernetes configuration "
+                    "(tried in-cluster credentials and default kubeconfig).",
+                    context={"kubeconfig": kubeconfig_path or "(default)"},
+                    hint=(
+                        "Set KUBECONFIG env var to your kubeconfig path, "
+                        "or ensure in-cluster service account credentials are mounted."
+                    ),
+                ) from cfg_exc
 
         self._k8s_client = client.CoreV1Api()
         logger.debug("Loaded Kubernetes client for sandbox %s", self._sandbox_id)
@@ -138,15 +152,61 @@ class KubernetesSandbox(Sandbox):
         }
 
     async def _wait_for_pod(self) -> None:
-        """Poll until the pod is in Running phase."""
+        """Poll until the pod is in Running phase.
+
+        Polling is bounded by two independent limits:
+
+        * **``_MAX_POLL_ATTEMPTS``** — maximum number of status polls before
+          giving up.  Patching this constant in tests avoids needing a long
+          wall-clock ``timeout``.
+        * **``self._timeout``** — hard wall-clock deadline via
+          ``asyncio.wait_for``, guarding against a blocking API call that
+          never returns.
+        """
         api = self._k8s_client
-        for _ in range(_MAX_POLL_ATTEMPTS):
-            pod = await asyncio.to_thread(api.read_namespaced_pod, self._pod_name, self._namespace)
-            if pod.status and pod.status.phase == "Running":
-                return
-            await asyncio.sleep(_POLL_INTERVAL)
-        msg = f"Pod {self._pod_name!r} did not reach Running within timeout"
-        raise SandboxError(msg)
+
+        async def _poll_loop() -> None:
+            for _ in range(_MAX_POLL_ATTEMPTS):
+                pod = await asyncio.to_thread(
+                    api.read_namespaced_pod, self._pod_name, self._namespace
+                )
+                if pod.status and pod.status.phase == "Running":
+                    return
+                await asyncio.sleep(_POLL_INTERVAL)
+            # Exceeded max attempts — raise as SandboxError (not TimeoutError)
+            # so the outer except TimeoutError block doesn't swallow it.
+            raise SandboxError(
+                f"Pod {self._pod_name!r} did not reach Running after {_MAX_POLL_ATTEMPTS} polls.",
+                context={
+                    "pod": self._pod_name,
+                    "namespace": self._namespace,
+                    "poll_attempts": _MAX_POLL_ATTEMPTS,
+                },
+                hint=(
+                    "Check pod events with `kubectl describe pod "
+                    f"{self._pod_name} -n {self._namespace}` "
+                    "or increase the sandbox timeout."
+                ),
+            )
+
+        try:
+            await asyncio.wait_for(_poll_loop(), timeout=self._timeout)
+        except SandboxError:
+            raise
+        except TimeoutError as exc:
+            raise SandboxError(
+                f"Pod {self._pod_name!r} did not reach Running within {self._timeout}s.",
+                context={
+                    "pod": self._pod_name,
+                    "namespace": self._namespace,
+                    "timeout": self._timeout,
+                },
+                hint=(
+                    "Check pod events with `kubectl describe pod "
+                    f"{self._pod_name} -n {self._namespace}` "
+                    "or increase the sandbox timeout."
+                ),
+            ) from exc
 
     # -- lifecycle ----------------------------------------------------------
 
@@ -171,8 +231,19 @@ class KubernetesSandbox(Sandbox):
         except Exception as exc:
             self._status = SandboxStatus.ERROR
             logger.error("Failed to start Kubernetes sandbox %s: %s", self._sandbox_id, exc)
-            msg = f"Failed to start Kubernetes sandbox: {exc}"
-            raise SandboxError(msg) from exc
+            raise SandboxError(
+                "Failed to start Kubernetes sandbox.",
+                context={
+                    "pod": self._pod_name,
+                    "namespace": self._namespace,
+                    "image": self._image,
+                },
+                hint=(
+                    "Run `kubectl get pods -n "
+                    f"{self._namespace}` to check pod status, "
+                    "or verify the kubeconfig is correct."
+                ),
+            ) from exc
 
     async def stop(self) -> None:
         """Delete the pod and service (sandbox can be restarted)."""
@@ -193,13 +264,20 @@ class KubernetesSandbox(Sandbox):
             try:
                 await asyncio.to_thread(api.delete_namespaced_pod, self._pod_name, self._namespace)
                 logger.info("Deleted pod %s", self._pod_name)
-            except Exception:
-                logger.warning("Failed to delete pod %s", self._pod_name)
+            except Exception as exc:
+                logger.warning(
+                    "Failed to delete pod %s (namespace=%s, sandbox=%s): %s",
+                    self._pod_name,
+                    self._namespace,
+                    self._sandbox_id,
+                    exc,
+                )
             self._pod_name = None
 
-    def register_tool(self, tool: Any) -> None:
-        """Register a :class:`~exo.tool.Tool` for use in :meth:`run_tool`."""
-        self._tools[tool.name] = tool
+    # ``register_tool`` / ``unregister_tool`` / ``registered_tools`` are
+    # inherited from :class:`~exo.sandbox.base.Sandbox`. The everyday form here
+    # is ``sandbox.register_tool(my_tool)`` (a Tool with .name + .execute), but
+    # ``register_tool("name", handler)`` works too — identical to every backend.
 
     async def run_tool(self, tool_name: str, arguments: dict[str, Any]) -> Any:
         """Execute a tool within the Kubernetes sandbox.
@@ -225,17 +303,9 @@ class KubernetesSandbox(Sandbox):
         )
 
         # --- path 1: locally-registered tool ---------------------------------
-        local_tool = self._tools.get(tool_name)
-        if local_tool is not None:
-            try:
-                result = local_tool.execute(**arguments)
-                if inspect.isawaitable(result):
-                    result = await result
-                return result
-            except SandboxError:
-                raise
-            except Exception as exc:
-                raise SandboxError(f"Tool {tool_name!r} failed: {exc}") from exc
+        handled, result = await self._run_registered(tool_name, arguments)
+        if handled:
+            return result
 
         # --- path 2: unregistered tool ---------------------------------------
         # Tools must be registered locally via register_tool() or the

@@ -6,6 +6,7 @@ import asyncio
 from collections.abc import AsyncIterator
 from dataclasses import replace
 
+from exo._internal.errors import unwrap_exception_group  # pyright: ignore[reportMissingImports]
 from exo.observability.logging import get_logger  # pyright: ignore[reportMissingImports]
 from exo.types import StreamEvent
 
@@ -16,6 +17,7 @@ from .agents.researcher import direct_search
 from .agents.suggestion_generator import generate_suggestions
 from .agents.writer import revise_answer, stream_write_answer, write_answer
 from .config import SearchConfig, compute_context_budget
+from .errors import SearchError
 from .tools.citation_verifier import verify_citations
 from .tools.confidence import compute_confidence
 from .tools.contradiction_detector import detect_contradictions
@@ -23,6 +25,7 @@ from .tools.embeddings import rerank_search_results
 from .tools.searxng import configure_search_keys
 from .tools.web_fetcher import enrich_results
 from .types import (
+    CitationVerification,
     ClassifierOutput,
     PipelineEvent,
     ResearchMode,
@@ -44,10 +47,10 @@ def _normalize_mode(mode: str) -> str:
     if low in _VALID_MODES:
         return low
     valid_list = ", ".join(sorted(_VALID_MODES))
-    raise ValueError(
-        f"Unknown search mode: {mode!r}. "
-        f"Valid modes are: {valid_list}. "
-        f"Example: search('query', mode='balanced')"
+    raise SearchError(
+        f"Unknown search mode: {mode!r}.",
+        context={"mode": mode, "valid_modes": valid_list},
+        hint=f"Use one of the valid mode strings: {valid_list}. Example: search('query', mode='balanced')",
     )
 
 
@@ -102,7 +105,11 @@ async def run_search_pipeline(
         )
         if isinstance(classification_r, BaseException):
             _log.warning("classifier failed in speed mode: %s", classification_r)
-            raise classification_r
+            raise SearchError(
+                "Classifier failed in speed mode.",
+                context={"stage": "classifier", "mode": mode, "query": query},
+                hint="Check model credentials and network. Try mode='speed' to use a lighter path.",
+            ) from unwrap_exception_group(classification_r)
         classification = classification_r
         if isinstance(search_results_r, BaseException):
             _log.warning("direct_search failed in speed mode: %s", search_results_r)
@@ -119,7 +126,11 @@ async def run_search_pipeline(
         )
         if isinstance(classification_r, BaseException):
             _log.warning("classifier failed: %s", classification_r)
-            raise classification_r
+            raise SearchError(
+                "Classifier failed.",
+                context={"stage": "classifier", "mode": mode, "query": query},
+                hint="Check model credentials and network. Try mode='speed' to skip the classifier for fast fallback.",
+            ) from unwrap_exception_group(classification_r)
         classification = classification_r
         if isinstance(seed_results_r, BaseException):
             _log.warning("direct_search failed (seed): %s", seed_results_r)
@@ -190,82 +201,27 @@ async def run_search_pipeline(
     # Start suggestions early (independent of enrichment and writing)
     suggest_task = asyncio.create_task(generate_suggestions([*history, (query, "")], cfg))
 
-    # Enrich top results with full page content (skip for speed)
-    enrich_cap = budget_enrich
-    content_chars = budget_chars
-    if enrich_cap > 0 and writer_results:
-        _log.debug("enriching top %d results (max_chars=%d)", enrich_cap, content_chars)
-        writer_results = await enrich_results(
-            writer_results,
-            cfg.jina_reader_url,
-            max_results=enrich_cap,
-            jina_api_key=cfg.jina_api_key,
+    try:
+        # Enrich top results with full page content (skip for speed)
+        enrich_cap = budget_enrich
+        content_chars = budget_chars
+        if enrich_cap > 0 and writer_results:
+            _log.debug("enriching top %d results (max_chars=%d)", enrich_cap, content_chars)
+            writer_results = await enrich_results(
+                writer_results,
+                cfg.jina_reader_url,
+                max_results=enrich_cap,
+                jina_api_key=cfg.jina_api_key,
+                query=effective_query,
+                max_chars=content_chars,
+            )
+
+        # Step 3: Write answer
+        _log.debug(
+            "writing answer sources=%d narrative=%d", len(writer_results), len(research_narrative)
+        )
+        answer = await write_answer(
             query=effective_query,
-            max_chars=content_chars,
-        )
-
-    # Step 3: Write answer
-    _log.debug(
-        "writing answer sources=%d narrative=%d", len(writer_results), len(research_narrative)
-    )
-    answer = await write_answer(
-        query=effective_query,
-        search_results=writer_results,
-        chat_history=history,
-        system_instructions=system_instructions or cfg.system_instructions,
-        mode=mode,
-        config=writer_cfg,
-        research_narrative=research_narrative,
-    )
-
-    # Step 3b: Verify citations and detect contradictions
-    if mode in ("quality", "deep"):
-        # Run citation verification and contradiction detection in parallel
-        verify_r, contradict_r = await asyncio.gather(
-            verify_citations(answer, writer_results, mode, config=cfg),
-            detect_contradictions(answer, writer_results, mode, cfg),
-            return_exceptions=True,
-        )
-        if isinstance(verify_r, BaseException):
-            _log.warning("citation verification failed: %s", verify_r)
-            raise verify_r
-        answer, verification = verify_r
-        if isinstance(contradict_r, BaseException):
-            _log.warning("contradiction detection failed, skipping: %s", contradict_r)
-            contradiction_report = None
-        else:
-            contradiction_report = contradict_r
-    else:
-        answer, verification = await verify_citations(answer, writer_results, mode, config=cfg)
-        contradiction_report = None
-    _log.info(
-        "citation verification total=%d verified=%d removed=%d",
-        verification.total_citations,
-        verification.verified,
-        verification.removed,
-    )
-
-    # Step 3c: Write-verify-revise loop
-    revision_count = 0
-    while (
-        verification.total_citations > 0
-        and verification.removed / verification.total_citations > cfg.revision_threshold
-        and revision_count < cfg.max_revision_rounds
-        and verification.failed_claims
-    ):
-        revision_count += 1
-        _log.info(
-            "revision round %d: removed=%d/%d (%.0f%% > %.0f%%)",
-            revision_count,
-            verification.removed,
-            verification.total_citations,
-            100 * verification.removed / verification.total_citations,
-            100 * cfg.revision_threshold,
-        )
-        answer = await revise_answer(
-            query=effective_query,
-            original_answer=answer,
-            failed_claims=verification.failed_claims,
             search_results=writer_results,
             chat_history=history,
             system_instructions=system_instructions or cfg.system_instructions,
@@ -273,21 +229,83 @@ async def run_search_pipeline(
             config=writer_cfg,
             research_narrative=research_narrative,
         )
-        answer, verification = await verify_citations(answer, writer_results, mode, config=cfg)
+
+        # Step 3b: Verify citations and detect contradictions
+        if mode in ("quality", "deep"):
+            # Run citation verification and contradiction detection in parallel
+            verify_r, contradict_r = await asyncio.gather(
+                verify_citations(answer, writer_results, mode, config=cfg),
+                detect_contradictions(answer, writer_results, mode, cfg),
+                return_exceptions=True,
+            )
+            if isinstance(verify_r, BaseException):
+                _log.warning(
+                    "citation verification failed, skipping: %s", verify_r, exc_info=verify_r
+                )
+                verification = CitationVerification()
+            else:
+                answer, verification = verify_r
+            if isinstance(contradict_r, BaseException):
+                _log.warning("contradiction detection failed, skipping: %s", contradict_r)
+                contradiction_report = None
+            else:
+                contradiction_report = contradict_r
+        else:
+            answer, verification = await verify_citations(answer, writer_results, mode, config=cfg)
+            contradiction_report = None
         _log.info(
-            "post-revision verification: total=%d verified=%d removed=%d",
+            "citation verification total=%d verified=%d removed=%d",
             verification.total_citations,
             verification.verified,
             verification.removed,
         )
-    verification.revision_count = revision_count
 
-    if contradiction_report and contradiction_report.has_contradictions:
-        _log.info("contradictions detected: %d", len(contradiction_report.contradictions))
+        # Step 3c: Write-verify-revise loop
+        revision_count = 0
+        while (
+            verification.total_citations > 0
+            and verification.removed / verification.total_citations > cfg.revision_threshold
+            and revision_count < cfg.max_revision_rounds
+            and verification.failed_claims
+        ):
+            revision_count += 1
+            _log.info(
+                "revision round %d: removed=%d/%d (%.0f%% > %.0f%%)",
+                revision_count,
+                verification.removed,
+                verification.total_citations,
+                100 * verification.removed / verification.total_citations,
+                100 * cfg.revision_threshold,
+            )
+            answer = await revise_answer(
+                query=effective_query,
+                original_answer=answer,
+                failed_claims=verification.failed_claims,
+                search_results=writer_results,
+                chat_history=history,
+                system_instructions=system_instructions or cfg.system_instructions,
+                mode=mode,
+                config=writer_cfg,
+                research_narrative=research_narrative,
+            )
+            answer, verification = await verify_citations(answer, writer_results, mode, config=cfg)
+            _log.info(
+                "post-revision verification: total=%d verified=%d removed=%d",
+                verification.total_citations,
+                verification.verified,
+                verification.removed,
+            )
+        verification.revision_count = revision_count
 
-    # Step 4: Get suggestions (should be done by now)
-    suggestions = await suggest_task
-    _log.info("writer done answer_len=%d", len(answer))
+        if contradiction_report and contradiction_report.has_contradictions:
+            _log.info("contradictions detected: %d", len(contradiction_report.contradictions))
+
+        # Step 4: Get suggestions (should be done by now)
+        suggestions = await suggest_task
+        _log.info("writer done answer_len=%d", len(answer))
+    except BaseException:
+        suggest_task.cancel()
+        raise
 
     # Sources list matches what the writer cited (same order, same indices)
     sources = [Source(title=r.title, url=r.url, content=r.content) for r in writer_results]
@@ -348,7 +366,11 @@ async def stream_search_pipeline(
         )
         if isinstance(classification_r, BaseException):
             _log.warning("classifier failed in speed mode (stream): %s", classification_r)
-            raise classification_r
+            raise SearchError(
+                "Classifier failed in speed mode.",
+                context={"stage": "classifier", "mode": mode, "query": query},
+                hint="Check model credentials and network. Try mode='speed' to use a lighter path.",
+            ) from unwrap_exception_group(classification_r)
         classification = classification_r
         if isinstance(search_results_r, BaseException):
             _log.warning("direct_search failed in speed mode (stream): %s", search_results_r)
@@ -370,7 +392,11 @@ async def stream_search_pipeline(
         )
         if isinstance(classification_r, BaseException):
             _log.warning("classifier failed (stream): %s", classification_r)
-            raise classification_r
+            raise SearchError(
+                "Classifier failed.",
+                context={"stage": "classifier", "mode": mode, "query": query},
+                hint="Check model credentials and network. Try mode='speed' to skip the classifier for fast fallback.",
+            ) from unwrap_exception_group(classification_r)
         classification = classification_r
         if isinstance(seed_results_r, BaseException):
             _log.warning("direct_search failed (stream seed): %s", seed_results_r)
@@ -455,130 +481,139 @@ async def stream_search_pipeline(
     # Start suggestions concurrently (independent of enrichment and writing)
     suggest_task = asyncio.create_task(generate_suggestions([*history, (query, "")], cfg))
 
-    # Enrich top results with full page content (skip for speed)
-    enrich_cap = budget_enrich
-    content_chars = budget_chars
-    if enrich_cap > 0 and writer_results:
-        _log.debug("enriching top %d results (max_chars=%d)", enrich_cap, content_chars)
-        yield PipelineEvent(stage="enrichment", status="started")
-        writer_results = await enrich_results(
-            writer_results,
-            cfg.jina_reader_url,
-            max_results=enrich_cap,
-            jina_api_key=cfg.jina_api_key,
+    try:
+        # Enrich top results with full page content (skip for speed)
+        enrich_cap = budget_enrich
+        content_chars = budget_chars
+        if enrich_cap > 0 and writer_results:
+            _log.debug("enriching top %d results (max_chars=%d)", enrich_cap, content_chars)
+            yield PipelineEvent(stage="enrichment", status="started")
+            writer_results = await enrich_results(
+                writer_results,
+                cfg.jina_reader_url,
+                max_results=enrich_cap,
+                jina_api_key=cfg.jina_api_key,
+                query=effective_query,
+                max_chars=content_chars,
+            )
+            yield PipelineEvent(
+                stage="enrichment",
+                status="completed",
+                message=f"{min(enrich_cap, len(writer_results))} pages scraped",
+            )
+
+        # Step 3: Write answer (streaming text tokens)
+        yield PipelineEvent(stage="writer", status="started")
+        answer_parts: list[str] = []
+        async for event in stream_write_answer(
             query=effective_query,
-            max_chars=content_chars,
-        )
-        yield PipelineEvent(
-            stage="enrichment",
-            status="completed",
-            message=f"{min(enrich_cap, len(writer_results))} pages scraped",
-        )
-
-    # Step 3: Write answer (streaming text tokens)
-    yield PipelineEvent(stage="writer", status="started")
-    answer_parts: list[str] = []
-    async for event in stream_write_answer(
-        query=effective_query,
-        search_results=writer_results,
-        chat_history=history,
-        system_instructions=system_instructions or cfg.system_instructions,
-        mode=mode,
-        config=writer_cfg,
-        research_narrative=research_narrative,
-    ):
-        from exo.types import TextEvent
-
-        if isinstance(event, TextEvent):
-            answer_parts.append(event.text)
-        yield event
-    answer = "".join(answer_parts)
-    yield PipelineEvent(stage="writer", status="completed")
-
-    # Step 3b: Verify citations and detect contradictions
-    if mode in ("quality", "deep"):
-        # Run citation verification and contradiction detection in parallel
-        verify_r, contradict_r = await asyncio.gather(
-            verify_citations(answer, writer_results, mode, config=cfg),
-            detect_contradictions(answer, writer_results, mode, cfg),
-            return_exceptions=True,
-        )
-        if isinstance(verify_r, BaseException):
-            _log.warning("citation verification failed (stream): %s", verify_r)
-            raise verify_r
-        answer, verification = verify_r
-        if isinstance(contradict_r, BaseException):
-            _log.warning("contradiction detection failed (stream), skipping: %s", contradict_r)
-            contradiction_report = None
-        else:
-            contradiction_report = contradict_r
-    else:
-        answer, verification = await verify_citations(answer, writer_results, mode, config=cfg)
-        contradiction_report = None
-    _log.info(
-        "citation verification total=%d verified=%d removed=%d",
-        verification.total_citations,
-        verification.verified,
-        verification.removed,
-    )
-
-    # Step 3c: Write-verify-revise loop (revisions run silently, not streamed)
-    revision_count = 0
-    while (
-        verification.total_citations > 0
-        and verification.removed / verification.total_citations > cfg.revision_threshold
-        and revision_count < cfg.max_revision_rounds
-        and verification.failed_claims
-    ):
-        revision_count += 1
-        _log.info(
-            "revision round %d: removed=%d/%d (%.0f%% > %.0f%%)",
-            revision_count,
-            verification.removed,
-            verification.total_citations,
-            100 * verification.removed / verification.total_citations,
-            100 * cfg.revision_threshold,
-        )
-        yield PipelineEvent(
-            stage="revision",
-            status="started",
-            message=f"Revising answer (round {revision_count})",
-        )
-        answer = await revise_answer(
-            query=effective_query,
-            original_answer=answer,
-            failed_claims=verification.failed_claims,
             search_results=writer_results,
             chat_history=history,
             system_instructions=system_instructions or cfg.system_instructions,
             mode=mode,
             config=writer_cfg,
             research_narrative=research_narrative,
-        )
-        answer, verification = await verify_citations(answer, writer_results, mode, config=cfg)
-        yield PipelineEvent(
-            stage="revision",
-            status="completed",
-            message=(
-                f"Round {revision_count}: {verification.verified}/{verification.total_citations}"
-                f" citations verified"
-            ),
-        )
+        ):
+            from exo.types import TextEvent
+
+            if isinstance(event, TextEvent):
+                answer_parts.append(event.text)
+            yield event
+        answer = "".join(answer_parts)
+        yield PipelineEvent(stage="writer", status="completed")
+
+        # Step 3b: Verify citations and detect contradictions
+        if mode in ("quality", "deep"):
+            # Run citation verification and contradiction detection in parallel
+            verify_r, contradict_r = await asyncio.gather(
+                verify_citations(answer, writer_results, mode, config=cfg),
+                detect_contradictions(answer, writer_results, mode, cfg),
+                return_exceptions=True,
+            )
+            if isinstance(verify_r, BaseException):
+                _log.warning(
+                    "citation verification failed (stream), skipping: %s",
+                    verify_r,
+                    exc_info=verify_r,
+                )
+                verification = CitationVerification()
+            else:
+                answer, verification = verify_r
+            if isinstance(contradict_r, BaseException):
+                _log.warning("contradiction detection failed (stream), skipping: %s", contradict_r)
+                contradiction_report = None
+            else:
+                contradiction_report = contradict_r
+        else:
+            answer, verification = await verify_citations(answer, writer_results, mode, config=cfg)
+            contradiction_report = None
         _log.info(
-            "post-revision verification: total=%d verified=%d removed=%d",
+            "citation verification total=%d verified=%d removed=%d",
             verification.total_citations,
             verification.verified,
             verification.removed,
         )
-    verification.revision_count = revision_count
 
-    if contradiction_report and contradiction_report.has_contradictions:
-        _log.info("contradictions detected: %d", len(contradiction_report.contradictions))
+        # Step 3c: Write-verify-revise loop (revisions run silently, not streamed)
+        revision_count = 0
+        while (
+            verification.total_citations > 0
+            and verification.removed / verification.total_citations > cfg.revision_threshold
+            and revision_count < cfg.max_revision_rounds
+            and verification.failed_claims
+        ):
+            revision_count += 1
+            _log.info(
+                "revision round %d: removed=%d/%d (%.0f%% > %.0f%%)",
+                revision_count,
+                verification.removed,
+                verification.total_citations,
+                100 * verification.removed / verification.total_citations,
+                100 * cfg.revision_threshold,
+            )
+            yield PipelineEvent(
+                stage="revision",
+                status="started",
+                message=f"Revising answer (round {revision_count})",
+            )
+            answer = await revise_answer(
+                query=effective_query,
+                original_answer=answer,
+                failed_claims=verification.failed_claims,
+                search_results=writer_results,
+                chat_history=history,
+                system_instructions=system_instructions or cfg.system_instructions,
+                mode=mode,
+                config=writer_cfg,
+                research_narrative=research_narrative,
+            )
+            answer, verification = await verify_citations(answer, writer_results, mode, config=cfg)
+            yield PipelineEvent(
+                stage="revision",
+                status="completed",
+                message=(
+                    f"Round {revision_count}: {verification.verified}/{verification.total_citations}"
+                    f" citations verified"
+                ),
+            )
+            _log.info(
+                "post-revision verification: total=%d verified=%d removed=%d",
+                verification.total_citations,
+                verification.verified,
+                verification.removed,
+            )
+        verification.revision_count = revision_count
 
-    # Step 4: Suggestions (should be done by now)
-    yield PipelineEvent(stage="suggestions", status="started")
-    suggestions = await suggest_task
-    yield PipelineEvent(stage="suggestions", status="completed")
+        if contradiction_report and contradiction_report.has_contradictions:
+            _log.info("contradictions detected: %d", len(contradiction_report.contradictions))
+
+        # Step 4: Suggestions (should be done by now)
+        yield PipelineEvent(stage="suggestions", status="started")
+        suggestions = await suggest_task
+        yield PipelineEvent(stage="suggestions", status="completed")
+    except BaseException:
+        suggest_task.cancel()
+        raise
 
     _log.info("writer done answer_len=%d", len(answer))
 

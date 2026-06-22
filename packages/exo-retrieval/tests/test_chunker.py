@@ -14,7 +14,7 @@ from exo.retrieval.chunker import (
     TokenChunker,
     _WhitespaceEncoder,
 )
-from exo.retrieval.types import Chunk, Document
+from exo.retrieval.types import Chunk, Document, RetrievalError
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -117,15 +117,15 @@ class TestCharacterChunker:
         assert [c.index for c in result] == [0, 1, 2]
 
     def test_invalid_chunk_size(self) -> None:
-        with pytest.raises(ValueError, match="chunk_size must be positive"):
+        with pytest.raises(RetrievalError, match="chunk_size must be positive"):
             CharacterChunker(chunk_size=0)
 
     def test_invalid_overlap_negative(self) -> None:
-        with pytest.raises(ValueError, match="chunk_overlap must be non-negative"):
+        with pytest.raises(RetrievalError, match="chunk_overlap must be non-negative"):
             CharacterChunker(chunk_size=10, chunk_overlap=-1)
 
     def test_invalid_overlap_too_large(self) -> None:
-        with pytest.raises(ValueError, match="chunk_overlap must be less than"):
+        with pytest.raises(RetrievalError, match="chunk_overlap must be less than"):
             CharacterChunker(chunk_size=10, chunk_overlap=10)
 
     def test_exact_size_document(self) -> None:
@@ -209,7 +209,7 @@ class TestParagraphChunker:
         assert [c.index for c in result] == list(range(len(result)))
 
     def test_invalid_chunk_size(self) -> None:
-        with pytest.raises(ValueError, match="chunk_size must be positive"):
+        with pytest.raises(RetrievalError, match="chunk_size must be positive"):
             ParagraphChunker(chunk_size=0)
 
     def test_three_paragraphs_two_fit(self) -> None:
@@ -283,15 +283,15 @@ class TestTokenChunker:
         assert [c.index for c in result] == list(range(len(result)))
 
     def test_invalid_chunk_size(self) -> None:
-        with pytest.raises(ValueError, match="chunk_size must be positive"):
+        with pytest.raises(RetrievalError, match="chunk_size must be positive"):
             TokenChunker(chunk_size=0)
 
     def test_invalid_overlap_negative(self) -> None:
-        with pytest.raises(ValueError, match="chunk_overlap must be non-negative"):
+        with pytest.raises(RetrievalError, match="chunk_overlap must be non-negative"):
             TokenChunker(chunk_size=10, chunk_overlap=-1)
 
     def test_invalid_overlap_too_large(self) -> None:
-        with pytest.raises(ValueError, match="chunk_overlap must be less than"):
+        with pytest.raises(RetrievalError, match="chunk_overlap must be less than"):
             TokenChunker(chunk_size=10, chunk_overlap=10)
 
     def test_uses_tiktoken_when_available(self, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -435,12 +435,15 @@ async def verify_citations(
     # Phase 1: keyword filter
     keyword_passed: list[tuple[int, int, str]] = []  # (cite_idx, source_idx, claim)
     keyword_failed: list[tuple[int, int, str]] = []  # (cite_idx, source_idx, claim)
-    invalid_markers: set[str] = set()
+    # Track invalid citation *occurrences* at the cite_idx level (not the source number).
+    # This prevents a source that passes for one claim but fails for another from having
+    # ALL its [N] markers stripped — only the specific failing occurrences are removed.
+    invalid_cite_indices: set[int] = set()
 
     for cite_idx, (src_idx, claim) in enumerate(citations):
         if src_idx < 0 or src_idx >= len(sources):
             _log.debug("citation [%d] out of range (sources=%d)", src_idx + 1, len(sources))
-            invalid_markers.add(f"[{src_idx + 1}]")
+            invalid_cite_indices.add(cite_idx)
             stats.removed += 1
             stats.failed_claims.append((claim, src_idx + 1))
             continue
@@ -457,6 +460,8 @@ async def verify_citations(
             stats.verified += 1
         for _cite_idx, src_idx, claim in keyword_failed:
             if mode in ("quality", "deep"):
+                # In quality/deep without LLM, flag the citation for review rather than
+                # removing it outright — flag OR remove, not both.
                 stats.flagged += 1
                 _log.info(
                     "citation [%d] flagged for review (mode=%s): claim=%r",
@@ -464,11 +469,16 @@ async def verify_citations(
                     mode,
                     claim[:80],
                 )
-            invalid_markers.add(f"[{src_idx + 1}]")
-            stats.removed += 1
-            stats.failed_claims.append((claim, src_idx + 1))
+            else:
+                # In balanced/speed modes, remove the unsupported citation.
+                invalid_cite_indices.add(_cite_idx)
+                stats.removed += 1
+                stats.failed_claims.append((claim, src_idx + 1))
     else:
-        # Phase 2: LLM spot-check keyword-passed citations
+        # Phase 2: LLM spot-check keyword-passed citations.
+        # Optimistic fallback (True) — keyword already gave these a green light,
+        # so when the LLM call fails we trust the keyword result rather than
+        # needlessly removing a citation that passed heuristic verification.
         model = cfg.fast_model
         provider = resolve_provider(model)
 
@@ -495,7 +505,7 @@ async def verify_citations(
                 stats.verified += 1
         else:
             for cite_idx, src_idx, claim in keyword_passed:
-                llm_ok = spot_results.get(cite_idx, True)  # optimistic fallback
+                llm_ok = spot_results.get(cite_idx, True)  # optimistic fallback (see above)
                 if llm_ok:
                     stats.verified += 1
                     stats.llm_verified += 1
@@ -505,11 +515,14 @@ async def verify_citations(
                         src_idx + 1,
                         claim[:80],
                     )
-                    invalid_markers.add(f"[{src_idx + 1}]")
+                    invalid_cite_indices.add(cite_idx)
                     stats.removed += 1
                     stats.failed_claims.append((claim, src_idx + 1))
 
-        # Phase 3: LLM second-chance for keyword-failed citations
+        # Phase 3: LLM second-chance for keyword-failed citations.
+        # Pessimistic fallback (False) — keyword already flagged these, so when the
+        # LLM call fails we preserve the keyword judgement and remove the citation
+        # rather than keeping a claim we have no evidence for.
         second_chance_batch: list[tuple[int, str, str, str]] = []
         for cite_idx, src_idx, claim in keyword_failed:
             source = sources[src_idx]
@@ -520,7 +533,7 @@ async def verify_citations(
         )
 
         for cite_idx, src_idx, claim in keyword_failed:
-            llm_ok = second_results.get(cite_idx, False)  # pessimistic fallback
+            llm_ok = second_results.get(cite_idx, False)  # pessimistic fallback (see above)
             if llm_ok:
                 _log.info(
                     "citation [%d] LLM rescued (keyword failed): claim=%r",
@@ -530,14 +543,32 @@ async def verify_citations(
                 stats.verified += 1
                 stats.llm_verified += 1
             else:
-                invalid_markers.add(f"[{src_idx + 1}]")
+                invalid_cite_indices.add(cite_idx)
                 stats.removed += 1
                 stats.failed_claims.append((claim, src_idx + 1))
 
-    # Build the cleaned answer by stripping bad markers.
+    # Build the cleaned answer by replacing only the specific invalid citation occurrences.
+    # We work from right to left through the original match list so that earlier positions
+    # are not shifted by earlier replacements.
+    matches = list(_CITE_RE.finditer(answer))
+    # Map each citation index back to its match span(s) so we can surgically remove
+    # the right [N] markers without touching the same source number used by a passing claim.
     cleaned = answer
-    for marker in invalid_markers:
-        cleaned = cleaned.replace(marker, "")
+    if invalid_cite_indices:
+        # Build a list of (cite_idx, start, end) for every [N] span.
+        # _extract_citations emits one entry per [N] marker in document order,
+        # which is exactly the same order as _CITE_RE.finditer — so cite_idx
+        # aligns 1-to-1 with the regex match sequence.
+        all_spans: list[tuple[int, int, int]] = [
+            (i, m.start(), m.end()) for i, m in enumerate(matches)
+        ]
+
+        # Remove spans in reverse order to preserve indices
+        cleaned_chars = list(answer)
+        for cite_idx, start, end in reversed(all_spans):
+            if cite_idx in invalid_cite_indices:
+                del cleaned_chars[start:end]
+        cleaned = "".join(cleaned_chars)
 
     # Collapse any leftover double-spaces from removed markers.
     cleaned = re.sub(r"  +", " ", cleaned)

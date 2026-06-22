@@ -2,15 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
 
+from exo.guardrail._helpers import _extract_latest_user_message
 from exo.guardrail.llm_backend import (
     LLMGuardrailBackend,
-    _extract_latest_user_message,
     _parse_llm_response,
 )
 from exo.guardrail.types import (
@@ -117,7 +118,6 @@ class TestConstructor:
 
 
 class TestAnalyzeSafe:
-    @pytest.mark.asyncio
     async def test_safe_input_returns_safe(self) -> None:
         provider = _mock_provider(content=_safe_json())
         backend = LLMGuardrailBackend(provider=provider)
@@ -127,7 +127,6 @@ class TestAnalyzeSafe:
         assert result.has_risk is False
         assert result.risk_level == RiskLevel.SAFE
 
-    @pytest.mark.asyncio
     async def test_empty_messages_returns_safe(self) -> None:
         provider = _mock_provider()
         backend = LLMGuardrailBackend(provider=provider)
@@ -139,7 +138,6 @@ class TestAnalyzeSafe:
         # Provider should NOT be called when there's no user message.
         provider.complete.assert_not_called()
 
-    @pytest.mark.asyncio
     async def test_no_messages_key_returns_safe(self) -> None:
         provider = _mock_provider()
         backend = LLMGuardrailBackend(provider=provider)
@@ -156,7 +154,6 @@ class TestAnalyzeSafe:
 
 
 class TestAnalyzeRisky:
-    @pytest.mark.asyncio
     async def test_high_risk_detection(self) -> None:
         provider = _mock_provider(content=_risky_json("high", "prompt_injection", 0.95))
         backend = LLMGuardrailBackend(provider=provider)
@@ -169,7 +166,6 @@ class TestAnalyzeRisky:
         assert result.confidence == pytest.approx(0.95)
         assert "reasoning" in result.details
 
-    @pytest.mark.asyncio
     async def test_critical_risk_detection(self) -> None:
         provider = _mock_provider(content=_risky_json("critical", "jailbreak", 0.99))
         backend = LLMGuardrailBackend(provider=provider)
@@ -180,7 +176,6 @@ class TestAnalyzeRisky:
         assert result.risk_level == RiskLevel.CRITICAL
         assert result.risk_type == "jailbreak"
 
-    @pytest.mark.asyncio
     async def test_medium_risk_detection(self) -> None:
         provider = _mock_provider(content=_risky_json("medium", "pii_leak", 0.7))
         backend = LLMGuardrailBackend(provider=provider)
@@ -191,7 +186,6 @@ class TestAnalyzeRisky:
         assert result.risk_level == RiskLevel.MEDIUM
         assert result.risk_type == "pii_leak"
 
-    @pytest.mark.asyncio
     async def test_low_risk_detection(self) -> None:
         provider = _mock_provider(content=_risky_json("low", "harmful_content", 0.4))
         backend = LLMGuardrailBackend(provider=provider)
@@ -208,7 +202,6 @@ class TestAnalyzeRisky:
 
 
 class TestAnalyzeCallDetails:
-    @pytest.mark.asyncio
     async def test_provider_called_with_user_message(self) -> None:
         provider = _mock_provider(content=_safe_json())
         backend = LLMGuardrailBackend(provider=provider)
@@ -222,7 +215,6 @@ class TestAnalyzeCallDetails:
         assert messages[0].role == "user"
         assert "Test message" in messages[0].content
 
-    @pytest.mark.asyncio
     async def test_temperature_set_to_zero(self) -> None:
         provider = _mock_provider(content=_safe_json())
         backend = LLMGuardrailBackend(provider=provider)
@@ -232,7 +224,6 @@ class TestAnalyzeCallDetails:
         call_kwargs = provider.complete.call_args[1]
         assert call_kwargs["temperature"] == 0.0
 
-    @pytest.mark.asyncio
     async def test_custom_prompt_template_used(self) -> None:
         tpl = "Check this: {user_message} — is it safe?"
         provider = _mock_provider(content=_safe_json())
@@ -250,7 +241,6 @@ class TestAnalyzeCallDetails:
 
 
 class TestAnalyzeErrorHandling:
-    @pytest.mark.asyncio
     async def test_provider_exception_fail_closed_by_default(self) -> None:
         """Default (fail_open=False): LLM failure returns HIGH risk to block traffic."""
         provider = AsyncMock()
@@ -264,7 +254,6 @@ class TestAnalyzeErrorHandling:
         assert result.risk_type == "backend_failure"
         assert "error" in result.details
 
-    @pytest.mark.asyncio
     async def test_provider_exception_fail_open_returns_safe(self) -> None:
         """fail_open=True: LLM failure falls back to SAFE (original behaviour)."""
         provider = AsyncMock()
@@ -276,27 +265,87 @@ class TestAnalyzeErrorHandling:
         assert result.has_risk is False
         assert result.risk_level == RiskLevel.SAFE
 
-    @pytest.mark.asyncio
     async def test_malformed_json_fail_closed_by_default(self) -> None:
-        """Default (fail_open=False): unparseable LLM response blocks traffic."""
+        """SECURITY: Default (fail_open=False) + unparseable LLM response → HIGH risk.
+
+        A garbled/truncated LLM judge response must BLOCK traffic, not allow it.
+        The old behaviour (return SAFE) was a fail-open security hole.
+        """
         provider = _mock_provider(content="I cannot analyze this properly")
         backend = LLMGuardrailBackend(provider=provider)
 
-        # _parse_llm_response returns SAFE on bad JSON (internal parse failure).
-        # The outer try/except in analyze() only catches provider-level exceptions,
-        # not JSON parse failures — those are handled inside _parse_llm_response which
-        # returns SAFE directly. This test confirms that path.
+        result = await backend.analyze(_data("Test input"))
+
+        assert result.has_risk is True
+        assert result.risk_level == RiskLevel.HIGH
+        assert result.risk_type == "parse_failure"
+
+    async def test_malformed_json_fail_open_returns_safe(self) -> None:
+        """fail_open=True: JSON parse failure falls back to SAFE (opt-in availability mode)."""
+        provider = _mock_provider(content="I cannot analyze this properly")
+        backend = LLMGuardrailBackend(provider=provider, fail_open=True)
+
         result = await backend.analyze(_data("Test input"))
 
         assert result.has_risk is False
         assert result.risk_level == RiskLevel.SAFE
 
-    @pytest.mark.asyncio
-    async def test_malformed_json_fail_open_also_safe(self) -> None:
-        """fail_open=True does not change behaviour for JSON parse failures
-        (those are handled inside _parse_llm_response, not the outer except)."""
-        provider = _mock_provider(content="I cannot analyze this properly")
-        backend = LLMGuardrailBackend(provider=provider, fail_open=True)
+    async def test_unknown_risk_level_fail_closed_blocks(self) -> None:
+        """SECURITY: unrecognised risk_level in response → HIGH risk (fail-safe)."""
+        payload = json.dumps({"has_risk": True, "risk_level": "unknown_level"})
+        provider = _mock_provider(content=payload)
+        backend = LLMGuardrailBackend(provider=provider)
+
+        result = await backend.analyze(_data("Test input"))
+
+        assert result.has_risk is True
+        assert result.risk_level == RiskLevel.HIGH
+
+    async def test_contradictory_has_risk_false_with_non_safe_level(self) -> None:
+        """SECURITY: has_risk=false with risk_level=critical must still block.
+
+        An adversarial or glitched response that sets has_risk=false while
+        reporting a non-SAFE risk_level should be treated as risky.
+        """
+        payload = json.dumps({"has_risk": False, "risk_level": "critical"})
+        provider = _mock_provider(content=payload)
+        backend = LLMGuardrailBackend(provider=provider)
+
+        result = await backend.analyze(_data("Test input"))
+
+        assert result.has_risk is True
+        assert result.risk_level == RiskLevel.CRITICAL
+
+    async def test_timeout_fail_closed(self) -> None:
+        """SECURITY: LLM call timeout → HIGH risk (fail-closed by default).
+
+        Uses a real asyncio sleep so asyncio.wait_for actually fires the
+        TimeoutError through the normal cancellation path (not just an
+        immediate side_effect that bypasses wait_for).
+        """
+
+        async def _slow_complete(*_args: Any, **_kwargs: Any) -> None:
+            await asyncio.sleep(10)  # far longer than the 0.001 s timeout
+
+        provider = AsyncMock()
+        provider.complete = AsyncMock(side_effect=_slow_complete)
+        backend = LLMGuardrailBackend(provider=provider, timeout=0.001)
+
+        result = await backend.analyze(_data("Test input"))
+
+        assert result.has_risk is True
+        assert result.risk_level == RiskLevel.HIGH
+        assert result.risk_type == "backend_failure"
+
+    async def test_timeout_fail_open_returns_safe(self) -> None:
+        """fail_open=True: LLM call timeout falls back to SAFE."""
+
+        async def _slow_complete(*_args: Any, **_kwargs: Any) -> None:
+            await asyncio.sleep(10)
+
+        provider = AsyncMock()
+        provider.complete = AsyncMock(side_effect=_slow_complete)
+        backend = LLMGuardrailBackend(provider=provider, fail_open=True, timeout=0.001)
 
         result = await backend.analyze(_data("Test input"))
 
@@ -334,20 +383,34 @@ class TestParseLLMResponse:
         assert result.has_risk is False
         assert result.risk_level == RiskLevel.SAFE
 
-    def test_invalid_json_returns_safe(self) -> None:
+    def test_invalid_json_returns_high_fail_safe(self) -> None:
+        """SECURITY: malformed JSON must fail SAFE (return HIGH, not SAFE).
+
+        Returning SAFE on a garbled LLM judge response would allow an attacker
+        to bypass the guardrail by making the model produce garbage output.
+        """
         result = _parse_llm_response("not valid json at all")
-        assert result.has_risk is False
-        assert result.risk_level == RiskLevel.SAFE
+        assert result.has_risk is True
+        assert result.risk_level == RiskLevel.HIGH
+        assert result.risk_type == "parse_failure"
 
-    def test_empty_string_returns_safe(self) -> None:
+    def test_empty_string_returns_high_fail_safe(self) -> None:
+        """SECURITY: empty response must fail SAFE (HIGH risk), not SAFE."""
         result = _parse_llm_response("")
-        assert result.has_risk is False
-        assert result.risk_level == RiskLevel.SAFE
+        assert result.has_risk is True
+        assert result.risk_level == RiskLevel.HIGH
+        assert result.risk_type == "parse_failure"
 
-    def test_invalid_risk_level_defaults_to_safe(self) -> None:
+    def test_invalid_risk_level_defaults_to_high(self) -> None:
+        """SECURITY: unrecognised risk_level string must fail SAFE (HIGH risk).
+
+        The old behaviour (fallback to SAFE) was a security hole — a
+        hallucinated or adversarially injected risk label could bypass
+        the guardrail entirely.
+        """
         payload = json.dumps({"has_risk": True, "risk_level": "extreme"})
         result = _parse_llm_response(payload)
-        assert result.risk_level == RiskLevel.SAFE
+        assert result.risk_level == RiskLevel.HIGH
 
     def test_confidence_clamped_to_range(self) -> None:
         payload = json.dumps(
@@ -413,10 +476,12 @@ class TestParseLLMResponse:
         result = _parse_llm_response(payload)
         assert result.risk_type is None
 
-    def test_json_array_returns_safe(self) -> None:
+    def test_json_array_returns_high_fail_safe(self) -> None:
+        """SECURITY: non-dict JSON must fail SAFE (HIGH risk), not SAFE."""
         result = _parse_llm_response("[1, 2, 3]")
-        assert result.has_risk is False
-        assert result.risk_level == RiskLevel.SAFE
+        assert result.has_risk is True
+        assert result.risk_level == RiskLevel.HIGH
+        assert result.risk_type == "parse_failure"
 
 
 # ---------------------------------------------------------------------------

@@ -315,7 +315,7 @@ _BREADTH_ANGLES = [
 _MAX_ANGLES = 5
 
 # Minimum iterations each worker needs to be useful per mode.
-_ITERS_PER_WORKER = {"speed": 1, "balanced": 2, "quality": 3}
+_ITERS_PER_WORKER = {"speed": 1, "balanced": 2, "quality": 3, "deep": 5}
 
 
 def _derive_research_angles(query: str) -> list[str]:
@@ -425,7 +425,12 @@ async def parallel_research(
     # Log failures but don't abort — partial results are still valuable
     for i, result in enumerate(results):
         if isinstance(result, Exception):
-            _log.warning("sub-researcher '%s' failed: %s", active_angles[i], result)
+            _log.warning(
+                "sub-researcher '%s' (model=%s) failed: %s",
+                active_angles[i],
+                research_model,
+                result,
+            )
 
     # Collect and deduplicate from the shared collector
     raw_results = get_collected_results()

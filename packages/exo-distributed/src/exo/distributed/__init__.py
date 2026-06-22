@@ -38,16 +38,22 @@ from exo.distributed.models import (  # pyright: ignore[reportMissingImports]
 from exo.distributed.store import TaskStore  # pyright: ignore[reportMissingImports]
 from exo.distributed.temporal import (  # pyright: ignore[reportMissingImports]
     HAS_TEMPORAL,
+    ConnectionConfig,
+    RetryConfig,
     TemporalExecutor,
+    TimeoutConfig,
+    WorkerTuningConfig,
 )
 from exo.distributed.worker import Worker  # pyright: ignore[reportMissingImports]
 
 __all__: list[str] = [
     "HAS_TEMPORAL",
     "CancellationToken",
+    "ConnectionConfig",
     "EventPublisher",
     "EventSubscriber",
     "RedisConfig",
+    "RetryConfig",
     "TaskBroker",
     "TaskHandle",
     "TaskPayload",
@@ -55,9 +61,11 @@ __all__: list[str] = [
     "TaskStatus",
     "TaskStore",
     "TemporalExecutor",
+    "TimeoutConfig",
     "Worker",
     "WorkerHealth",
     "WorkerHealthCheck",
+    "WorkerTuningConfig",
     "distributed",
     "get_worker_fleet_status",
     "record_queue_depth",

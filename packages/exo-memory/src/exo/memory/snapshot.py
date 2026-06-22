@@ -58,8 +58,11 @@ def snapshot_id(agent_name: str, conversation_id: str) -> str:
     """Build the deterministic ID for a snapshot.
 
     Only one active snapshot per (agent, conversation) pair.
+    The separator ``::`` is chosen because it cannot appear in valid
+    agent names or UUID-based conversation IDs, preventing collisions
+    between ``("a_b", "c")`` and ``("a", "b_c")``.
     """
-    return f"{_SNAPSHOT_ID_PREFIX}{agent_name}_{conversation_id}"
+    return f"{_SNAPSHOT_ID_PREFIX}{agent_name}::{conversation_id}"
 
 
 # ---------------------------------------------------------------------------

@@ -9,6 +9,7 @@ from rich.console import Console
 from rich.json import JSON as RichJSON  # noqa: N811
 from rich.table import Table
 
+from exo._internal.errors import unwrap_exception_group  # pyright: ignore[reportMissingImports]
 from exo_mcp_cli.config import ServerEntry
 
 console = Console()
@@ -17,6 +18,15 @@ console = Console()
 # ---------------------------------------------------------------------------
 # Error / success helpers
 # ---------------------------------------------------------------------------
+
+
+def _render_exc(exc: BaseException) -> str:
+    """Unwrap a single-child ExceptionGroup and return a clean string.
+
+    Prevents raw ExceptionGroup repr leaking into user-facing error messages
+    when asyncio task machinery wraps a lone failure in a group.
+    """
+    return str(unwrap_exception_group(exc))
 
 
 def print_error(message: str) -> None:

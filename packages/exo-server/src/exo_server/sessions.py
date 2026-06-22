@@ -36,7 +36,14 @@ class SessionMessage(BaseModel):
 
 
 class Session(BaseModel):
-    """A chat session grouping a conversation with an agent."""
+    """A chat session grouping a conversation with an agent.
+
+    ``Session`` is intentionally mutable (no ``frozen=True``) so that
+    endpoints can update ``title``, ``agent_name``, ``updated_at``, and
+    ``messages`` in place using normal attribute assignment.  Every mutation
+    goes through the route handlers in this module; the model is never
+    shared across threads so there is no concurrency hazard.
+    """
 
     id: str = Field(default_factory=lambda: uuid.uuid4().hex[:16])
     agent_name: str = ""
@@ -92,6 +99,23 @@ class SessionSummary(BaseModel):
 
 _SESSIONS_KEY = "exo_sessions"
 
+#: Monotonically incrementing counter used to give distinct ``created_at``
+#: / ``updated_at`` values even on fast CI where ``time.time()`` resolution
+#: is coarse.  Only used internally by ``_now()``.
+_tick: int = 0
+
+
+def _now() -> float:
+    """Return a strictly increasing timestamp.
+
+    Combines ``time.time()`` with a monotonic tiebreaker so that two
+    sessions created in the same clock tick still have distinct
+    ``created_at`` values and the "newest first" sort is deterministic.
+    """
+    global _tick
+    _tick += 1
+    return time.time() + _tick * 1e-9
+
 
 def _get_store(state: Any) -> dict[str, Session]:
     """Retrieve the sessions dict from app state."""
@@ -114,7 +138,8 @@ session_router = APIRouter(prefix="/sessions", tags=["sessions"])
 async def create_session(req: Request, body: CreateSessionRequest) -> Any:
     """Create a new chat session."""
     store = _get_store(req.app.state)
-    session = Session(agent_name=body.agent_name, title=body.title)
+    now = _now()
+    session = Session(agent_name=body.agent_name, title=body.title, created_at=now, updated_at=now)
     store[session.id] = session
     _set_store(req.app.state, store)
     return session
@@ -159,7 +184,7 @@ async def update_session(req: Request, session_id: str, body: UpdateSessionReque
         session.title = body.title
     if body.agent_name is not None:
         session.agent_name = body.agent_name
-    session.updated_at = time.time()
+    session.updated_at = _now()
     return session
 
 
@@ -181,7 +206,7 @@ async def append_message(req: Request, session_id: str, body: AppendMessageReque
         raise HTTPException(status_code=404, detail=f"Session '{session_id}' not found")
     msg = SessionMessage(role=body.role, content=body.content)
     session.messages.append(msg)
-    session.updated_at = time.time()
+    session.updated_at = _now()
     return msg
 
 

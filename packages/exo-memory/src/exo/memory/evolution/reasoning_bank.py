@@ -47,7 +47,7 @@ class ReasoningEntry:
 
 def _cosine_similarity(a: list[float], b: list[float]) -> float:
     """Compute cosine similarity between two vectors."""
-    dot = sum(x * y for x, y in zip(a, b))
+    dot = sum(x * y for x, y in zip(a, b, strict=False))
     norm_a = math.sqrt(sum(x * x for x in a))
     norm_b = math.sqrt(sum(x * x for x in b))
     if norm_a == 0.0 or norm_b == 0.0:
@@ -132,7 +132,10 @@ class ReasoningBankStrategy(MemoryEvolutionStrategy):
         self._embeddings = embeddings
         self._similarity_threshold = similarity_threshold
         self._entries: list[ReasoningEntry] = []
+        # Text-content → vector cache (shared across evolve() calls)
         self._vector_cache: dict[str, list[float]] = {}
+        # item_id → entry-text cache to avoid recomputing _entry_text() per call
+        self._item_text_cache: dict[str, str] = {}
 
     # -- internals ----------------------------------------------------------
 
@@ -186,11 +189,18 @@ class ReasoningBankStrategy(MemoryEvolutionStrategy):
         for i in range(len(entries)):
             if not keep[i]:
                 continue
-            text_i = _entry_text(entries[i])
+            # Cache entry text by item_id to avoid recomputing across evolve() calls.
+            item_id_i = entries[i].item_id
+            if item_id_i not in self._item_text_cache:
+                self._item_text_cache[item_id_i] = _entry_text(entries[i])
+            text_i = self._item_text_cache[item_id_i]
             for j in range(i + 1, len(entries)):
                 if not keep[j]:
                     continue
-                text_j = _entry_text(entries[j])
+                item_id_j = entries[j].item_id
+                if item_id_j not in self._item_text_cache:
+                    self._item_text_cache[item_id_j] = _entry_text(entries[j])
+                text_j = self._item_text_cache[item_id_j]
                 sim = await self._similarity(text_i, text_j)
                 if sim >= self._similarity_threshold:
                     # Keep the longer / more detailed entry

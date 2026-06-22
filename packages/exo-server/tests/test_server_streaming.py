@@ -262,16 +262,13 @@ class TestSSEStream:
         assert "data: [DONE]" in resp.text
 
     async def test_stream_no_agent(self) -> None:
+        """GET /stream with no agents registered must return 404, not 200 with an error body."""
         app = create_app()
 
         async with _build_client(app) as client:
             resp = await client.get("/stream", params={"message": "hi"})
 
-        assert resp.status_code == 200
-        assert "text/event-stream" in resp.headers["content-type"]
-        lines = [ln for ln in resp.text.strip().split("\n") if ln.startswith("data:")]
-        error = json.loads(lines[0].removeprefix("data: "))
-        assert error["type"] == "error"
+        assert resp.status_code == 404
 
     async def test_stream_with_agent_name(self) -> None:
         app = create_app()

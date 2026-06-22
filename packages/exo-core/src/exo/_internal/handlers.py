@@ -11,7 +11,8 @@ from __future__ import annotations
 import abc
 import asyncio
 import json
-from collections.abc import AsyncIterator, Sequence
+from collections import deque
+from collections.abc import AsyncGenerator, AsyncIterator, Sequence
 from enum import StrEnum
 from typing import Any, Generic, TypeVar
 
@@ -90,7 +91,7 @@ class AgentHandler(Handler[str, RunResult]):
         self.provider = provider
         self.max_handoffs = max_handoffs
 
-    async def handle(self, input: str, **kwargs: Any) -> AsyncIterator[RunResult]:
+    async def handle(self, input: str, **kwargs: Any) -> AsyncGenerator[RunResult, None]:
         """Execute agents according to the swarm topology.
 
         For workflow mode, runs agents in flow_order sequentially.
@@ -120,7 +121,7 @@ class AgentHandler(Handler[str, RunResult]):
 
     async def _run_workflow(
         self, input: str, messages: list[Message], state: RunState
-    ) -> AsyncIterator[RunResult]:
+    ) -> AsyncGenerator[RunResult, None]:
         """Execute agents sequentially in flow order.
 
         Output of each agent becomes input for the next.
@@ -139,7 +140,7 @@ class AgentHandler(Handler[str, RunResult]):
 
     async def _run_handoff(
         self, input: str, messages: list[Message], state: RunState
-    ) -> AsyncIterator[RunResult]:
+    ) -> AsyncGenerator[RunResult, None]:
         """Execute agents following handoff chains.
 
         Starts with the first agent; if the agent's output references
@@ -174,7 +175,7 @@ class AgentHandler(Handler[str, RunResult]):
 
     async def _run_team(
         self, input: str, messages: list[Message], state: RunState
-    ) -> AsyncIterator[RunResult]:
+    ) -> AsyncGenerator[RunResult, None]:
         """Execute team mode: lead agent delegates to workers.
 
         The first agent in flow_order is the lead.  Workers are
@@ -330,7 +331,7 @@ class ToolHandler(Handler[dict[str, Any], ToolResult]):
                     tool_name=tool_name,
                     content=content,
                 )
-            except (ToolError, Exception) as exc:
+            except Exception as exc:
                 results[idx] = ToolResult(
                     tool_call_id=call_id,
                     tool_name=tool_name,
@@ -386,7 +387,7 @@ class GroupHandler(Handler[str, RunResult]):
         self.parallel = parallel
         self.dependencies = dependencies or {}
 
-    async def handle(self, input: str, **kwargs: Any) -> AsyncIterator[RunResult]:
+    async def handle(self, input: str, **kwargs: Any) -> AsyncGenerator[RunResult, None]:
         """Execute agent group in parallel or serial mode.
 
         Args:
@@ -405,7 +406,9 @@ class GroupHandler(Handler[str, RunResult]):
             async for result in self._run_serial(input, messages):
                 yield result
 
-    async def _run_parallel(self, input: str, messages: list[Message]) -> AsyncIterator[RunResult]:
+    async def _run_parallel(
+        self, input: str, messages: list[Message]
+    ) -> AsyncGenerator[RunResult, None]:
         """Run all agents concurrently via asyncio.TaskGroup.
 
         All agents receive the same input.  Results are yielded
@@ -437,7 +440,9 @@ class GroupHandler(Handler[str, RunResult]):
         for result in results:
             yield result
 
-    async def _run_serial(self, input: str, messages: list[Message]) -> AsyncIterator[RunResult]:
+    async def _run_serial(
+        self, input: str, messages: list[Message]
+    ) -> AsyncGenerator[RunResult, None]:
         """Run agents in dependency-resolved order with output chaining.
 
         Uses topological sort on the dependency graph to determine
@@ -490,20 +495,23 @@ class GroupHandler(Handler[str, RunResult]):
                     successors[dep].append(name)
                     in_degree[name] += 1
 
-        # Kahn's algorithm
-        queue = [name for name in all_names if in_degree[name] == 0]
+        # Kahn's algorithm — use a sorted deque for O(n log n) overall instead
+        # of O(n²) from list.sort() + list.pop(0) on each iteration.
+        ready = deque(sorted(name for name in all_names if in_degree[name] == 0))
         order: list[str] = []
 
-        while queue:
-            # Sort for deterministic ordering
-            queue.sort()
-            current = queue.pop(0)
+        while ready:
+            current = ready.popleft()
             order.append(current)
 
+            new_ready: list[str] = []
             for succ in successors[current]:
                 in_degree[succ] -= 1
                 if in_degree[succ] == 0:
-                    queue.append(succ)
+                    new_ready.append(succ)
+            # Keep deterministic ordering: insert new ready nodes sorted
+            for name in sorted(new_ready):
+                ready.append(name)
 
         if len(order) != len(all_names):
             raise HandlerError("Dependency cycle detected in group")

@@ -96,9 +96,12 @@ class ContextConfig(BaseModel):
             # New alias: section_names → neuron_names (if only section_names given)
             if "section_names" in data and "neuron_names" not in data:
                 data["neuron_names"] = data.pop("section_names")
-            elif "section_names" in data:
-                # Both provided — prefer section_names, discard duplicate
-                data["neuron_names"] = data.pop("section_names")
+            elif "section_names" in data and "neuron_names" in data:
+                # Both provided — raise so the caller knows they duplicated the argument.
+                raise ValueError(
+                    "Conflicting arguments: pass either 'section_names' or 'neuron_names', "
+                    "not both. 'section_names' is the preferred new name."
+                )
             # Coerce list → tuple
             if "neuron_names" in data:
                 val = data["neuron_names"]

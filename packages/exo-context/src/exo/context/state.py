@@ -12,6 +12,12 @@ from __future__ import annotations
 from collections.abc import Iterator
 from typing import Any
 
+from exo.types import ExoError  # pyright: ignore[reportMissingImports]
+
+
+class ContextStateKeyError(ExoError):
+    """Raised when a key is missing from :class:`ContextState`."""
+
 
 class ContextState:
     """Hierarchical key-value state with parent chain lookup.
@@ -46,7 +52,10 @@ class ContextState:
             return self._data[key]
         if self._parent is not None:
             return self._parent[key]
-        raise KeyError(key)
+        raise ContextStateKeyError(
+            f"Key {key!r} not found in context state.",
+            hint="Use .get(key) to return a default instead of raising, or check 'key in state' first.",
+        )
 
     def __contains__(self, key: object) -> bool:
         if key in self._data:

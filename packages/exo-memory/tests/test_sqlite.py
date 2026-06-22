@@ -15,6 +15,7 @@ from exo.memory.backends.sqlite import (  # noqa: E402  # pyright: ignore[report
 )
 from exo.memory.base import (  # noqa: E402  # pyright: ignore[reportMissingImports]
     AIMemory,
+    ExoMemoryError,
     HumanMemory,
     MemoryItem,
     MemoryMetadata,
@@ -77,7 +78,7 @@ class TestLifecycle:
 
     async def test_operations_before_init_raise(self) -> None:
         store = SQLiteMemoryStore(":memory:")
-        with pytest.raises(RuntimeError, match="not initialized"):
+        with pytest.raises(ExoMemoryError, match="not initialized"):
             await store.add(HumanMemory(content="hello"))
 
     def test_repr(self) -> None:
@@ -399,3 +400,66 @@ class TestDefaultPath:
         monkeypatch.setenv("EXO_MEMORY_PATH", "/tmp/should_not_use.db")
         store = SQLiteMemoryStore(":memory:")
         assert store.db_path == ":memory:"
+
+
+# ---------------------------------------------------------------------------
+# Error boundary — ExoMemoryError taxonomy
+# ---------------------------------------------------------------------------
+
+
+class TestErrorBoundary:
+    """Backend failures must surface as ExoMemoryError, not raw library exceptions."""
+
+    async def test_not_initialized_raises_exo_memory_error(self) -> None:
+        """_ensure_init() must raise ExoMemoryError (not RuntimeError)."""
+        store = SQLiteMemoryStore(":memory:")
+        with pytest.raises(ExoMemoryError, match="not initialized"):
+            await store.add(HumanMemory(content="never persisted"))
+
+    async def test_not_initialized_error_has_hint(self) -> None:
+        """The ExoMemoryError from _ensure_init() must carry an actionable hint."""
+        store = SQLiteMemoryStore(":memory:")
+        try:
+            await store.add(HumanMemory(content="trigger"))
+        except ExoMemoryError as exc:
+            assert exc.hint is not None, "ExoMemoryError from _ensure_init() must have a hint"
+            assert "init()" in exc.hint or "async with" in exc.hint
+        else:
+            pytest.fail("Expected ExoMemoryError")
+
+    async def test_add_failure_raises_exo_memory_error(self, store: SQLiteMemoryStore) -> None:
+        """DB-level failure during add() must raise ExoMemoryError with context."""
+        from unittest.mock import AsyncMock, patch
+
+        broken_db = AsyncMock()
+        broken_db.execute = AsyncMock(side_effect=Exception("disk I/O error"))
+
+        with patch.object(store, "_db", broken_db), pytest.raises(ExoMemoryError) as exc_info:
+            await store.add(HumanMemory(content="oops"))
+
+        err = exc_info.value
+        assert err.hint is not None, "ExoMemoryError from add() must have a hint"
+        assert "disk space" in err.hint or "permissions" in err.hint
+        # Original cause must be chained
+        assert err.__cause__ is not None
+
+    async def test_search_failure_raises_exo_memory_error(self, store: SQLiteMemoryStore) -> None:
+        """DB-level failure during search() must raise ExoMemoryError with context."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        # search() now uses `async with db.execute(...) as cursor:`.
+        # We need a mock whose __aenter__ raises so the exception propagates.
+        error = Exception("schema mismatch")
+        ctx_mock = MagicMock()
+        ctx_mock.__aenter__ = AsyncMock(side_effect=error)
+        ctx_mock.__aexit__ = AsyncMock(return_value=False)
+
+        broken_db = MagicMock()
+        broken_db.execute = MagicMock(return_value=ctx_mock)
+
+        with patch.object(store, "_db", broken_db), pytest.raises(ExoMemoryError) as exc_info:
+            await store.search(query="anything")
+
+        err = exc_info.value
+        assert err.__cause__ is not None
+        assert "schema mismatch" in str(err.__cause__)

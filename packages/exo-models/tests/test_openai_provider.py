@@ -20,7 +20,9 @@ from exo.models.provider import model_registry  # pyright: ignore[reportMissingI
 from exo.models.types import ModelError  # pyright: ignore[reportMissingImports]
 from exo.types import (  # pyright: ignore[reportMissingImports]
     AssistantMessage,
+    ImageDataBlock,
     SystemMessage,
+    TextBlock,
     ToolCall,
     ToolResult,
     UserMessage,
@@ -414,3 +416,68 @@ class TestOpenAIRegistration:
         provider = get_provider("openai:gpt-4o", api_key="test-key")
         assert isinstance(provider, OpenAIProvider)
         assert provider.config.model_name == "gpt-4o"
+
+
+# ---------------------------------------------------------------------------
+# ToolResult text extraction from list content (finding #6)
+# ---------------------------------------------------------------------------
+
+
+class TestToolResultTextExtraction:
+    def test_text_block_content_extracted(self) -> None:
+        """ToolResult with only TextBlocks must use the text, not '[media result]'."""
+        result = _to_openai_messages(
+            [
+                ToolResult(
+                    tool_call_id="tc1",
+                    tool_name="search",
+                    content=[TextBlock(text="the answer")],
+                )
+            ]
+        )
+        tool_msg = result[0]
+        assert tool_msg["role"] == "tool"
+        assert tool_msg["content"] == "the answer"
+        # No synthetic user message when no non-text media blocks
+        assert len(result) == 1
+
+    def test_multiple_text_blocks_joined(self) -> None:
+        result = _to_openai_messages(
+            [
+                ToolResult(
+                    tool_call_id="tc1",
+                    tool_name="search",
+                    content=[TextBlock(text="part one"), TextBlock(text="part two")],
+                )
+            ]
+        )
+        assert result[0]["content"] == "part one part two"
+
+    def test_media_only_content_uses_placeholder(self) -> None:
+        """No TextBlocks at all → fall back to '[media result]'."""
+        result = _to_openai_messages(
+            [
+                ToolResult(
+                    tool_call_id="tc1",
+                    tool_name="search",
+                    content=[ImageDataBlock(data="abc", media_type="image/png")],
+                )
+            ]
+        )
+        assert result[0]["content"] == "[media result]"
+        # Synthetic user message with the image parts
+        assert result[1]["role"] == "user"
+
+    def test_error_overrides_text_blocks(self) -> None:
+        """Error string takes precedence even when TextBlocks are present."""
+        result = _to_openai_messages(
+            [
+                ToolResult(
+                    tool_call_id="tc1",
+                    tool_name="search",
+                    content=[TextBlock(text="ignored")],
+                    error="something went wrong",
+                )
+            ]
+        )
+        assert result[0]["content"] == "something went wrong"

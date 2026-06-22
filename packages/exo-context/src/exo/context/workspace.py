@@ -7,6 +7,7 @@ with revert, and an observer callback pattern for create/update/delete events.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import shutil
@@ -140,8 +141,10 @@ class Workspace:
         knowledge_store: Any | None = None,
     ) -> None:
         if not workspace_id:
-            msg = "workspace_id is required and must be non-empty"
-            raise WorkspaceError(msg)
+            raise WorkspaceError(
+                "workspace_id is required and must be non-empty.",
+                hint="Pass a non-empty string as workspace_id, e.g. Workspace('my-workspace').",
+            )
         self._workspace_id = workspace_id
         self._storage_path = Path(storage_path) if storage_path else None
         self._artifacts: dict[str, Artifact] = {}
@@ -202,13 +205,15 @@ class Workspace:
         Persists to filesystem if *storage_path* is set.
         """
         if not name:
-            msg = "artifact name is required"
-            raise WorkspaceError(msg)
+            raise WorkspaceError(
+                "artifact name is required.",
+                hint="Pass a non-empty string as the artifact name, e.g. ws.write('report.md', content).",
+            )
 
         existing = self._artifacts.get(name)
         if existing is not None:
             existing._add_version(content)
-            self._persist(existing)
+            await asyncio.to_thread(self._persist, existing)
             self._index_artifact(existing)
             logger.debug("Artifact stored: id=%s size=%d bytes", name, len(content))
             await self._notify("on_update", existing)
@@ -216,7 +221,7 @@ class Workspace:
 
         artifact = Artifact(name, content, artifact_type)
         self._artifacts[name] = artifact
-        self._persist(artifact)
+        await asyncio.to_thread(self._persist, artifact)
         self._index_artifact(artifact)
         logger.debug("Artifact stored: id=%s size=%d bytes", name, len(content))
         await self._notify("on_create", artifact)
@@ -245,7 +250,7 @@ class Workspace:
         artifact = self._artifacts.pop(name, None)
         if artifact is None:
             return False
-        self._remove_persisted(artifact)
+        await asyncio.to_thread(self._remove_persisted, artifact)
         self._deindex_artifact(artifact)
         logger.debug("deleted artifact %r", name)
         await self._notify("on_delete", artifact)
@@ -258,10 +263,12 @@ class Workspace:
         artifact = self._artifacts.get(name)
         return artifact.versions if artifact else []
 
-    def revert_to_version(self, name: str, version: int) -> Artifact:
+    async def revert_to_version(self, name: str, version: int) -> Artifact:
         """Revert an artifact to a previous version (0-indexed).
 
-        Creates a new version whose content matches the target version.
+        Creates a new version whose content matches the target version and
+        persists it asynchronously (same as :meth:`write`).  Fires ``on_update``.
+
         Raises :class:`WorkspaceError` if name or version is invalid.
         """
         artifact = self._artifacts.get(name)
@@ -274,8 +281,9 @@ class Workspace:
             raise WorkspaceError(msg)
         old_content = artifact.versions[version].content
         artifact._add_version(old_content)
-        self._persist(artifact)
+        await asyncio.to_thread(self._persist, artifact)
         logger.debug("reverted artifact %r to version %d", name, version)
+        await self._notify("on_update", artifact)
         return artifact
 
     # ── Knowledge store integration ────────────────────────────────
@@ -293,11 +301,23 @@ class Workspace:
     # ── Filesystem persistence ───────────────────────────────────────
 
     def _persist(self, artifact: Artifact) -> None:
-        """Write artifact content to filesystem if storage_path is set."""
+        """Write artifact content to filesystem if storage_path is set.
+
+        Uses an atomic write-temp-then-rename strategy so that a cancellation
+        or crash mid-write never leaves a corrupt/partial file.  Temp files are
+        cleaned up in a ``finally`` block, so cancellation cannot corrupt state.
+        """
         if self._storage_path is None:
             return
         # Validate artifact name to prevent path traversal
-        resolved = (self._storage_path / artifact.name).resolve()
+        try:
+            resolved = (self._storage_path / artifact.name).resolve()
+        except OSError as exc:
+            raise WorkspaceError(
+                f"Could not resolve path for artifact {artifact.name!r}.",
+                hint="Check that storage_path exists and contains no broken symlinks.",
+                context={"artifact": artifact.name, "storage_path": str(self._storage_path)},
+            ) from exc
         if not resolved.is_relative_to(self._storage_path.resolve()):
             logger.error(
                 "path traversal blocked in _persist: artifact name %r escapes storage_path",
@@ -307,21 +327,61 @@ class Workspace:
                 f"artifact name {artifact.name!r} resolves outside storage directory"
             )
         artifact_dir = resolved
-        artifact_dir.mkdir(parents=True, exist_ok=True)
-        (artifact_dir / "content").write_text(artifact.content, encoding="utf-8")
-        meta = {
-            "name": artifact.name,
-            "artifact_type": artifact.artifact_type.value,
-            "version_count": artifact.version_count,
-        }
-        (artifact_dir / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+        try:
+            artifact_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise WorkspaceError(
+                f"Could not create artifact directory for {artifact.name!r}.",
+                hint="Check disk space and that you have write permission on storage_path.",
+                context={"artifact": artifact.name, "path": str(artifact_dir)},
+            ) from exc
+
+        # Atomic write: write to temp files then rename so a mid-write cancel
+        # cannot leave partially-written content or meta files.
+        content_path = artifact_dir / "content"
+        meta_path = artifact_dir / "meta.json"
+        tmp_content = content_path.with_suffix(".tmp")
+        tmp_meta = meta_path.with_suffix(".tmp")
+        try:
+            try:
+                tmp_content.write_text(artifact.content, encoding="utf-8")
+                meta = {
+                    "name": artifact.name,
+                    "artifact_type": artifact.artifact_type.value,
+                    "version_count": artifact.version_count,
+                }
+                tmp_meta.write_text(json.dumps(meta), encoding="utf-8")
+            except OSError as exc:
+                raise WorkspaceError(
+                    f"Could not write artifact {artifact.name!r} to disk.",
+                    hint="Check disk space and permissions on storage_path.",
+                    context={"artifact": artifact.name, "path": str(artifact_dir)},
+                ) from exc
+            # Atomic rename — only reached if both writes succeeded
+            tmp_content.replace(content_path)
+            tmp_meta.replace(meta_path)
+        finally:
+            # Clean up temp files on any error or cancellation
+            for tmp in (tmp_content, tmp_meta):
+                try:
+                    if tmp.exists():
+                        tmp.unlink()
+                except OSError:
+                    pass
 
     def _remove_persisted(self, artifact: Artifact) -> None:
         """Remove artifact directory from filesystem if storage_path is set."""
         if self._storage_path is None:
             return
         # Validate artifact name to prevent path traversal
-        resolved = (self._storage_path / artifact.name).resolve()
+        try:
+            resolved = (self._storage_path / artifact.name).resolve()
+        except OSError as exc:
+            raise WorkspaceError(
+                f"Could not resolve path for artifact {artifact.name!r}.",
+                hint="Check that storage_path exists and contains no broken symlinks.",
+                context={"artifact": artifact.name, "storage_path": str(self._storage_path)},
+            ) from exc
         if not resolved.is_relative_to(self._storage_path.resolve()):
             logger.error(
                 "path traversal blocked in _remove_persisted: artifact name %r escapes storage_path",
@@ -331,7 +391,14 @@ class Workspace:
                 f"artifact name {artifact.name!r} resolves outside storage directory"
             )
         if resolved.exists():
-            shutil.rmtree(resolved)
+            try:
+                shutil.rmtree(resolved)
+            except OSError as exc:
+                raise WorkspaceError(
+                    f"Could not remove artifact directory for {artifact.name!r}.",
+                    hint="Check that you have write permission on storage_path.",
+                    context={"artifact": artifact.name, "path": str(resolved)},
+                ) from exc
 
     # ── Representation ───────────────────────────────────────────────
 

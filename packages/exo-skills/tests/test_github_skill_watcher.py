@@ -50,6 +50,23 @@ class TestGitHubPollingWatcher:
         with pytest.raises(SkillError, match="Invalid GitHub URL"):
             GitHubPollingWatcher("/not/a/github/url")
 
+    def test_invalid_url_has_hint(self) -> None:
+        """Invalid GitHub URL error should include the expected format as a hint."""
+        with pytest.raises(SkillError) as exc_info:
+            GitHubPollingWatcher("/not/a/github/url")
+        err = exc_info.value
+        assert err.hint is not None
+        assert "github.com" in err.hint
+
+    def test_invalid_url_has_context(self) -> None:
+        """Invalid GitHub URL error should include the bad URL in context."""
+        bad_url = "/not/a/github/url"
+        with pytest.raises(SkillError) as exc_info:
+            GitHubPollingWatcher(bad_url)
+        err = exc_info.value
+        assert err.context is not None
+        assert err.context.get("source_url") == bad_url
+
     def test_valid_url_parses(self) -> None:
         watcher = GitHubPollingWatcher(
             "https://github.com/acme/skills/tree/main/agents",
@@ -111,7 +128,7 @@ class TestGitHubPollingWatcher:
         with (
             patch("exo_skills.watchers.github._clone_github", return_value=clone_dir),
             patch(
-                "asyncio.create_subprocess_exec",
+                "exo_skills.watchers.github.asyncio.create_subprocess_exec",
                 side_effect=fake_subprocess,
             ),
         ):
@@ -147,7 +164,10 @@ class TestGitHubPollingWatcher:
 
         with (
             patch("exo_skills.watchers.github._clone_github", return_value=clone_dir),
-            patch("asyncio.create_subprocess_exec", side_effect=fake_subprocess),
+            patch(
+                "exo_skills.watchers.github.asyncio.create_subprocess_exec",
+                side_effect=fake_subprocess,
+            ),
         ):
             batches = []
             async for b in watcher.watch():
@@ -182,7 +202,10 @@ class TestGitHubPollingWatcher:
 
         with (
             patch("exo_skills.watchers.github._clone_github", return_value=clone_dir),
-            patch("asyncio.create_subprocess_exec", side_effect=fake_subprocess),
+            patch(
+                "exo_skills.watchers.github.asyncio.create_subprocess_exec",
+                side_effect=fake_subprocess,
+            ),
         ):
             batches = []
             async for b in watcher.watch():

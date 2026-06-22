@@ -158,42 +158,59 @@ class _GeminiEmbeddings(Embeddings):
 # ---------------------------------------------------------------------------
 
 
+# Lazily-built embedder singleton.  Rebuilt when env vars change (detected via a
+# cache key of the relevant env var values).
+_embedder_cache: tuple[tuple[str, ...], Embeddings | None] | None = None
+
+
 def _build_embedder() -> Embeddings | None:
     """Auto-detect embedding provider and return a canonical Embeddings instance.
 
     Returns ``None`` when no provider credentials are available.
+
+    The result is cached based on the relevant environment variables so that
+    ``rerank_search_results`` (called once per pipeline run) does not rebuild a
+    fresh provider object on every invocation.
     """
+    global _embedder_cache
+
     gemini_key = os.environ.get("GEMINI_API_KEY", "")
     gcp_project = os.environ.get("GOOGLE_CLOUD_PROJECT", "")
     gcp_token = os.environ.get("GOOGLE_CLOUD_ACCESS_TOKEN", "")
     openai_key = os.environ.get("OPENAI_API_KEY", "")
+    embedding_model = os.environ.get("EXO_SEARCH_EMBEDDING_MODEL", "")
+
+    cache_key = (gemini_key, gcp_project, gcp_token, openai_key, embedding_model)
+    if _embedder_cache is not None and _embedder_cache[0] == cache_key:
+        return _embedder_cache[1]
+
+    embedder: Embeddings | None = None
 
     if gemini_key:
-        model = os.environ.get("EXO_SEARCH_EMBEDDING_MODEL", _GEMINI_DEFAULT_MODEL)
+        model = embedding_model or _GEMINI_DEFAULT_MODEL
         logger.debug("embedding provider=gemini model=%s", model)
-        return _GeminiEmbeddings(api_key=gemini_key, model=model)
-
-    if gcp_project and gcp_token:
-        model = os.environ.get("EXO_SEARCH_EMBEDDING_MODEL", "text-embedding-005")
+        embedder = _GeminiEmbeddings(api_key=gemini_key, model=model)
+    elif gcp_project and gcp_token:
+        model = embedding_model or "text-embedding-005"
         location = os.environ.get("GOOGLE_CLOUD_LOCATION", "us-central1")
         logger.debug("embedding provider=vertex model=%s", model)
-        return VertexEmbeddings(
+        embedder = VertexEmbeddings(
             api_key=gcp_token,
             project=gcp_project,
             model=model,
             location=location,
         )
-
-    if openai_key:
-        model = os.environ.get("EXO_SEARCH_EMBEDDING_MODEL", _OPENAI_DEFAULT_MODEL)
+    elif openai_key:
+        model = embedding_model or _OPENAI_DEFAULT_MODEL
         logger.debug("embedding provider=openai model=%s", model)
-        return OpenAIEmbeddings(
+        embedder = OpenAIEmbeddings(
             api_key=openai_key,
             model=model,
             dimension=_OPENAI_DIMENSION,
         )
 
-    return None
+    _embedder_cache = (cache_key, embedder)
+    return embedder
 
 
 # ---------------------------------------------------------------------------

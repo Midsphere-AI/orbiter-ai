@@ -4,7 +4,7 @@
 
 ### Smart agents by default, not by configuration.
 
-[![Python 3.11+](https://img.shields.io/badge/python-3.11+-3776AB.svg?style=flat-square&logo=python&logoColor=white)](https://python.org)
+[![Python 3.13+](https://img.shields.io/badge/python-3.13+-3776AB.svg?style=flat-square&logo=python&logoColor=white)](https://python.org)
 [![License: MIT](https://img.shields.io/badge/license-MIT-22c55e.svg?style=flat-square)](LICENSE)
 
 [Docs](https://midsphere-ai.github.io/exo/) · [GitHub](https://github.com/midsphere-ai/exo) · [API Reference](https://midsphere-ai.github.io/exo/reference/)
@@ -21,7 +21,7 @@
 pip install exo-ai
 ```
 
-Requires Python 3.11+.
+Requires Python 3.13+.
 
 ## What's included
 
@@ -31,12 +31,27 @@ Requires Python 3.11+.
 |---|---|
 | `exo-core` | Agent, Tool, `@tool`, `run` / `run.sync` / `run.stream`, Swarm |
 | `exo-models` | LLM providers — OpenAI, Anthropic, Gemini, Vertex AI |
+| `exo-context` | Context engine, neurons, prompt builder, overflow strategies |
 | `exo-memory` | Memory backends: in-memory, SQLite, Postgres, vector search |
 | `exo-mcp` | MCP (Model Context Protocol) client and tool integration |
 | `exo-sandbox` | Sandboxed execution environments for safe tool running |
 | `exo-observability` | Structured logging, tracing, metrics, cost tracking |
 | `exo-eval` | Evaluation and scoring framework for agent outputs |
-| `exo-a2a` | Agent-to-Agent protocol for inter-agent communication |
+| `exo-retrieval` | RAG pipeline — embeddings, vector stores, hybrid search |
+
+**Optional extras** — install with e.g. `pip install "exo-ai[a2a]"`:
+
+| Extra | Package | What it adds |
+|---|---|---|
+| `[a2a]` | `exo-a2a` | Agent-to-Agent protocol for inter-agent communication |
+| `[distributed]` | `exo-distributed` | Redis task queue, workers, Temporal integration |
+| `[search]` | `exo-search` | AI search engine with parallel research agents |
+| `[guardrail]` | `exo-guardrail` | Prompt injection and jailbreak detection |
+| `[skills]` | `exo-skills` | Dynamic skill packages with hot-reload |
+| `[tracing]` | `exo-observability[tracing]` | OpenTelemetry / OTLP tracing backend |
+| `[langfuse]` | `exo-observability[langfuse]` | Langfuse tracing integration |
+| `[langsmith]` | `exo-observability[langsmith]` | LangSmith tracing integration |
+| `[all]` | all of the above | Everything combined |
 
 Need only part of the stack? Every package is installable independently — e.g. `pip install exo-core`.
 

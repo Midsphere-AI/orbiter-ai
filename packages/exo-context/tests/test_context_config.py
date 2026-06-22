@@ -142,6 +142,24 @@ class TestNeuronNames:
         cfg = ContextConfig(neuron_names=[])  # type: ignore[arg-type]
         assert cfg.neuron_names == ()
 
+    def test_section_names_alias_accepted(self) -> None:
+        cfg = ContextConfig(section_names=["a", "b"])  # type: ignore[call-arg]
+        assert cfg.neuron_names == ("a", "b")
+        assert cfg.section_names == ("a", "b")
+
+    def test_section_names_only_neuron_names_set(self) -> None:
+        """section_names alone silently maps to neuron_names."""
+        cfg = ContextConfig(section_names=("x",))  # type: ignore[call-arg]
+        assert cfg.neuron_names == ("x",)
+
+    def test_both_section_names_and_neuron_names_raises(self) -> None:
+        """Passing both section_names and neuron_names is a conflict and must raise."""
+        with pytest.raises(ValueError, match="Conflicting"):
+            ContextConfig(  # type: ignore[call-arg]
+                section_names=["a"],
+                neuron_names=["b"],
+            )
+
 
 # ── Extra metadata ───────────────────────────────────────────────────
 

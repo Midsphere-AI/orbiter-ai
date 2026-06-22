@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 
 from exo.observability.logging import get_logger  # pyright: ignore[reportMissingImports]
 
+from .errors import SearchConfigError
 from .types import SearchSource
 
 _log = get_logger(__name__)
@@ -182,9 +183,10 @@ class SearchConfig:
             if self.context_window_tokens is not None:
                 conflicts.append("context_window_tokens")
             if conflicts:
-                raise ValueError(
-                    f"Cannot combine models_config=SearchModels(...) with flat fields: {conflicts}. "
-                    "Pass one or the other, not both."
+                raise SearchConfigError(
+                    f"Cannot combine models_config=SearchModels(...) with flat fields: {conflicts}.",
+                    context={"conflicting_fields": conflicts},
+                    hint="Pass either the grouped models_config=SearchModels(...) or the flat kwargs, not both.",
                 )
             self.model = cfg.model
             self.fast_model = cfg.fast_model
@@ -209,9 +211,10 @@ class SearchConfig:
             if self.max_results != 10:
                 conflicts.append("max_results")
             if conflicts:
-                raise ValueError(
-                    f"Cannot combine sources_config=SearchSources(...) with flat fields: {conflicts}. "
-                    "Pass one or the other, not both."
+                raise SearchConfigError(
+                    f"Cannot combine sources_config=SearchSources(...) with flat fields: {conflicts}.",
+                    context={"conflicting_fields": conflicts},
+                    hint="Pass either the grouped sources_config=SearchSources(...) or the flat kwargs, not both.",
                 )
             self.searxng_url = cfg.searxng_url
             self.searxng_timeout = cfg.searxng_timeout
@@ -235,9 +238,10 @@ class SearchConfig:
             if self.max_content_chars != 10_000:
                 conflicts.append("max_content_chars")
             if conflicts:
-                raise ValueError(
-                    f"Cannot combine research=ResearchConfig(...) with flat fields: {conflicts}. "
-                    "Pass one or the other, not both."
+                raise SearchConfigError(
+                    f"Cannot combine research=ResearchConfig(...) with flat fields: {conflicts}.",
+                    context={"conflicting_fields": conflicts},
+                    hint="Pass either the grouped research=ResearchConfig(...) or the flat kwargs, not both.",
                 )
             self.research_mode = cfg.research_mode
             self.max_iterations = cfg.max_iterations
@@ -259,9 +263,10 @@ class SearchConfig:
             if self.use_reasoning_preamble is not None:
                 conflicts.append("use_reasoning_preamble")
             if conflicts:
-                raise ValueError(
-                    f"Cannot combine writer=WriterConfig(...) with flat fields: {conflicts}. "
-                    "Pass one or the other, not both."
+                raise SearchConfigError(
+                    f"Cannot combine writer=WriterConfig(...) with flat fields: {conflicts}.",
+                    context={"conflicting_fields": conflicts},
+                    hint="Pass either the grouped writer=WriterConfig(...) or the flat kwargs, not both.",
                 )
             self.system_instructions = cfg.system_instructions
             self.max_writer_words = cfg.max_writer_words
@@ -277,9 +282,10 @@ class SearchConfig:
             if self.llm_verify_source_chars != 4000:
                 conflicts.append("llm_verify_source_chars")
             if conflicts:
-                raise ValueError(
-                    f"Cannot combine verification=VerificationConfig(...) with flat fields: {conflicts}. "
-                    "Pass one or the other, not both."
+                raise SearchConfigError(
+                    f"Cannot combine verification=VerificationConfig(...) with flat fields: {conflicts}.",
+                    context={"conflicting_fields": conflicts},
+                    hint="Pass either the grouped verification=VerificationConfig(...) or the flat kwargs, not both.",
                 )
             self.llm_verification = cfg.llm_verification
             self.llm_verify_source_chars = cfg.llm_verify_source_chars
@@ -292,9 +298,10 @@ class SearchConfig:
             if self.revision_threshold != 0.3:
                 conflicts.append("revision_threshold")
             if conflicts:
-                raise ValueError(
-                    f"Cannot combine revision=RevisionConfig(...) with flat fields: {conflicts}. "
-                    "Pass one or the other, not both."
+                raise SearchConfigError(
+                    f"Cannot combine revision=RevisionConfig(...) with flat fields: {conflicts}.",
+                    context={"conflicting_fields": conflicts},
+                    hint="Pass either the grouped revision=RevisionConfig(...) or the flat kwargs, not both.",
                 )
             self.max_revision_rounds = cfg.max_revision_rounds
             self.revision_threshold = cfg.revision_threshold
@@ -331,10 +338,10 @@ class SearchConfig:
                 bad.append(str(s))
         if bad:
             valid_list = ", ".join(sorted(_VALID_SOURCES))
-            raise ValueError(
-                f"Unknown search source(s): {bad!r}. "
-                f"Valid sources are: {valid_list}. "
-                f"Example: SearchConfig(sources=['web', 'academic'])"
+            raise SearchConfigError(
+                f"Unknown search source(s): {bad!r}.",
+                context={"unknown_sources": bad, "valid_sources": valid_list},
+                hint=f"Use one of the valid source strings: {valid_list}. Example: SearchConfig(sources=['web', 'academic'])",
             )
         self.sources = normalized
 

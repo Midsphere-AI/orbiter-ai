@@ -56,6 +56,56 @@ class TestAuthSet:
         assert result.exit_code == 0
         assert test_vault.get("existing") == "new-value"
 
+    def test_set_stdin_flag_reads_from_stdin(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """--stdin reads the secret from standard input rather than a positional arg."""
+        monkeypatch.setenv("EXO_MCP_VAULT_KEY", "test-pass")
+        test_vault = Vault(vault_path=tmp_path / "v.enc")
+
+        with patch("exo_mcp_cli.main.Vault", return_value=test_vault):
+            result = runner.invoke(
+                app,
+                ["auth", "set", "piped-key", "--stdin"],
+                input="piped-secret\n",
+            )
+
+        assert result.exit_code == 0, result.output
+        assert "piped-key" in result.output
+        assert test_vault.get("piped-key") == "piped-secret"
+
+    def test_set_interactive_prompt_when_no_value(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Omitting the value arg triggers an interactive hidden prompt."""
+        monkeypatch.setenv("EXO_MCP_VAULT_KEY", "test-pass")
+        test_vault = Vault(vault_path=tmp_path / "v.enc")
+
+        with patch("exo_mcp_cli.main.Vault", return_value=test_vault):
+            # CliRunner.invoke with `input` simulates the interactive prompts:
+            # first the hidden prompt, then the confirmation prompt.
+            result = runner.invoke(
+                app,
+                ["auth", "set", "prompt-key"],
+                input="prompt-secret\nprompt-secret\n",
+            )
+
+        assert result.exit_code == 0, result.output
+        assert test_vault.get("prompt-key") == "prompt-secret"
+
+    def test_set_value_arg_not_echoed_to_output(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The secret value must not appear in the command output regardless of input method."""
+        monkeypatch.setenv("EXO_MCP_VAULT_KEY", "test-pass")
+        test_vault = Vault(vault_path=tmp_path / "v.enc")
+
+        with patch("exo_mcp_cli.main.Vault", return_value=test_vault):
+            result = runner.invoke(app, ["auth", "set", "safe-key", "super-secret"])
+
+        assert result.exit_code == 0
+        assert "super-secret" not in result.output
+
 
 # ---------------------------------------------------------------------------
 # auth list

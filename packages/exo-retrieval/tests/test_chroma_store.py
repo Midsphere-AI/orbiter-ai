@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from exo.retrieval.types import Chunk, RetrievalResult
+from exo.retrieval.types import Chunk, RetrievalError, RetrievalResult
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -141,7 +141,7 @@ class TestChromaVectorStoreAdd:
             from exo.retrieval.backends.chroma import ChromaVectorStore
 
             store = ChromaVectorStore(client=mock_client)
-            with pytest.raises(ValueError, match="must match"):
+            with pytest.raises(RetrievalError, match="must match"):
                 await store.add([_chunk()], [[1.0], [2.0]])
 
     @pytest.mark.asyncio
@@ -287,7 +287,8 @@ class TestChromaVectorStoreSearch:
             assert results[1].score == pytest.approx(0.1)
 
     @pytest.mark.asyncio
-    async def test_search_with_single_filter(self) -> None:
+    async def test_search_with_single_flat_filter(self) -> None:
+        """Filtering on a flat scalar field uses $eq (not $contains)."""
         mock_module, mock_client, mock_collection = _make_mock_chromadb()
         mock_collection.query.return_value = {
             "ids": [[]],
@@ -300,15 +301,16 @@ class TestChromaVectorStoreSearch:
             from exo.retrieval.backends.chroma import ChromaVectorStore
 
             store = ChromaVectorStore(client=mock_client)
-            await store.search([1.0, 0.0], filter={"source": "web"})
+            await store.search([1.0, 0.0], filter={"document_id": "doc-1"})
 
             call_kwargs = mock_collection.query.call_args.kwargs
             where = call_kwargs["where"]
             assert where is not None
-            assert "chunk_metadata" in where
+            assert where == {"document_id": {"$eq": "doc-1"}}
 
     @pytest.mark.asyncio
-    async def test_search_with_multiple_filters(self) -> None:
+    async def test_search_with_multiple_flat_filters(self) -> None:
+        """Multiple flat-field filters are combined via $and."""
         mock_module, mock_client, mock_collection = _make_mock_chromadb()
         mock_collection.query.return_value = {
             "ids": [[]],
@@ -321,12 +323,48 @@ class TestChromaVectorStoreSearch:
             from exo.retrieval.backends.chroma import ChromaVectorStore
 
             store = ChromaVectorStore(client=mock_client)
-            await store.search([1.0, 0.0], filter={"source": "web", "lang": "en"})
+            await store.search([1.0, 0.0], filter={"document_id": "doc-1", "chunk_index": 0})
 
             call_kwargs = mock_collection.query.call_args.kwargs
             where = call_kwargs["where"]
             assert "$and" in where
             assert len(where["$and"]) == 2
+
+    @pytest.mark.asyncio
+    async def test_search_unknown_filter_key_is_ignored_with_warning(self) -> None:
+        """Keys that are not flat metadata fields are skipped with a warning."""
+        import logging
+
+        mock_module, mock_client, mock_collection = _make_mock_chromadb()
+        mock_collection.query.return_value = {
+            "ids": [[]],
+            "documents": [[]],
+            "metadatas": [[]],
+            "distances": [[]],
+        }
+
+        with patch.dict("sys.modules", {"chromadb": mock_module}):
+            from exo.retrieval.backends.chroma import ChromaVectorStore
+
+            store = ChromaVectorStore(client=mock_client)
+
+            records: list[logging.LogRecord] = []
+
+            class _CapHandler(logging.Handler):
+                def emit(self, record: logging.LogRecord) -> None:
+                    records.append(record)
+
+            handler = _CapHandler()
+            logging.getLogger("exo.retrieval.backends.chroma").addHandler(handler)
+            try:
+                await store.search([1.0, 0.0], filter={"source": "web"})
+            finally:
+                logging.getLogger("exo.retrieval.backends.chroma").removeHandler(handler)
+
+            call_kwargs = mock_collection.query.call_args.kwargs
+            # "source" is not a flat field — no valid conditions remain, so where=None
+            assert call_kwargs["where"] is None
+            assert any("source" in r.getMessage() for r in records)
 
     @pytest.mark.asyncio
     async def test_search_empty_result(self) -> None:
@@ -389,6 +427,24 @@ class TestChromaVectorStoreClear:
                 name="exo_vectors",
                 metadata={"hnsw:space": "cosine"},
             )
+
+
+# ---------------------------------------------------------------------------
+# ChromaVectorStore — close
+# ---------------------------------------------------------------------------
+
+
+class TestChromaVectorStoreClose:
+    @pytest.mark.asyncio
+    async def test_close_is_noop(self) -> None:
+        """close() exists and completes without error (no-op for Chroma)."""
+        mock_module, mock_client, _ = _make_mock_chromadb()
+        with patch.dict("sys.modules", {"chromadb": mock_module}):
+            from exo.retrieval.backends.chroma import ChromaVectorStore
+
+            store = ChromaVectorStore(client=mock_client)
+            # Should complete without raising
+            await store.close()
 
 
 # ---------------------------------------------------------------------------

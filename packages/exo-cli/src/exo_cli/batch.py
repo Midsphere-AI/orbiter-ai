@@ -25,6 +25,7 @@ from typing import Any
 from exo.types import ExoError  # pyright: ignore[reportMissingImports]
 from exo_cli.executor import (  # pyright: ignore[reportMissingImports]
     ExecutionResult,
+    ExecutorError,
     LocalExecutor,
 )
 
@@ -85,6 +86,7 @@ class ItemResult:
         output: Agent output text (or error message).
         elapsed: Execution time in seconds.
         error: Error message when ``success`` is ``False``.
+        timed_out: ``True`` when the item failed specifically due to a timeout.
     """
 
     item_id: str
@@ -92,6 +94,7 @@ class ItemResult:
     output: str
     elapsed: float = 0.0
     error: str = ""
+    timed_out: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -108,16 +111,21 @@ class BatchResult:
         total: Total items processed.
         succeeded: Count of successful items.
         failed: Count of failed items.
+        timed_out: Count of items that failed due to timeout.
     """
 
     results: list[ItemResult] = field(default_factory=list)
     total: int = 0
     succeeded: int = 0
     failed: int = 0
+    timed_out: int = 0
 
     def summary(self) -> str:
         """Human-readable summary."""
-        return f"{self.total} items: {self.succeeded} succeeded, {self.failed} failed"
+        s = f"{self.total} items: {self.succeeded} succeeded, {self.failed} failed"
+        if self.timed_out:
+            s += f" ({self.timed_out} timed out)"
+        return s
 
 
 # ---------------------------------------------------------------------------
@@ -238,7 +246,10 @@ async def batch_execute(
     import asyncio
 
     if concurrency < 1:
-        raise BatchError("concurrency must be >= 1")
+        raise BatchError(
+            "concurrency must be >= 1",
+            hint="Pass --concurrency with a value of 1 or greater.",
+        )
 
     sem = asyncio.Semaphore(concurrency)
     executor = LocalExecutor(agent=agent, provider=provider, timeout=timeout)
@@ -253,6 +264,16 @@ async def batch_execute(
                     output=result.output,
                     elapsed=result.elapsed,
                 )
+            except ExecutorError as exc:
+                # Distinguish timeout failures from other LLM/execution errors.
+                is_timeout = "timed out" in str(exc).lower()
+                return ItemResult(
+                    item_id=item.id,
+                    success=False,
+                    output="",
+                    error=str(exc),
+                    timed_out=is_timeout,
+                )
             except Exception as exc:
                 return ItemResult(
                     item_id=item.id,
@@ -265,11 +286,13 @@ async def batch_execute(
     results = await asyncio.gather(*tasks)
 
     succeeded = sum(1 for r in results if r.success)
+    timed_out = sum(1 for r in results if r.timed_out)
     return BatchResult(
         results=list(results),
         total=len(results),
         succeeded=succeeded,
         failed=len(results) - succeeded,
+        timed_out=timed_out,
     )
 
 
@@ -282,7 +305,7 @@ def results_to_jsonl(batch: BatchResult) -> str:
     """Serialize batch results to JSONL string."""
     lines: list[str] = []
     for r in batch.results:
-        obj = {
+        obj: dict[str, Any] = {
             "id": r.item_id,
             "success": r.success,
             "output": r.output,
@@ -290,6 +313,8 @@ def results_to_jsonl(batch: BatchResult) -> str:
         }
         if r.error:
             obj["error"] = r.error
+        if r.timed_out:
+            obj["timed_out"] = True
         lines.append(json.dumps(obj))
     return "\n".join(lines) + "\n" if lines else ""
 
@@ -297,7 +322,9 @@ def results_to_jsonl(batch: BatchResult) -> str:
 def results_to_csv(batch: BatchResult) -> str:
     """Serialize batch results to CSV string."""
     buf = io.StringIO()
-    writer = csv.DictWriter(buf, fieldnames=["id", "success", "output", "elapsed", "error"])
+    writer = csv.DictWriter(
+        buf, fieldnames=["id", "success", "output", "elapsed", "error", "timed_out"]
+    )
     writer.writeheader()
     for r in batch.results:
         writer.writerow(
@@ -307,6 +334,7 @@ def results_to_csv(batch: BatchResult) -> str:
                 "output": r.output,
                 "elapsed": r.elapsed,
                 "error": r.error,
+                "timed_out": r.timed_out,
             }
         )
     return buf.getvalue()

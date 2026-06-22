@@ -405,7 +405,7 @@ class TestResultsToCSV:
             failed=0,
         )
         text = results_to_csv(br)
-        assert "id,success,output,elapsed,error" in text
+        assert "id,success,output,elapsed,error,timed_out" in text
         assert "1,True,hello,1.0," in text
 
     def test_multiple(self) -> None:
@@ -421,3 +421,139 @@ class TestResultsToCSV:
         text = results_to_csv(br)
         lines = text.strip().splitlines()
         assert len(lines) == 3  # header + 2 rows
+
+
+# ---------------------------------------------------------------------------
+# ItemResult.timed_out flag
+# ---------------------------------------------------------------------------
+
+
+class TestItemResultTimedOut:
+    def test_default_not_timed_out(self) -> None:
+        r = ItemResult(item_id="1", success=True, output="ok")
+        assert r.timed_out is False
+
+    def test_timed_out_flag(self) -> None:
+        r = ItemResult(item_id="1", success=False, output="", error="timed out", timed_out=True)
+        assert r.timed_out is True
+
+    async def test_executor_error_timeout_sets_flag(self) -> None:
+        """ExecutorError containing 'timed out' sets timed_out=True on ItemResult."""
+        from exo_cli.executor import ExecutorError
+
+        agent = _mock_agent()
+        items = [BatchItem(id="1", input="slow")]
+
+        with patch("exo_cli.batch.LocalExecutor") as mock_cls:
+            instance = mock_cls.return_value
+            instance.execute = AsyncMock(
+                side_effect=ExecutorError("Execution timed out after 5.0s")
+            )
+            result = await batch_execute(agent, items, concurrency=1, timeout=5.0)
+
+        assert result.results[0].timed_out is True
+        assert result.timed_out == 1
+        assert result.failed == 1
+
+    async def test_non_timeout_error_not_flagged(self) -> None:
+        """A generic ExecutorError does NOT set timed_out."""
+        from exo_cli.executor import ExecutorError
+
+        agent = _mock_agent()
+        items = [BatchItem(id="1", input="boom")]
+
+        with patch("exo_cli.batch.LocalExecutor") as mock_cls:
+            instance = mock_cls.return_value
+            instance.execute = AsyncMock(side_effect=ExecutorError("Agent execution failed: crash"))
+            result = await batch_execute(agent, items, concurrency=1)
+
+        assert result.results[0].timed_out is False
+        assert result.timed_out == 0
+
+    def test_summary_includes_timeout_count(self) -> None:
+        br = BatchResult(
+            results=[
+                ItemResult(item_id="1", success=False, output="", timed_out=True),
+                ItemResult(item_id="2", success=True, output="ok"),
+            ],
+            total=2,
+            succeeded=1,
+            failed=1,
+            timed_out=1,
+        )
+        assert "timed out" in br.summary()
+
+    def test_summary_no_timeout_mention_when_zero(self) -> None:
+        br = BatchResult(
+            results=[ItemResult(item_id="1", success=True, output="ok")],
+            total=1,
+            succeeded=1,
+            failed=0,
+            timed_out=0,
+        )
+        assert "timed out" not in br.summary()
+
+    def test_jsonl_includes_timed_out_field(self) -> None:
+        import json
+
+        br = BatchResult(
+            results=[ItemResult(item_id="1", success=False, output="", timed_out=True)],
+            total=1,
+            succeeded=0,
+            failed=1,
+        )
+        text = results_to_jsonl(br)
+        parsed = json.loads(text.strip())
+        assert parsed["timed_out"] is True
+
+    def test_jsonl_omits_timed_out_when_false(self) -> None:
+        import json
+
+        br = BatchResult(
+            results=[ItemResult(item_id="1", success=True, output="ok")],
+            total=1,
+            succeeded=1,
+            failed=0,
+        )
+        text = results_to_jsonl(br)
+        parsed = json.loads(text.strip())
+        assert "timed_out" not in parsed
+
+
+# ---------------------------------------------------------------------------
+# worker subcommand stubs
+# ---------------------------------------------------------------------------
+
+
+class TestWorkerSubcommands:
+    def test_worker_status_help(self) -> None:
+        from typer.testing import CliRunner
+
+        from exo_cli.main import app
+
+        r = CliRunner()
+        result = r.invoke(app, ["worker", "status", "--help"])
+        assert result.exit_code == 0
+        assert "worker-id" in result.output.lower() or "WORKER_ID" in result.output
+
+    def test_worker_stop_help(self) -> None:
+        from typer.testing import CliRunner
+
+        from exo_cli.main import app
+
+        r = CliRunner()
+        result = r.invoke(app, ["worker", "stop", "--help"])
+        assert result.exit_code == 0
+        assert "--redis-url" in result.output
+
+    def test_worker_help_shows_all_subcommands(self) -> None:
+        from typer.testing import CliRunner
+
+        from exo_cli.main import app
+
+        r = CliRunner()
+        result = r.invoke(app, ["worker", "--help"])
+        assert result.exit_code == 0
+        assert "list" in result.output
+        assert "status" in result.output
+        assert "stop" in result.output

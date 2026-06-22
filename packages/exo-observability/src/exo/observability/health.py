@@ -8,11 +8,14 @@ from __future__ import annotations
 
 import logging
 import resource
+import sys
 import threading
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any, Protocol, runtime_checkable
+
+from exo.types import ExoError  # pyright: ignore[reportMissingImports]
 
 logger = logging.getLogger(__name__)
 
@@ -71,8 +74,11 @@ class MemoryUsageCheck:
 
     def check(self) -> HealthResult:
         usage = resource.getrusage(resource.RUSAGE_SELF)
-        # ru_maxrss is in KB on Linux, bytes on macOS
-        rss_mb = usage.ru_maxrss / 1024.0
+        # ru_maxrss is in bytes on macOS/Darwin, kilobytes on Linux
+        if sys.platform == "darwin":
+            rss_mb = usage.ru_maxrss / (1024.0 * 1024.0)
+        else:
+            rss_mb = usage.ru_maxrss / 1024.0
         metadata = {"rss_mb": round(rss_mb, 2), "threshold_mb": self._threshold_mb}
 
         if rss_mb >= self._threshold_mb:
@@ -131,11 +137,11 @@ class HealthRegistry:
         for name, check in checks.items():
             try:
                 results[name] = check.check()
-            except Exception:
-                logger.error("health check %r raised an exception", name, exc_info=True)
+            except Exception as exc:
+                logger.error("health check %r raised: %s", name, exc, exc_info=True)
                 results[name] = HealthResult(
                     status=HealthStatus.UNHEALTHY,
-                    message=f"Check {name!r} raised an exception",
+                    message=f"Check {name!r} raised {type(exc).__name__}: {exc}",
                 )
         logger.debug("ran %d health checks", len(results))
         return results
@@ -145,8 +151,11 @@ class HealthRegistry:
         with self._lock:
             check = self._checks.get(name)
         if check is None:
-            msg = f"Unknown health check: {name}"
-            raise KeyError(msg)
+            raise ExoError(
+                f"Unknown health check: {name!r}",
+                context={"check": name, "available": self.list_checks()},
+                hint="Use HealthRegistry.list_checks() to see registered check names.",
+            )
         return check.check()
 
     def aggregate_status(self, results: dict[str, HealthResult] | None = None) -> HealthStatus:

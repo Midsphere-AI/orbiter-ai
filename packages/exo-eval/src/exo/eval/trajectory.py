@@ -136,24 +136,30 @@ class TrajectoryItem:
 
     def __post_init__(self) -> None:
         """Explode grouped namespace params into flat canonical fields."""
+        _style_hint = (
+            "Use one construction style: either flat kwargs or grouped namespace "
+            "objects, not both. Example: TrajectoryItem(state=TrajectoryState(input='hi')) "
+            "or TrajectoryItem(input='hi') — not both at once."
+        )
         if self.state is not None:
             ns = self.state
             # Conflict check: raise if the caller also set the flat field explicitly.
             # We detect "explicitly set" by comparing to the class-level default.
             if self.input != "" and self.input != ns.input:
-                raise ValueError(
-                    "Cannot specify both 'state=TrajectoryState(input=...)' and "
-                    "'input=...' with different values — use one style."
+                raise TrajectoryError(
+                    "Conflicting values for 'input': set via both state= and input=.",
+                    context={"flat_value": self.input, "grouped_value": ns.input},
+                    hint=_style_hint,
                 )
             if self.messages != () and self.messages != ns.messages:
-                raise ValueError(
-                    "Cannot specify both 'state=TrajectoryState(messages=...)' and "
-                    "'messages=...' with different values — use one style."
+                raise TrajectoryError(
+                    "Conflicting values for 'messages': set via both state= and messages=.",
+                    hint=_style_hint,
                 )
             if self.context != {} and self.context != ns.context:
-                raise ValueError(
-                    "Cannot specify both 'state=TrajectoryState(context=...)' and "
-                    "'context=...' with different values — use one style."
+                raise TrajectoryError(
+                    "Conflicting values for 'context': set via both state= and context=.",
+                    hint=_style_hint,
                 )
             object.__setattr__(self, "input", ns.input)
             object.__setattr__(self, "messages", ns.messages)
@@ -162,14 +168,15 @@ class TrajectoryItem:
         if self.action is not None:
             ns = self.action
             if self.output != "" and self.output != ns.output:
-                raise ValueError(
-                    "Cannot specify both 'action=TrajectoryAction(output=...)' and "
-                    "'output=...' with different values — use one style."
+                raise TrajectoryError(
+                    "Conflicting values for 'output': set via both action= and output=.",
+                    context={"flat_value": self.output, "grouped_value": ns.output},
+                    hint=_style_hint,
                 )
             if self.tool_calls != () and self.tool_calls != ns.tool_calls:
-                raise ValueError(
-                    "Cannot specify both 'action=TrajectoryAction(tool_calls=...)' and "
-                    "'tool_calls=...' with different values — use one style."
+                raise TrajectoryError(
+                    "Conflicting values for 'tool_calls': set via both action= and tool_calls=.",
+                    hint=_style_hint,
                 )
             object.__setattr__(self, "output", ns.output)
             object.__setattr__(self, "tool_calls", ns.tool_calls)
@@ -177,19 +184,20 @@ class TrajectoryItem:
         if self.reward is not None:
             ns = self.reward
             if self.score is not None and self.score != ns.score:
-                raise ValueError(
-                    "Cannot specify both 'reward=TrajectoryReward(score=...)' and "
-                    "'score=...' with different values — use one style."
+                raise TrajectoryError(
+                    "Conflicting values for 'score': set via both reward= and score=.",
+                    context={"flat_value": self.score, "grouped_value": ns.score},
+                    hint=_style_hint,
                 )
             if self.status != "success" and self.status != ns.status:
-                raise ValueError(
-                    "Cannot specify both 'reward=TrajectoryReward(status=...)' and "
-                    "'status=...' with different values — use one style."
+                raise TrajectoryError(
+                    "Conflicting values for 'status': set via both reward= and status=.",
+                    hint=_style_hint,
                 )
             if self.metadata != {} and self.metadata != ns.metadata:
-                raise ValueError(
-                    "Cannot specify both 'reward=TrajectoryReward(metadata=...)' and "
-                    "'metadata=...' with different values — use one style."
+                raise TrajectoryError(
+                    "Conflicting values for 'metadata': set via both reward= and metadata=.",
+                    hint=_style_hint,
                 )
             object.__setattr__(self, "score", ns.score)
             object.__setattr__(self, "status", ns.status)

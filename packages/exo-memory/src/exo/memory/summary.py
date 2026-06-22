@@ -146,14 +146,21 @@ def check_trigger(
 
 
 def _estimate_tokens(items: Sequence[MemoryItem], ratio: float) -> int:
-    """Estimate token count using tiktoken-based counting.
+    """Estimate token count for a sequence of memory items.
 
-    The *ratio* parameter is accepted for backward compatibility but
-    ignored — token counts now come from :func:`exo.token_counter.count_tokens`.
+    Attempts to use tiktoken-based counting via ``exo.token_counter``.
+    Falls back to character-ratio estimation (``len(content) / ratio``)
+    when tiktoken is unavailable — using the caller-supplied *ratio*
+    (from :attr:`SummaryConfig.token_estimate_ratio`, default ``4.0``).
     """
-    from exo.token_counter import count_tokens
+    try:
+        from exo.token_counter import count_tokens  # pyright: ignore[reportMissingImports]
 
-    return sum(count_tokens(item.content) for item in items)
+        return sum(count_tokens(item.content) for item in items)
+    except Exception:
+        # tiktoken unavailable or count_tokens not importable — fall back
+        # to character-ratio heuristic using the configured ratio.
+        return int(sum(len(item.content) for item in items) / max(ratio, 0.1))
 
 
 # ---------------------------------------------------------------------------

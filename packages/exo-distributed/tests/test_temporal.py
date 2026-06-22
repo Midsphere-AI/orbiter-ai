@@ -106,7 +106,7 @@ class TestTemporalExecutorInit:
 
     def test_raises_without_temporalio(self) -> None:
         with (
-            patch("exo.distributed.temporal.HAS_TEMPORAL", False),
+            patch("exo.distributed.temporal.executor.HAS_TEMPORAL", False),
             pytest.raises(ImportError, match="temporalio is not installed"),
         ):
             TemporalExecutor()
@@ -121,12 +121,15 @@ class TestTemporalExecutorLifecycle:
     @pytest.mark.asyncio
     async def test_connect(self) -> None:
         executor = TemporalExecutor()
-        with patch("exo.distributed.temporal.TemporalClient") as mock_client_cls:
+        with patch("exo.distributed.temporal.executor.TemporalClient") as mock_client_cls:
             mock_client_cls.connect = AsyncMock(return_value=MagicMock())
             await executor.connect()
-            mock_client_cls.connect.assert_called_once_with(
-                executor.host, namespace=executor.namespace
-            )
+            mock_client_cls.connect.assert_called_once()
+            call = mock_client_cls.connect.call_args
+            assert call.kwargs["target_host"] == executor.host
+            assert call.kwargs["namespace"] == executor.namespace
+            # The pydantic data converter is always wired in.
+            assert "data_converter" in call.kwargs
             assert executor._client is not None
 
     @pytest.mark.asyncio
@@ -393,7 +396,7 @@ class TestWorkerExecutorParam:
         assert w._temporal_executor is None
 
     def test_temporal_executor_created(self) -> None:
-        with patch("exo.distributed.temporal.TemporalClient"):
+        with patch("exo.distributed.temporal.executor.TemporalClient"):
             w = Worker("redis://localhost", executor="temporal")
         assert w._executor_type == "temporal"
         assert w._temporal_executor is not None
@@ -407,7 +410,7 @@ class TestWorkerExecutorParam:
 
     @pytest.mark.asyncio
     async def test_temporal_executor_connected_on_start(self) -> None:
-        with patch("exo.distributed.temporal.TemporalClient"):
+        with patch("exo.distributed.temporal.executor.TemporalClient"):
             w = Worker("redis://localhost", worker_id="w1", executor="temporal")
         w._broker = AsyncMock()
         w._store = AsyncMock()
@@ -429,7 +432,7 @@ class TestWorkerExecutorParam:
 
     @pytest.mark.asyncio
     async def test_execute_task_delegates_to_temporal(self) -> None:
-        with patch("exo.distributed.temporal.TemporalClient"):
+        with patch("exo.distributed.temporal.executor.TemporalClient"):
             w = Worker("redis://localhost", worker_id="w1", executor="temporal")
         w._broker = AsyncMock()
         w._store = AsyncMock()
@@ -457,3 +460,143 @@ class TestWorkerExecutorParam:
         assert status_calls[0].args[1] == TaskStatus.RUNNING
         assert status_calls[1].args[1] == TaskStatus.COMPLETED
         w._broker.ack.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# TemporalExecutor — Phase-1 production wiring
+# ---------------------------------------------------------------------------
+
+
+class TestTemporalExecutorConnectionConfig:
+    def test_connection_config_resolves_host_namespace(self) -> None:
+        from exo.distributed.temporal import ConnectionConfig
+
+        cfg = ConnectionConfig(host="t.example:7233", namespace="prod")
+        executor = TemporalExecutor(connection=cfg)
+        assert executor.host == "t.example:7233"
+        assert executor.namespace == "prod"
+        assert executor.connection_config is cfg
+
+    def test_connection_and_host_conflict_raises(self) -> None:
+        from exo.distributed.temporal import ConnectionConfig
+
+        with pytest.raises(ValueError, match=r"connection=.*host="):
+            TemporalExecutor(connection=ConnectionConfig(host="h"), host="other")
+
+    def test_connection_and_namespace_conflict_raises(self) -> None:
+        from exo.distributed.temporal import ConnectionConfig
+
+        with pytest.raises(ValueError, match=r"connection=.*namespace="):
+            TemporalExecutor(connection=ConnectionConfig(host="h"), namespace="ns")
+
+
+class TestTemporalExecutorPayloadDefaults:
+    def test_payload_injects_default_non_retryable_retry(self) -> None:
+        from exo.distributed.temporal import NON_RETRYABLE_ERROR_TYPES
+
+        executor = TemporalExecutor()
+        task = TaskPayload(task_id="t1", input="hi")
+        data = json.loads(executor._build_payload_json(task))
+        assert data["retry_policy"] is not None
+        assert set(NON_RETRYABLE_ERROR_TYPES).issubset(
+            set(data["retry_policy"]["non_retryable_error_types"])
+        )
+
+    def test_payload_preserves_task_retry_policy(self) -> None:
+        from exo.distributed.temporal import RetryConfig
+
+        executor = TemporalExecutor()
+        task = TaskPayload(
+            task_id="t1",
+            input="hi",
+            retry_policy=RetryConfig(maximum_attempts=7).to_dict(),
+        )
+        data = json.loads(executor._build_payload_json(task))
+        assert data["retry_policy"]["maximum_attempts"] == 7
+
+    def test_payload_injects_configured_timeouts(self) -> None:
+        from exo.distributed.temporal import TimeoutConfig
+
+        executor = TemporalExecutor(timeouts=TimeoutConfig(start_to_close_seconds=42.0))
+        task = TaskPayload(task_id="t1", input="hi")
+        data = json.loads(executor._build_payload_json(task))
+        assert data["timeouts"]["start_to_close_seconds"] == 42.0
+
+    def test_start_workflow_kwargs_includes_workflow_level_config(self) -> None:
+        from exo.distributed.temporal import RetryConfig, TimeoutConfig
+
+        executor = TemporalExecutor(
+            timeouts=TimeoutConfig(execution_timeout_seconds=600.0),
+            workflow_retry=RetryConfig(maximum_attempts=3),
+        )
+        kwargs = executor._start_workflow_kwargs()
+        assert "execution_timeout" in kwargs
+        assert "retry_policy" in kwargs
+
+
+class TestWorkerTemporalExecutorParam:
+    def test_pre_configured_executor_is_stored(self) -> None:
+        """Worker stores a caller-supplied TemporalExecutor and sets executor_type to temporal."""
+        executor = TemporalExecutor()
+        w = Worker("redis://localhost", temporal_executor=executor)
+        assert w._temporal_executor is executor
+        assert w._executor_type == "temporal"
+
+    def test_pre_configured_executor_with_durable_mode(self) -> None:
+        """A durable=True executor is accepted and stored without modification."""
+        executor = TemporalExecutor(durable=True)
+        w = Worker("redis://localhost", temporal_executor=executor)
+        assert w._temporal_executor is executor
+        assert w._executor_type == "temporal"
+        assert executor.durable is True
+
+    def test_temporal_executor_with_explicit_temporal_string_is_ok(self) -> None:
+        """temporal_executor= and executor='temporal' together are not a conflict."""
+        executor = TemporalExecutor()
+        w = Worker("redis://localhost", executor="temporal", temporal_executor=executor)
+        assert w._temporal_executor is executor
+        assert w._executor_type == "temporal"
+
+    def test_temporal_executor_and_executor_local_raises(self) -> None:
+        """Passing both temporal_executor= and executor='local' must raise ValueError."""
+        executor = TemporalExecutor()
+        with pytest.raises(ValueError, match="temporal_executor"):
+            Worker("redis://localhost", executor="local", temporal_executor=executor)
+
+    def test_executor_temporal_string_default_construction_unchanged(self) -> None:
+        """The existing executor='temporal' path still auto-constructs a TemporalExecutor."""
+        with patch("exo.distributed.temporal.executor.TemporalClient"):
+            w = Worker("redis://localhost", executor="temporal")
+        assert w._executor_type == "temporal"
+        assert w._temporal_executor is not None
+        assert isinstance(w._temporal_executor, TemporalExecutor)
+
+
+class TestTemporalExecutorConnectWiring:
+    @pytest.mark.asyncio
+    async def test_codec_wired_into_data_converter(self) -> None:
+        from exo.distributed.temporal import AESGCMPayloadCodec
+
+        codec = AESGCMPayloadCodec(b"0" * 32)
+        executor = TemporalExecutor(codec=codec)
+        with patch("exo.distributed.temporal.executor.TemporalClient") as mock_client_cls:
+            mock_client_cls.connect = AsyncMock(return_value=MagicMock())
+            await executor.connect()
+            converter = mock_client_cls.connect.call_args.kwargs["data_converter"]
+            assert converter.payload_codec is codec
+
+    @pytest.mark.asyncio
+    async def test_interceptors_disabled_omits_kwarg(self) -> None:
+        executor = TemporalExecutor(interceptors=False)
+        with patch("exo.distributed.temporal.executor.TemporalClient") as mock_client_cls:
+            mock_client_cls.connect = AsyncMock(return_value=MagicMock())
+            await executor.connect()
+            assert "interceptors" not in mock_client_cls.connect.call_args.kwargs
+
+    @pytest.mark.asyncio
+    async def test_interceptors_enabled_by_default(self) -> None:
+        executor = TemporalExecutor()
+        with patch("exo.distributed.temporal.executor.TemporalClient") as mock_client_cls:
+            mock_client_cls.connect = AsyncMock(return_value=MagicMock())
+            await executor.connect()
+            assert mock_client_cls.connect.call_args.kwargs["interceptors"]

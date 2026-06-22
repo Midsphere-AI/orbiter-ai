@@ -178,6 +178,29 @@ class TestTaskStoreWithFakeRedis:
         assert result.error is None
 
     @pytest.mark.asyncio
+    async def test_list_tasks_prunes_stale_index_members(self, connected_store: TaskStore) -> None:
+        """list_tasks() must remove index members whose hash has expired."""
+        store = connected_store
+        # Add a real task
+        await store.set_status("live-task", TaskStatus.RUNNING)
+        # Manually add a stale member to the index set (no corresponding hash)
+        await store._client().sadd(store._index_key, "ghost-task")  # type: ignore[misc]
+
+        # Verify both are in the index
+        all_members = await store._client().smembers(store._index_key)  # type: ignore[misc]
+        assert "ghost-task" in all_members
+
+        tasks = await store.list_tasks()
+        # Only the live task should be returned
+        assert len(tasks) == 1
+        assert tasks[0].task_id == "live-task"
+
+        # The stale member should have been pruned from the index
+        remaining = await store._client().smembers(store._index_key)  # type: ignore[misc]
+        assert "ghost-task" not in remaining
+        assert "live-task" in remaining
+
+    @pytest.mark.asyncio
     async def test_task_result_types(self, connected_store: TaskStore) -> None:
         store = connected_store
         now = time.time()

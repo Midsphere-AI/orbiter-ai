@@ -7,6 +7,7 @@ from pathlib import Path
 from textwrap import dedent
 
 import pytest
+import typer
 from typer.testing import CliRunner
 
 from exo_cli.main import app
@@ -132,7 +133,7 @@ class TestCollectTools:
         assert "hello" in tools
 
     def test_bad_source_raises(self) -> None:
-        with pytest.raises(Exception):
+        with pytest.raises(typer.BadParameter):
             _discover("nonexistent_module_xyz_12345")
 
 
@@ -159,12 +160,12 @@ class TestBuildArguments:
 
     def test_bad_json(self, tools_file: Path) -> None:
         t = _discover(str(tools_file))["greet"]
-        with pytest.raises(Exception):
+        with pytest.raises(typer.BadParameter):
             _build_arguments(t, None, "not json")
 
     def test_bad_kv_format(self, tools_file: Path) -> None:
         t = _discover(str(tools_file))["greet"]
-        with pytest.raises(Exception):
+        with pytest.raises(typer.BadParameter):
             _build_arguments(t, ["no_equals"], None)
 
     def test_inject_basic(self, tools_file: Path) -> None:
@@ -189,7 +190,7 @@ class TestBuildArguments:
 
     def test_inject_bad_format(self, tools_file: Path) -> None:
         t = _discover(str(tools_file))["greet"]
-        with pytest.raises(Exception):
+        with pytest.raises(typer.BadParameter):
             _build_arguments(t, None, None, inject=["no_equals"])
 
 

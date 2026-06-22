@@ -48,8 +48,12 @@ async def classify(
             len(output.sub_questions),
         )
         return output
-    except Exception:
-        _log.warning("classifier parse failed, using fallback")
+    except Exception as exc:
+        _log.warning(
+            "classifier parse failed (%s), raw=%r, using fallback",
+            exc,
+            (result.output or "")[:200],
+        )
         # Fallback: no skip, just web search
         from ..types import Classification
 

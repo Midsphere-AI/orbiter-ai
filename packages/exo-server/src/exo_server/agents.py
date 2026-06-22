@@ -13,10 +13,13 @@ Usage::
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
+
+from exo_server._constants import AGENTS_KEY, DEFAULT_AGENT_KEY
 
 # ---------------------------------------------------------------------------
 # Response models
@@ -63,18 +66,15 @@ class WorkspaceFileContent(BaseModel):
 # Helpers
 # ---------------------------------------------------------------------------
 
-_AGENTS_KEY = "exo_agents"
-_DEFAULT_AGENT_KEY = "exo_default_agent"
-
 
 def _get_agents(state: Any) -> dict[str, Any]:
     """Retrieve the agent registry from app state."""
-    return getattr(state, _AGENTS_KEY, {})
+    return getattr(state, AGENTS_KEY, {})
 
 
 def _get_default_name(state: Any) -> str | None:
     """Retrieve the default agent name from app state."""
-    return getattr(state, _DEFAULT_AGENT_KEY, None)
+    return getattr(state, DEFAULT_AGENT_KEY, None)
 
 
 def _get_workspace(agent: Any) -> Any | None:
@@ -137,7 +137,7 @@ async def list_workspace_files(req: Request, agent_name: str) -> Any:
     workspace = _get_workspace(agent)
     if workspace is None:
         return []
-    artifacts: list[Any] = workspace.list()
+    artifacts: list[Any] = await asyncio.to_thread(workspace.list)
     return [
         WorkspaceFile(
             name=getattr(a, "name", ""),
@@ -158,7 +158,7 @@ async def read_workspace_file(req: Request, agent_name: str, file_name: str) -> 
     workspace = _get_workspace(agent)
     if workspace is None:
         raise HTTPException(status_code=404, detail="Agent has no workspace")
-    artifact = workspace.get(file_name)
+    artifact = await asyncio.to_thread(workspace.get, file_name)
     if artifact is None:
         raise HTTPException(status_code=404, detail=f"File '{file_name}' not found")
     return WorkspaceFileContent(

@@ -52,10 +52,11 @@ def clear_collected_results() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Search backend config — set from SearchConfig before each pipeline run
+# Search backend config — stored in a ContextVar so concurrent pipeline calls
+# don't cross-contaminate each other's API keys.
 # ---------------------------------------------------------------------------
 
-_search_keys: dict[str, str] = {}
+_search_keys_var: ContextVar[dict[str, str] | None] = ContextVar("_search_keys_var", default=None)
 
 
 def configure_search_keys(
@@ -63,14 +64,20 @@ def configure_search_keys(
     jina_api_key: str = "",
     searxng_url: str = "",
 ) -> None:
-    """Set search backend API keys from config (falls back to env vars)."""
-    _search_keys.clear()
+    """Set search backend API keys for the current task context (falls back to env vars)."""
+    keys: dict[str, str] = {}
     if serper_api_key:
-        _search_keys["serper"] = serper_api_key
+        keys["serper"] = serper_api_key
     if jina_api_key:
-        _search_keys["jina"] = jina_api_key
+        keys["jina"] = jina_api_key
     if searxng_url:
-        _search_keys["searxng_url"] = searxng_url
+        keys["searxng_url"] = searxng_url
+    _search_keys_var.set(keys)
+
+
+def _get_search_keys() -> dict[str, str]:
+    """Return the search-key dict for the current task context."""
+    return _search_keys_var.get() or {}
 
 
 # ---------------------------------------------------------------------------
@@ -84,15 +91,16 @@ _RETRY_DELAY = 2  # seconds between retries
 
 def _available_providers() -> list[tuple[str, str]]:
     """Return list of (provider_name, key_or_url) for all configured search backends."""
+    keys = _get_search_keys()
     providers: list[tuple[str, str]] = []
-    serper_key = _search_keys.get("serper") or os.environ.get("SERPER_API_KEY", "")
+    serper_key = keys.get("serper") or os.environ.get("SERPER_API_KEY", "")
     if serper_key:
         providers.append(("serper", serper_key))
-    jina_key = _search_keys.get("jina") or os.environ.get("JINA_API_KEY", "")
+    jina_key = keys.get("jina") or os.environ.get("JINA_API_KEY", "")
     if jina_key:
         providers.append(("jina", jina_key))
     # Only include SearXNG if explicitly configured (not the default localhost)
-    searxng_url = _search_keys.get("searxng_url") or os.environ.get("SEARXNG_URL", "")
+    searxng_url = keys.get("searxng_url") or os.environ.get("SEARXNG_URL", "")
     if searxng_url and "localhost" not in searxng_url and "127.0.0.1" not in searxng_url:
         providers.append(("searxng", searxng_url))
     elif searxng_url and not providers:
@@ -172,30 +180,28 @@ def _search(
         _log.debug("search backend=%s query=%r", name, query)
         return _search_single_provider(name, key, query, categories, engines, num_results, timeout)
 
-    # Multiple providers — fan out in parallel
+    # Multiple providers — fan out in parallel.
+    # NOTE: _search() is called from asyncio.to_thread() at the call sites above,
+    # so we are already on a worker thread here.  Spinning up a *nested*
+    # ThreadPoolExecutor would create N_queries x N_providers threads.
+    # Instead, run each provider call sequentially within this worker thread;
+    # the concurrency across *queries* is still provided by the outer
+    # asyncio.to_thread() gather in _multi_search / search_and_collect.
     _log.debug(
         "search multi-provider fan-out providers=%s query=%r",
         [p[0] for p in providers],
         query,
     )
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-
     batches: list[list[dict]] = []
-    with ThreadPoolExecutor(max_workers=len(providers)) as pool:
-        futures = {
-            pool.submit(
-                _search_single_provider, name, key, query, categories, engines, num_results, timeout
-            ): name
-            for name, key in providers
-        }
-        for future in as_completed(futures):
-            name = futures[future]
-            try:
-                results = future.result()
-                _log.debug("provider %s returned %d results", name, len(results))
-                batches.append(results)
-            except Exception as exc:
-                _log.warning("provider %s failed: %s", name, exc)
+    for name, key in providers:
+        try:
+            results = _search_single_provider(
+                name, key, query, categories, engines, num_results, timeout
+            )
+            _log.debug("provider %s returned %d results", name, len(results))
+            batches.append(results)
+        except Exception as exc:
+            _log.warning("provider %s failed: %s", name, exc)
 
     merged = _merge_results(batches, num_results)
     _log.debug("multi-provider merged=%d results", len(merged))
@@ -268,19 +274,21 @@ async def _multi_search(
     tasks = [asyncio.to_thread(_search, q, categories, engines, num_results) for q in queries]
     all_results = await asyncio.gather(*tasks)
 
-    # Flatten and deduplicate by URL
+    # Flatten and deduplicate by URL (skip results with empty URLs)
     seen_urls: set[str] = set()
     unique_results: list[dict] = []
     for batch in all_results:
         for r in batch:
-            if r["url"] not in seen_urls:
+            if r.get("url") and r["url"] not in seen_urls:
                 seen_urls.add(r["url"])
                 unique_results.append(r)
 
     _log.debug("multi_search queries=%s total_results=%d", queries, len(unique_results))
 
-    # Side-effect: collect results for the pipeline (per-task context variable)
-    _collected_results_var.set([*_get_results_list(), *unique_results])
+    # Side-effect: collect results for the pipeline (per-task context variable).
+    # Mutate the existing list IN PLACE so that parent tasks (e.g. parallel_research
+    # workers that share the same ContextVar snapshot) also see the additions.
+    _get_results_list().extend(unique_results)
 
     if not unique_results:
         return "No results found."
@@ -298,10 +306,13 @@ async def search_and_collect(
     """Search and return raw structured results (for pipeline use, not a tool)."""
     queries = queries[:5]
     tasks = [asyncio.to_thread(_search, q, categories, engines) for q in queries]
-    all_results = await asyncio.gather(*tasks)
+    raw_results = await asyncio.gather(*tasks, return_exceptions=True)
     seen_urls: set[str] = set()
     unique: list[dict] = []
-    for batch in all_results:
+    for i, batch in enumerate(raw_results):
+        if isinstance(batch, BaseException):
+            _log.warning("search query %d/%d failed: %s", i + 1, len(queries), batch)
+            continue
         for r in batch:
             if r["url"] not in seen_urls:
                 seen_urls.add(r["url"])

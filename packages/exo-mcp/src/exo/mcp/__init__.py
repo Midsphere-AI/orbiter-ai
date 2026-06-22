@@ -27,6 +27,7 @@ from exo.mcp.tools import (  # pyright: ignore[reportMissingImports]
     MCPToolWrapper,
     convert_mcp_tools,
     extract_schema,
+    load_tools_from_connection,
     namespace_tool_name,
     parse_namespaced_name,
 )
@@ -62,6 +63,7 @@ __all__: list[str] = [
     "extract_schema",
     "load_mcp_client",
     "load_mcp_config",
+    "load_tools_from_connection",
     "mcp_server",
     "namespace_tool_name",
     "parse_namespaced_name",

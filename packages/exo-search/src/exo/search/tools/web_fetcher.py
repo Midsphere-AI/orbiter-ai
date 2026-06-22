@@ -41,38 +41,29 @@ def _is_pdf_url(url: str) -> bool:
     return path_lower.endswith(".pdf") or "/pdf/" in path_lower
 
 
-def _fetch_pdf(url: str, max_chars: int = _MAX_CHARS) -> str:
-    """Download a PDF and extract text via PyMuPDF (fitz).
+def _extract_pdf_from_bytes(
+    pdf_bytes: bytes, source_label: str, max_chars: int = _MAX_CHARS
+) -> str:
+    """Extract text from already-fetched PDF bytes via PyMuPDF (fitz).
 
-    Returns ``""`` if pymupdf is not installed or on any failure so callers
-    can fall back to other extraction methods.
+    Returns ``""`` if pymupdf is not installed, the bytes are not a valid PDF,
+    or any other failure occurs — callers can then fall back to other strategies.
     """
     try:
         import fitz
     except ImportError:
-        _log.debug("pymupdf not installed, skipping PDF extraction for %s", url)
-        return ""
-
-    import urllib.request
-
-    _log.debug("fetch_pdf url=%r", url)
-    try:
-        req = urllib.request.Request(url, headers={"User-Agent": _CHROME_UA})
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            pdf_bytes = resp.read()
-    except Exception as exc:
-        _log.warning("pdf download failed for %s: %s", url, exc)
+        _log.debug("pymupdf not installed, skipping PDF extraction for %s", source_label)
         return ""
 
     # Verify PDF magic header
     if pdf_bytes[:5] != b"%PDF-":
-        _log.debug("response is not a PDF (missing %%PDF- header) for %s", url)
+        _log.debug("response is not a PDF (missing %%PDF- header) for %s", source_label)
         return ""
 
     try:
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     except Exception as exc:
-        _log.warning("pdf open failed for %s: %s", url, exc)
+        _log.warning("pdf open failed for %s: %s", source_label, exc, exc_info=True)
         return ""
 
     parts: list[str] = []
@@ -86,7 +77,7 @@ def _fetch_pdf(url: str, max_chars: int = _MAX_CHARS) -> str:
             if total > char_limit:
                 break
     except Exception as exc:
-        _log.warning("pdf text extraction failed for %s: %s", url, exc)
+        _log.warning("pdf text extraction failed for %s: %s", source_label, exc, exc_info=True)
         return ""
     finally:
         doc.close()
@@ -97,8 +88,28 @@ def _fetch_pdf(url: str, max_chars: int = _MAX_CHARS) -> str:
 
     if len(text) > max_chars:
         text = text[:max_chars] + "\n\n... [truncated]"
-    _log.debug("pdf extracted %d chars from %s", len(text), url)
+    _log.debug("pdf extracted %d chars from %s", len(text), source_label)
     return text
+
+
+def _fetch_pdf(url: str, max_chars: int = _MAX_CHARS) -> str:
+    """Download a PDF and extract text via PyMuPDF (fitz).
+
+    Returns ``""`` if pymupdf is not installed or on any failure so callers
+    can fall back to other extraction methods.
+    """
+    import urllib.request
+
+    _log.debug("fetch_pdf url=%r", url)
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": _CHROME_UA})
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            pdf_bytes = resp.read()
+    except Exception as exc:
+        _log.warning("pdf download failed for %s: %s", url, exc, exc_info=True)
+        return ""
+
+    return _extract_pdf_from_bytes(pdf_bytes, url, max_chars)
 
 
 def _smart_truncate(text: str, query: str, max_chars: int) -> tuple[str, float]:
@@ -160,18 +171,22 @@ def _smart_truncate(text: str, query: str, max_chars: int) -> tuple[str, float]:
         kept_indices.add(idx)
         kept_chars += len(section)
 
-    # Reassemble in original order
+    # Reassemble in original order, using a running char counter to avoid O(n²) joins.
     output_parts: list[str] = []
+    running_chars = 0  # total chars already committed (excludes separators)
     omitted_chars = 0
     for idx, section in enumerate(sections):
         if idx in kept_indices:
-            # Truncate last section if over budget
-            if len("\n\n".join(output_parts)) + len(section) > max_chars:
-                remaining = max_chars - len("\n\n".join(output_parts))
+            # Account for the "\n\n" separator between parts
+            sep_cost = 2 if output_parts else 0
+            if running_chars + sep_cost + len(section) > max_chars:
+                remaining = max_chars - running_chars - sep_cost
                 if remaining > 200:
                     output_parts.append(section[:remaining] + "...")
+                    running_chars += sep_cost + remaining
             else:
                 output_parts.append(section)
+                running_chars += sep_cost + len(section)
         else:
             omitted_chars += len(section)
 
@@ -332,11 +347,11 @@ def _fetch_page_fallback(url: str) -> str:
             _log.warning("fetch fallback failed for %s: %s", url, exc2)
             return f"Error fetching {url}: {exc2}"
 
-    # Detect PDF from Content-Type or magic header and delegate to PDF extractor
+    # Detect PDF from Content-Type or magic header and extract from already-fetched bytes
     is_pdf = "pdf" in content_type.lower() or raw_bytes[:5] == b"%PDF-"
     if is_pdf:
-        _log.debug("fallback detected PDF for %s, delegating to _fetch_pdf", url)
-        pdf_text = _fetch_pdf(url)
+        _log.debug("fallback detected PDF for %s, extracting from fetched bytes", url)
+        pdf_text = _extract_pdf_from_bytes(raw_bytes, url)
         if pdf_text:
             return pdf_text
 

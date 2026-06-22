@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from pathlib import Path
 
 from exo.skills import (
@@ -19,70 +19,14 @@ from exo.skills import (
     SkillWatcher,
     _clone_github,
     _collect_skills,
-    _skill_fingerprint,
     parse_github_url,
 )
+from exo_skills.watchers._utils import _diff_snapshots
 
 logger = logging.getLogger(__name__)
 
-
-def _diff_snapshots(
-    old: dict[str, Skill],
-    new: dict[str, Skill],
-    source_path: str,
-) -> list[SkillChangeEvent]:
-    """Compare two skill snapshots and return a list of change events.
-
-    Args:
-        old: Previous snapshot mapping skill name to Skill.
-        new: Current snapshot mapping skill name to Skill.
-        source_path: The source URL being watched (for event metadata).
-
-    Returns:
-        List of :class:`SkillChangeEvent` describing added, removed, and
-        modified skills.  Returns an empty list when the snapshots are
-        identical.
-    """
-    events: list[SkillChangeEvent] = []
-
-    old_names = set(old)
-    new_names = set(new)
-
-    # Added skills
-    for name in sorted(new_names - old_names):
-        events.append(
-            SkillChangeEvent(
-                kind="added",
-                skill_name=name,
-                skill=new[name],
-                source_path=source_path,
-            )
-        )
-
-    # Removed skills
-    for name in sorted(old_names - new_names):
-        events.append(
-            SkillChangeEvent(
-                kind="removed",
-                skill_name=name,
-                skill=None,
-                source_path=source_path,
-            )
-        )
-
-    # Modified skills
-    for name in sorted(old_names & new_names):
-        if _skill_fingerprint(old[name]) != _skill_fingerprint(new[name]):
-            events.append(
-                SkillChangeEvent(
-                    kind="modified",
-                    skill_name=name,
-                    skill=new[name],
-                    source_path=source_path,
-                )
-            )
-
-    return events
+# Re-export for backward compatibility (tests import _diff_snapshots from here).
+__all__ = ["GitHubPollingWatcher", "_diff_snapshots"]
 
 
 class GitHubPollingWatcher(SkillWatcher):
@@ -94,6 +38,15 @@ class GitHubPollingWatcher(SkillWatcher):
     ``git pull --ff-only`` to fetch upstream changes, re-scans the skill
     directory, and yields any detected differences as a batch of
     :class:`SkillChangeEvent` objects.
+
+    The blocking ``git clone`` is delegated to a thread executor so it does
+    not block the event loop.  The subprocess timeout is handled inside
+    :func:`_clone_github` itself (``subprocess.run(timeout=60)``); no
+    redundant outer ``asyncio.wait_for`` is added here.
+
+    This watcher is **restartable**: calling :meth:`stop` and then
+    :meth:`watch` again resets the stop event so the watcher can run a second
+    time from the same instance.
 
     Args:
         source_url: GitHub URL to watch (e.g.
@@ -124,7 +77,11 @@ class GitHubPollingWatcher(SkillWatcher):
     ) -> None:
         parsed = parse_github_url(source_url)
         if parsed is None:
-            raise SkillError(f"Invalid GitHub URL: {source_url}")
+            raise SkillError(
+                f"Invalid GitHub URL: {source_url!r}",
+                hint="Expected format: https://github.com/<owner>/<repo>/tree/<branch>[/<subdir>]",
+                context={"source_url": source_url},
+            )
 
         self._source_url = source_url
         self._parsed = parsed
@@ -133,16 +90,25 @@ class GitHubPollingWatcher(SkillWatcher):
         self._stop_event = asyncio.Event()
         self._snapshot: dict[str, Skill] = {}
 
-    async def watch(self) -> AsyncIterator[list[SkillChangeEvent]]:
+    async def watch(self) -> AsyncGenerator[list[SkillChangeEvent]]:
         """Yield batches of skill change events as they are detected.
 
-        Performs an initial clone, takes a snapshot, then enters a poll loop
-        that runs ``git pull --ff-only`` at the configured interval.  The
-        iterator terminates when :meth:`stop` is called.
-        """
-        loop = asyncio.get_event_loop()
+        Performs an initial clone (in a thread executor to avoid blocking the
+        event loop), takes a snapshot, then enters a poll loop that runs
+        ``git pull --ff-only`` at the configured interval.  The iterator
+        terminates when :meth:`stop` is called.
 
-        # Initial clone (blocking I/O, run in thread executor).
+        The stop event is reset at entry so the watcher can be restarted
+        after a previous :meth:`stop` call.
+        """
+        # Reset so the watcher can be re-started after a previous stop().
+        self._stop_event.clear()
+
+        loop = asyncio.get_running_loop()
+
+        # Initial clone (blocking I/O — run in thread executor to avoid blocking
+        # the event loop).  The subprocess timeout (60 s) is enforced inside
+        # _clone_github itself, so no additional asyncio.wait_for is needed here.
         skills_dir: Path = await loop.run_in_executor(
             None, _clone_github, self._parsed, self._cache_dir
         )
@@ -181,7 +147,16 @@ class GitHubPollingWatcher(SkillWatcher):
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                 )
-                stdout, stderr = await proc.communicate()
+                try:
+                    stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=60)
+                except TimeoutError:
+                    logger.warning(
+                        "git pull timed out for %s — killing process",
+                        self._source_url,
+                    )
+                    proc.kill()
+                    await proc.communicate()
+                    continue
 
                 if proc.returncode != 0:
                     logger.warning(

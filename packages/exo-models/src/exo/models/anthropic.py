@@ -46,6 +46,30 @@ _log = logging.getLogger(__name__)
 
 _DEFAULT_MAX_TOKENS = 4096
 
+
+# ---------------------------------------------------------------------------
+# Error helper
+# ---------------------------------------------------------------------------
+
+
+def _anthropic_error_hint(exc: anthropic.APIError) -> tuple[str, str | None]:
+    """Return (message, hint) for an Anthropic API error."""
+    status = getattr(exc, "status_code", None)
+    msg = str(exc)
+    if status == 401:
+        return msg, "Check that ANTHROPIC_API_KEY is set correctly and has not expired."
+    if status == 429:
+        return msg, "Rate limited — reduce request frequency or add a delay between calls."
+    if status == 400:
+        body = str(getattr(exc, "body", "") or "")
+        if "token" in body.lower() or "context" in body.lower():
+            return msg, "Reduce prompt length or increase max_tokens."
+        return msg, None
+    if status in (500, 502, 503, 529):
+        return msg, "Anthropic API is overloaded — retry after a short delay."
+    return msg, None
+
+
 # ---------------------------------------------------------------------------
 # Stop reason mapping
 # ---------------------------------------------------------------------------
@@ -109,15 +133,15 @@ def _content_blocks_to_anthropic(blocks: list[ContentBlock]) -> list[dict[str, A
             parts.append(doc)
         elif isinstance(block, AudioBlock):
             raise ModelError(
-                "Anthropic does not support audio input; "
-                "remove AudioBlock before calling this provider",
+                "Anthropic does not support audio input; remove AudioBlock before calling this provider",
                 model="anthropic",
+                hint="Convert to a text description or use a provider that supports audio (e.g. openai:gpt-4o-audio-preview).",
             )
         elif isinstance(block, VideoBlock):
             raise ModelError(
-                "Anthropic does not support video input; "
-                "remove VideoBlock before calling this provider",
+                "Anthropic does not support video input; remove VideoBlock before calling this provider",
                 model="anthropic",
+                hint="Convert to a text description or use a provider that supports video (e.g. gemini:gemini-2.0-flash).",
             )
     return parts
 
@@ -201,12 +225,24 @@ def _build_messages(messages: list[Message]) -> tuple[str, list[dict[str, Any]]]
                 else:
                     content.extend(_content_blocks_to_anthropic(msg.content))
             for tc in msg.tool_calls:
+                if tc.arguments:
+                    try:
+                        tc_input = json.loads(tc.arguments)
+                    except json.JSONDecodeError as exc:
+                        raise ModelError(
+                            f"Failed to parse tool call arguments for '{tc.name}': {exc}",
+                            model="anthropic",
+                            hint="Ensure tool call arguments are valid JSON.",
+                            context={"tool_name": tc.name, "arguments": tc.arguments},
+                        ) from exc
+                else:
+                    tc_input = {}
                 content.append(
                     {
                         "type": "tool_use",
                         "id": tc.id,
                         "name": tc.name,
-                        "input": json.loads(tc.arguments) if tc.arguments else {},
+                        "input": tc_input,
                     }
                 )
             if not content:
@@ -376,6 +412,8 @@ class AnthropicProvider(ModelProvider):
                 "No API key found for Anthropic provider. "
                 "Set ANTHROPIC_API_KEY or pass api_key= to get_provider().",
                 model=f"anthropic:{config.model_name}",
+                hint="Set ANTHROPIC_API_KEY env var or pass api_key= to get_provider().",
+                context={"model": f"anthropic:{config.model_name}"},
             )
         self._client = AsyncAnthropic(
             api_key=api_key,
@@ -426,7 +464,13 @@ class AnthropicProvider(ModelProvider):
                 exc,
                 exc_info=True,
             )
-            raise ModelError(str(exc), model=f"anthropic:{self.config.model_name}") from exc
+            msg, hint = _anthropic_error_hint(exc)
+            raise ModelError(
+                msg,
+                model=f"anthropic:{self.config.model_name}",
+                context={"status_code": getattr(exc, "status_code", None)},
+                hint=hint,
+            ) from exc
         return _parse_response(response, self.config.model_name)
 
     async def stream(
@@ -456,6 +500,7 @@ class AnthropicProvider(ModelProvider):
         )
         kwargs["stream"] = True
         input_tokens = 0
+        reasoning_parts: list[str] = []
         _log.debug(
             "anthropic stream: model=%s, messages=%d, tools=%d",
             self.config.model_name,
@@ -471,7 +516,8 @@ class AnthropicProvider(ModelProvider):
                         input_tokens = event.message.usage.input_tokens
                 elif event_type == "content_block_start":
                     block = event.content_block
-                    if getattr(block, "type", None) == "tool_use":
+                    block_type = getattr(block, "type", None)
+                    if block_type == "tool_use":
                         yield StreamChunk(
                             tool_call_deltas=[
                                 ToolCallDelta(
@@ -481,6 +527,7 @@ class AnthropicProvider(ModelProvider):
                                 )
                             ]
                         )
+                    # thinking blocks: no delta to emit at start, just track
                 elif event_type == "content_block_delta":
                     delta = event.delta
                     delta_type = getattr(delta, "type", None)
@@ -495,6 +542,9 @@ class AnthropicProvider(ModelProvider):
                                 )
                             ]
                         )
+                    elif delta_type == "thinking_delta":
+                        # Accumulate reasoning content — emitted in the final chunk
+                        reasoning_parts.append(getattr(delta, "thinking", "") or "")
                 elif event_type == "message_delta":
                     output_tokens = 0
                     if hasattr(event, "usage") and event.usage:
@@ -508,6 +558,7 @@ class AnthropicProvider(ModelProvider):
                             output_tokens=output_tokens,
                             total_tokens=total,
                         ),
+                        reasoning_content="".join(reasoning_parts) if reasoning_parts else None,
                     )
         except anthropic.APIError as exc:
             _log.error(
@@ -516,7 +567,13 @@ class AnthropicProvider(ModelProvider):
                 exc,
                 exc_info=True,
             )
-            raise ModelError(str(exc), model=f"anthropic:{self.config.model_name}") from exc
+            msg, hint = _anthropic_error_hint(exc)
+            raise ModelError(
+                msg,
+                model=f"anthropic:{self.config.model_name}",
+                context={"status_code": getattr(exc, "status_code", None)},
+                hint=hint,
+            ) from exc
 
     def _build_kwargs(
         self,

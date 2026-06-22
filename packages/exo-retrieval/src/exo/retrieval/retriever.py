@@ -65,10 +65,12 @@ class VectorRetriever(Retriever):
         store: VectorStore,
         *,
         score_threshold: float | None = None,
+        overfetch_factor: int = 2,
     ) -> None:
         self.embeddings = embeddings
         self.store = store
         self.score_threshold = score_threshold
+        self.overfetch_factor = overfetch_factor
 
     async def retrieve(
         self,
@@ -90,14 +92,29 @@ class VectorRetriever(Retriever):
         try:
             query_embedding = await self.embeddings.embed(query)
         except Exception as exc:
-            raise RetrievalError(f"Embedding failed: {exc}") from exc
+            raise RetrievalError(
+                f"Embedding failed: {exc}",
+                context={"provider": type(self.embeddings).__name__},
+                hint="Check the embedding provider credentials and that the model name is correct.",
+            ) from exc
+
+        # When a score threshold is set, fetch more candidates than top_k so that
+        # low-scoring results can be pruned without starving the final result list.
+        fetch_k = top_k * self.overfetch_factor if self.score_threshold is not None else top_k
 
         try:
-            results = await self.store.search(query_embedding, top_k=top_k, **kwargs)
+            results = await self.store.search(query_embedding, top_k=fetch_k, **kwargs)
         except Exception as exc:
-            raise RetrievalError(f"Vector store search failed: {exc}") from exc
+            raise RetrievalError(
+                f"Vector store search failed: {exc}",
+                context={"store": type(self.store).__name__},
+                hint=(
+                    "Check the vector store is initialized and reachable"
+                    " (run initialize() for PgVectorStore)."
+                ),
+            ) from exc
 
         if self.score_threshold is not None:
             results = [r for r in results if r.score >= self.score_threshold]
 
-        return results
+        return results[:top_k]

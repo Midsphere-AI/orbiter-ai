@@ -21,8 +21,8 @@ jobs:
         with:
           enable-cache: true
 
-      - name: Set up Python 3.11
-        run: uv python install 3.11
+      - name: Set up Python 3.13
+        run: uv python install 3.13
 
       - name: Install dependencies
         run: uv sync
@@ -44,8 +44,8 @@ jobs:
         with:
           enable-cache: true
 
-      - name: Set up Python 3.11
-        run: uv python install 3.11
+      - name: Set up Python 3.13
+        run: uv python install 3.13
 
       - name: Install dependencies
         run: uv sync
@@ -58,7 +58,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ["3.11"]
+        python-version: ["3.13"]
     steps:
       - uses: actions/checkout@v4
 

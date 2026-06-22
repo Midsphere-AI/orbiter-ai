@@ -23,18 +23,21 @@ import asyncio
 import importlib
 import importlib.util
 import json
+import logging
 import os
 import sys
 from pathlib import Path
-from typing import Annotated, Any
+from typing import TYPE_CHECKING, Annotated, Any
 
 import typer
+
+if TYPE_CHECKING:
+    from exo.tool import Tool  # pyright: ignore[reportMissingImports]
 from rich.console import Console
 from rich.table import Table
 
-from exo.tool import Tool
-
 console = Console()
+logger = logging.getLogger(__name__)
 
 tool_app = typer.Typer(
     name="tool",
@@ -54,6 +57,8 @@ def _collect_tools_from_module(module: Any) -> dict[str, Tool]:
     Checks all module-level attributes for Tool instances, and also
     inspects ``tools`` if it's a list/tuple.
     """
+    from exo.tool import Tool  # lazy import — avoids loading exo.tool on every CLI subcommand
+
     found: dict[str, Tool] = {}
 
     for attr_name in dir(module):
@@ -86,6 +91,10 @@ def _load_module(source: str) -> Any:
         except Exception as exc:
             del sys.modules[module_name]
             raise typer.BadParameter(f"Error importing {path}: {exc}") from exc
+        finally:
+            # Remove the transient module so same-stem files from different paths
+            # don't shadow each other across repeated invocations / test runs.
+            sys.modules.pop(module_name, None)
         return module
 
     # Dotted module path
@@ -165,8 +174,14 @@ def _build_arguments(
             env_parsed = json.loads(env_inject)
             if isinstance(env_parsed, dict):
                 arguments.update(env_parsed)
+            else:
+                logger.warning("EXO_TOOL_INJECT is not a JSON object; ignoring.")
+                console.print(
+                    "[yellow]Warning: EXO_TOOL_INJECT is not a JSON object; ignoring.[/yellow]"
+                )
         except json.JSONDecodeError:
-            pass  # Silently ignore malformed env var
+            logger.warning("EXO_TOOL_INJECT is not valid JSON; ignoring. Value: %r", env_inject)
+            console.print("[yellow]Warning: EXO_TOOL_INJECT is not valid JSON; ignoring.[/yellow]")
 
     # 1. --inject flag args (override env inject)
     if inject:
@@ -242,7 +257,7 @@ def _resolve_source(source: str | None) -> str:
     resolved = source or os.environ.get("EXO_TOOL_SOURCE")
     if not resolved:
         console.print(
-            "[red]Error: --from required or set EXO_TOOL_SOURCE environment variable.[/red]"
+            "[bold red]Error:[/bold red] --from required or set EXO_TOOL_SOURCE environment variable."
         )
         raise typer.Exit(code=1)
     return resolved
@@ -313,16 +328,26 @@ def tool_call(
     ] = False,
 ) -> None:
     """Execute a tool and print its result."""
+    from exo.types import ExoError  # pyright: ignore[reportMissingImports]
+
     t = _get_tool(_resolve_source(source), name)
     arguments = _build_arguments(t, arg, json_args, inject)
 
     async def _run() -> Any:
         return await t.execute(**arguments)
 
+    # Mirror the _cli_run error boundary: KeyboardInterrupt → 130, ExoError → 1,
+    # generic Exception → 1 with consistent formatting.
     try:
         result = asyncio.run(_run())
+    except KeyboardInterrupt:
+        console.print("\n[dim]Interrupted.[/dim]")
+        raise typer.Exit(code=130) from None
+    except ExoError as exc:
+        console.print(f"[bold red]Error:[/bold red] {exc}", highlight=False)
+        raise typer.Exit(code=1) from exc
     except Exception as exc:
-        console.print(f"[red]Error:[/red] {exc}", highlight=False)
+        console.print(f"[bold red]Error:[/bold red] {exc}", highlight=False)
         raise typer.Exit(code=1) from exc
 
     if raw:

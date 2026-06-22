@@ -9,6 +9,8 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from exo.types import ExoError  # pyright: ignore[reportMissingImports]
+
 logger = logging.getLogger(__name__)
 
 
@@ -18,6 +20,12 @@ class TraceBackend(StrEnum):
     OTLP = "otlp"
     MEMORY = "memory"
     CONSOLE = "console"
+    # Vendor backends — resolved lazily by exo.observability.backends; each
+    # ingests OTLP and is enabled via the matching optional extra + API keys.
+    LANGFUSE = "langfuse"
+    LANGSMITH = "langsmith"
+    PHOENIX = "phoenix"
+    BRAINTRUST = "braintrust"
 
 
 # ---------------------------------------------------------------------------
@@ -166,15 +174,22 @@ class ObservabilityConfig(BaseModel):
             elif isinstance(logging_cfg, dict):
                 lc = LoggingConfig(**logging_cfg)
             else:
-                raise ValueError(
-                    f"'logging' must be a LoggingConfig or dict, got {type(logging_cfg)}"
+                raise ExoError(
+                    f"'logging' must be a LoggingConfig or dict, got {type(logging_cfg).__name__}",
+                    context={"field": "logging", "got": type(logging_cfg).__name__},
+                    hint="Pass LoggingConfig(level='DEBUG') or a plain dict like {'level': 'DEBUG'}.",
                 )
 
             flat_conflicts = [f for f in ("log_level", "log_format") if f in data]
             if flat_conflicts:
-                raise ValueError(
+                raise ExoError(
                     f"Provide either 'logging=LoggingConfig(...)' or the flat fields "
-                    f"{flat_conflicts!r}, not both."
+                    f"{flat_conflicts!r}, not both.",
+                    context={"field": "logging", "conflicting_fields": flat_conflicts},
+                    hint=(
+                        "Remove the flat fields or remove 'logging=LoggingConfig(...)' — "
+                        "but not both."
+                    ),
                 )
             data["log_level"] = lc.level
             data["log_format"] = lc.format
@@ -187,8 +202,13 @@ class ObservabilityConfig(BaseModel):
             elif isinstance(tracing_cfg, dict):
                 tc = TracingConfig(**tracing_cfg)
             else:
-                raise ValueError(
-                    f"'tracing' must be a TracingConfig or dict, got {type(tracing_cfg)}"
+                raise ExoError(
+                    f"'tracing' must be a TracingConfig or dict, got {type(tracing_cfg).__name__}",
+                    context={"field": "tracing", "got": type(tracing_cfg).__name__},
+                    hint=(
+                        "Pass TracingConfig(enabled=True, backend='otlp') or a plain dict "
+                        "like {'enabled': True}."
+                    ),
                 )
 
             flat_conflicts = [
@@ -197,9 +217,14 @@ class ObservabilityConfig(BaseModel):
                 if f in data
             ]
             if flat_conflicts:
-                raise ValueError(
+                raise ExoError(
                     f"Provide either 'tracing=TracingConfig(...)' or the flat fields "
-                    f"{flat_conflicts!r}, not both."
+                    f"{flat_conflicts!r}, not both.",
+                    context={"field": "tracing", "conflicting_fields": flat_conflicts},
+                    hint=(
+                        "Remove the flat fields or remove 'tracing=TracingConfig(...)' — "
+                        "but not both."
+                    ),
                 )
             data["trace_enabled"] = tc.enabled
             data["trace_backend"] = tc.backend
@@ -214,15 +239,24 @@ class ObservabilityConfig(BaseModel):
             elif isinstance(metrics_cfg, dict):
                 mc = MetricsConfig(**metrics_cfg)
             else:
-                raise ValueError(
-                    f"'metrics' must be a MetricsConfig or dict, got {type(metrics_cfg)}"
+                raise ExoError(
+                    f"'metrics' must be a MetricsConfig or dict, got {type(metrics_cfg).__name__}",
+                    context={"field": "metrics", "got": type(metrics_cfg).__name__},
+                    hint=(
+                        "Pass MetricsConfig(enabled=True) or a plain dict like {'enabled': True}."
+                    ),
                 )
 
             flat_conflicts = [f for f in ("metrics_enabled",) if f in data]
             if flat_conflicts:
-                raise ValueError(
+                raise ExoError(
                     f"Provide either 'metrics=MetricsConfig(...)' or the flat field "
-                    f"{flat_conflicts!r}, not both."
+                    f"{flat_conflicts!r}, not both.",
+                    context={"field": "metrics", "conflicting_fields": flat_conflicts},
+                    hint=(
+                        "Remove the flat field or remove 'metrics=MetricsConfig(...)' — "
+                        "but not both."
+                    ),
                 )
             data["metrics_enabled"] = mc.enabled
 

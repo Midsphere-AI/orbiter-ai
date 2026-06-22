@@ -12,6 +12,9 @@ from typing import Any
 
 from exo.types import ExoError
 
+# Sentinel value stored in EvalCaseResult.output when a case failed entirely.
+_CASE_FAILED_SENTINEL = "<case-failed>"
+
 logger = logging.getLogger(__name__)
 
 
@@ -122,11 +125,17 @@ class Evaluator:
         repeat_times: int = 1,
     ) -> None:
         if parallel < 1:
-            msg = "parallel must be >= 1"
-            raise EvalError(msg)
+            raise EvalError(
+                f"parallel must be >= 1, got {parallel}",
+                context={"parallel": parallel},
+                hint="Set parallel to at least 1 (e.g. parallel=4).",
+            )
         if repeat_times < 1:
-            msg = "repeat_times must be >= 1"
-            raise EvalError(msg)
+            raise EvalError(
+                f"repeat_times must be >= 1, got {repeat_times}",
+                context={"repeat_times": repeat_times},
+                hint="Set repeat_times to at least 1 (e.g. repeat_times=3).",
+            )
         self._scorers = list(scorers)
         self._criteria = {c.metric_name: c for c in (criteria or [])}
         self._parallel = parallel
@@ -144,8 +153,13 @@ class Evaluator:
         case_results: list[EvalCaseResult] = []
 
         async def _run(case: dict[str, Any], repeat: int) -> EvalCaseResult:
+            # Build a stable, unique run-level ID that always embeds the repeat
+            # index.  This lets scorers distinguish repeat runs (e.g. for
+            # deterministic toggle behaviour in tests) and decouples pass@k
+            # grouping from asyncio.gather call order.
+            base_id = str(case.get("id", f"case-{id(case)}"))
+            case_id = f"{base_id}-r{repeat}" if self._repeat_times > 1 else base_id
             async with sem:
-                case_id = str(case.get("id", f"case-{id(case)}-r{repeat}"))
                 inp = case.get("input")
                 output = await target.predict(case_id, inp)
                 scores = {}
@@ -163,13 +177,48 @@ class Evaluator:
                     scores[sr.scorer_name] = sr
                 return EvalCaseResult(case_id=case_id, input=inp, output=output, scores=scores)
 
-        tasks = [_run(case, r) for case in dataset for r in range(self._repeat_times)]
+        # We need the case_id even when _run raises, so we wrap failures here.
+        async def _run_safe(case: dict[str, Any], repeat: int) -> EvalCaseResult:
+            base_id = str(case.get("id", f"case-{id(case)}"))
+            case_id = f"{base_id}-r{repeat}" if self._repeat_times > 1 else base_id
+            try:
+                return await _run(case, repeat)
+            except Exception as exc:
+                logger.warning(
+                    "Eval case failed: case_id=%r exc_type=%s: %s",
+                    case_id,
+                    type(exc).__name__,
+                    exc,
+                    exc_info=True,
+                )
+                # Record a failed sentinel so the caller sees N-in / N-out.
+                return EvalCaseResult(
+                    case_id=case_id,
+                    input=case.get("input"),
+                    output=_CASE_FAILED_SENTINEL,
+                    scores={
+                        "__error__": ScorerResult(
+                            scorer_name="__error__",
+                            score=0.0,
+                            status=EvalStatus.FAILED,
+                            details={
+                                "error": str(exc),
+                                "exc_type": type(exc).__name__,
+                            },
+                        )
+                    },
+                )
+
+        tasks = [_run_safe(case, r) for case in dataset for r in range(self._repeat_times)]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
         for result in results:
             if isinstance(result, BaseException):
-                logger.warning("Scorer task failed, skipping case: %s", result)
-                continue
+                # Should not happen — _run_safe catches all Exception; only
+                # BaseException subclasses that bypass except Exception land here
+                # (e.g. KeyboardInterrupt, SystemExit — never swallow those).
+                logger.error("Eval task raised a non-Exception: %s", result, exc_info=result)
+                raise result
             case_results.append(result)
 
         summary = self._summarize(case_results)
@@ -179,10 +228,17 @@ class Evaluator:
     # ---- internal ---------------------------------------------------------
 
     def _summarize(self, results: list[EvalCaseResult]) -> dict[str, Any]:
-        """Compute mean score per scorer across all cases."""
+        """Compute mean score per scorer across all cases.
+
+        Sentinel keys prefixed with ``"__"`` (e.g. ``"__error__"`` injected
+        when a case fails entirely) are excluded so they do not pollute the
+        mean-score summary.
+        """
         totals: dict[str, list[float]] = defaultdict(list)
         for cr in results:
             for name, sr in cr.scores.items():
+                if name.startswith("__"):
+                    continue
                 totals[name].append(sr.score)
         return {name: sum(vals) / len(vals) for name, vals in totals.items()}
 
@@ -195,21 +251,26 @@ class Evaluator:
         if self._repeat_times <= 1 or not self._criteria:
             return {}
 
-        # Group results by base case index (dataset order, repeats consecutive)
-        groups: dict[int, list[EvalCaseResult]] = defaultdict(list)
-        for idx, cr in enumerate(results):
-            case_idx = idx // self._repeat_times
-            groups[case_idx].append(cr)
+        # Group results by stable base case_id.  Since _run always embeds the
+        # repeat index as ``{base_id}-r{n}`` when repeat_times > 1, we strip the
+        # suffix to recover the base id for grouping.
+        case_ids = [str(c.get("id", f"case-{id(c)}")) for c in dataset]
+        groups: dict[str, list[EvalCaseResult]] = defaultdict(list)
+        for cr in results:
+            base_id = cr.case_id
+            if self._repeat_times > 1 and "-r" in base_id:
+                base_id = base_id.rsplit("-r", 1)[0]
+            groups[base_id].append(cr)
 
-        n_cases = len(dataset)
+        n_cases = len(case_ids)
         if n_cases == 0:
             return {}
 
         pass_at: dict[int, float] = {}
         for k in range(1, self._repeat_times + 1):
             passed = 0
-            for case_idx in range(n_cases):
-                group = groups.get(case_idx, [])
+            for cid in case_ids:
+                group = groups.get(cid, [])
                 first_k = group[:k]
                 if any(
                     sr.status == EvalStatus.PASSED for cr in first_k for sr in cr.scores.values()

@@ -97,7 +97,7 @@ _excluded_name_warnings: set[str] = set()
 # ---------------------------------------------------------------------------
 
 
-class MaxToolCallsExceeded(RuntimeError):  # noqa: N818  -- intentional name
+class MaxToolCallsExceeded(ExoError):  # noqa: N818  -- intentional name
     """Raised when ToolBatch code exceeds the configured ``max_tool_calls``."""
 
 
@@ -1480,7 +1480,13 @@ class ToolBatchExecutor:
             executor._tool_call_count += 1
             if executor._tool_call_count > executor._max_tool_calls:
                 raise MaxToolCallsExceeded(
-                    f"ToolBatch code exceeded max_tool_calls={executor._max_tool_calls}"
+                    f"Programmatic tool-calling batch exceeded "
+                    f"max_tool_calls={executor._max_tool_calls}.",
+                    context={"limit": executor._max_tool_calls},
+                    hint=(
+                        "Raise the cap with ptc_max_tool_calls= on Agent(...), or have "
+                        "the batch make fewer tool calls per code block."
+                    ),
                 )
 
             tool_call_id = f"ptc_{uuid.uuid4().hex}"

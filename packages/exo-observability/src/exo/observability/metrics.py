@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+import weakref
 from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import Any
@@ -73,8 +74,15 @@ class MetricsCollector:
     def add_counter(
         self, name: str, value: float = 1.0, attributes: dict[str, Any] | None = None
     ) -> None:
-        """Increment a counter by *value*."""
-        _ = attributes  # stored in snapshot via histograms; counters aggregate
+        """Increment a counter by *value*.
+
+        Note: *attributes* are intentionally ignored in the in-memory path —
+        counters aggregate across all attribute combinations into a single
+        scalar so the snapshot stays lightweight for tests and health checks.
+        When per-attribute granularity is needed, use OTel (install
+        ``opentelemetry-sdk``); the OTel path passes attributes through.
+        """
+        _ = attributes  # see docstring — aggregate-only in the in-memory path
         with self._lock:
             self._counters[name] = self._counters.get(name, 0.0) + value
 
@@ -206,32 +214,44 @@ def build_tool_attributes(
 # OTel instrument cache — create once per meter instance, reuse on every call
 # ---------------------------------------------------------------------------
 
-# Keyed by (meter_id, instrument_name) so the cache is invalidated automatically
-# when the global MeterProvider changes (e.g. between tests).
-_otel_counters: dict[tuple[int, str], Any] = {}
-_otel_histograms: dict[tuple[int, str], Any] = {}
+# Keyed by (provider_weakref, instrument_name).  Using WeakKeyDictionary avoids
+# the id-reuse hazard: when a provider is GC'd and a new one is allocated at the
+# same address, a plain id()-keyed dict would incorrectly return the stale
+# instrument.  WeakKeyDictionary keys on object identity and automatically drops
+# entries when the provider is collected.
+#
+# Outer key: provider object (weak).  Inner key: instrument name.
+_otel_counters: weakref.WeakKeyDictionary[Any, dict[str, Any]] = weakref.WeakKeyDictionary()
+_otel_histograms: weakref.WeakKeyDictionary[Any, dict[str, Any]] = weakref.WeakKeyDictionary()
+_otel_instrument_lock = threading.Lock()
 
 
 def _get_counter(name: str) -> Any:
     """Return a cached OTel counter for the current meter, creating it on first use."""
     meter = _get_meter()
-    # Use the meter's MeterProvider identity as part of the key so the cache is
-    # invalidated automatically when the global MeterProvider is replaced.
     provider = getattr(meter, "_meter_provider", meter)
-    key = (id(provider), name)
-    if key not in _otel_counters:
-        _otel_counters[key] = meter.create_counter(name=name)
-    return _otel_counters[key]
+    with _otel_instrument_lock:
+        by_name = _otel_counters.get(provider)
+        if by_name is None:
+            by_name = {}
+            _otel_counters[provider] = by_name
+        if name not in by_name:
+            by_name[name] = meter.create_counter(name=name)
+        return by_name[name]
 
 
 def _get_histogram(name: str) -> Any:
     """Return a cached OTel histogram for the current meter, creating it on first use."""
     meter = _get_meter()
     provider = getattr(meter, "_meter_provider", meter)
-    key = (id(provider), name)
-    if key not in _otel_histograms:
-        _otel_histograms[key] = meter.create_histogram(name=name)
-    return _otel_histograms[key]
+    with _otel_instrument_lock:
+        by_name = _otel_histograms.get(provider)
+        if by_name is None:
+            by_name = {}
+            _otel_histograms[provider] = by_name
+        if name not in by_name:
+            by_name[name] = meter.create_histogram(name=name)
+        return by_name[name]
 
 
 # ---------------------------------------------------------------------------

@@ -124,7 +124,8 @@ def get_provider(
         raise ModelError(
             f"Provider '{provider_name}' not registered. Available: {available}",
             model=model,
-        ) from None
+            hint=f"Check the model string format 'provider:model'. Registered providers: {available}",
+        ) from None  # RegistryError only says "key not found" — ModelError already contains all context.
     ctx_tokens = kwargs.pop("context_window_tokens", MODEL_CONTEXT_WINDOWS.get(model_name))
     config = ModelConfig(
         provider=provider_name,

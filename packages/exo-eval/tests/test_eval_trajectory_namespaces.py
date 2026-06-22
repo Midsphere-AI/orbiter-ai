@@ -15,6 +15,7 @@ import pytest
 
 from exo.eval import (
     TrajectoryAction,
+    TrajectoryError,
     TrajectoryItem,
     TrajectoryReward,
     TrajectoryState,
@@ -148,7 +149,7 @@ def test_flat_defaults_unchanged() -> None:
 
 
 def test_conflict_state_input_raises() -> None:
-    with pytest.raises(ValueError, match="Cannot specify both"):
+    with pytest.raises(TrajectoryError, match="Conflicting values"):
         TrajectoryItem(
             input="flat",
             state=TrajectoryState(input="grouped"),
@@ -158,7 +159,7 @@ def test_conflict_state_input_raises() -> None:
 def test_conflict_state_messages_raises() -> None:
     flat_msgs: tuple[dict, ...] = ({"role": "user", "content": "a"},)
     grouped_msgs: tuple[dict, ...] = ({"role": "user", "content": "b"},)
-    with pytest.raises(ValueError, match="Cannot specify both"):
+    with pytest.raises(TrajectoryError, match="Conflicting values"):
         TrajectoryItem(
             messages=flat_msgs,
             state=TrajectoryState(messages=grouped_msgs),
@@ -166,7 +167,7 @@ def test_conflict_state_messages_raises() -> None:
 
 
 def test_conflict_action_output_raises() -> None:
-    with pytest.raises(ValueError, match="Cannot specify both"):
+    with pytest.raises(TrajectoryError, match="Conflicting values"):
         TrajectoryItem(
             output="flat",
             action=TrajectoryAction(output="grouped"),
@@ -176,7 +177,7 @@ def test_conflict_action_output_raises() -> None:
 def test_conflict_action_tool_calls_raises() -> None:
     flat_tc: tuple[dict, ...] = ({"name": "a"},)
     grouped_tc: tuple[dict, ...] = ({"name": "b"},)
-    with pytest.raises(ValueError, match="Cannot specify both"):
+    with pytest.raises(TrajectoryError, match="Conflicting values"):
         TrajectoryItem(
             tool_calls=flat_tc,
             action=TrajectoryAction(tool_calls=grouped_tc),
@@ -184,7 +185,7 @@ def test_conflict_action_tool_calls_raises() -> None:
 
 
 def test_conflict_reward_score_raises() -> None:
-    with pytest.raises(ValueError, match="Cannot specify both"):
+    with pytest.raises(TrajectoryError, match="Conflicting values"):
         TrajectoryItem(
             score=0.5,
             reward=TrajectoryReward(score=0.9),
@@ -192,7 +193,7 @@ def test_conflict_reward_score_raises() -> None:
 
 
 def test_conflict_reward_status_raises() -> None:
-    with pytest.raises(ValueError, match="Cannot specify both"):
+    with pytest.raises(TrajectoryError, match="Conflicting values"):
         TrajectoryItem(
             status="failure",
             reward=TrajectoryReward(status="success"),
@@ -200,7 +201,7 @@ def test_conflict_reward_status_raises() -> None:
 
 
 def test_conflict_reward_metadata_raises() -> None:
-    with pytest.raises(ValueError, match="Cannot specify both"):
+    with pytest.raises(TrajectoryError, match="Conflicting values"):
         TrajectoryItem(
             metadata={"a": 1},
             reward=TrajectoryReward(metadata={"b": 2}),

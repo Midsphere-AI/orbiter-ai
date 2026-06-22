@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import logging
+import weakref
 from typing import TYPE_CHECKING, Any
 
 from exo.guardrail.types import (  # pyright: ignore[reportMissingImports]
     GuardrailBackend,
+    GuardrailConfigError,
     GuardrailError,
     GuardrailResult,
     RiskLevel,
@@ -14,6 +17,8 @@ from exo.hooks import Hook, HookPoint
 
 if TYPE_CHECKING:
     from exo.agent import Agent
+
+logger = logging.getLogger(__name__)
 
 
 # Risk levels that trigger automatic blocking.
@@ -56,10 +61,12 @@ class BaseGuardrail:
         events: list[HookPoint | str] | None = None,
     ) -> None:
         if backend is None:
-            raise ValueError(
+            raise GuardrailConfigError(
                 "BaseGuardrail requires a backend. "
                 "Passing backend=None creates a silent no-op guardrail that gives false "
-                "assurance of protection. Supply a GuardrailBackend instance instead."
+                "assurance of protection.",
+                hint="Supply a GuardrailBackend instance (e.g. PatternBackend or "
+                "LLMGuardrailBackend) as the backend= argument.",
             )
         self.backend = backend
 
@@ -70,16 +77,22 @@ class BaseGuardrail:
             value = entry.value if isinstance(entry, HookPoint) else entry
             if value not in _VALID_HOOK_POINT_VALUES:
                 valid = ", ".join(sorted(_VALID_HOOK_POINT_VALUES))
-                raise ValueError(
-                    f"Unknown hook point: {value!r}. "
-                    f"Valid hook points are: {valid}. "
-                    f"Use HookPoint.<NAME> for auto-complete, e.g. HookPoint.PRE_LLM_CALL."
+                raise GuardrailConfigError(
+                    f"Unknown hook point: {value!r}.",
+                    context={"hook_point": value},
+                    hint=(
+                        f"Valid hook points are: {valid}. "
+                        "Use HookPoint.<NAME> for auto-complete, e.g. HookPoint.PRE_LLM_CALL."
+                    ),
                 )
             normalized.append(value)
         self.events: list[str] = normalized
 
         # Track hooks per agent so detach can remove exactly the right ones.
-        self._hooks: dict[int, dict[HookPoint, Hook]] = {}
+        # WeakKeyDictionary prevents stale entries from id-reuse after GC.
+        self._hooks: weakref.WeakKeyDictionary[Any, dict[HookPoint, Hook]] = (
+            weakref.WeakKeyDictionary()
+        )
 
     def _resolve_hook_points(self) -> list[HookPoint]:
         """Convert string event names to HookPoint enum values."""
@@ -88,8 +101,11 @@ class BaseGuardrail:
             try:
                 points.append(HookPoint(name))
             except ValueError:
-                msg = f"Unknown hook point: {name!r}"
-                raise ValueError(msg) from None
+                raise GuardrailConfigError(
+                    f"Unknown hook point: {name!r}",
+                    context={"hook_point": name},
+                    hint="Use HookPoint.<NAME> for validated hook points.",
+                ) from None
         return points
 
     def attach(self, agent: Agent) -> None:
@@ -105,8 +121,7 @@ class BaseGuardrail:
         Args:
             agent: The agent to attach to.
         """
-        agent_id = id(agent)
-        if agent_id in self._hooks:
+        if agent in self._hooks:
             return  # Already attached.
 
         points = self._resolve_hook_points()
@@ -123,12 +138,29 @@ class BaseGuardrail:
                         risk_level=result.risk_level,
                         risk_type=result.risk_type,
                         details=result.details,
+                        context={
+                            "hook": __point.value,
+                            "risk_level": result.risk_level,
+                            "risk_type": result.risk_type or "unknown",
+                        },
+                        hint=(
+                            "Inspect the 'details' attribute for matched patterns. "
+                            "Adjust guardrail thresholds or whitelist the input if it "
+                            "is a false positive."
+                        ),
+                    )
+                elif not result.is_safe:
+                    logger.warning(
+                        "Guardrail detected sub-blocking risk at %s: level=%s type=%s",
+                        __point.value,
+                        result.risk_level,
+                        result.risk_type or "unknown",
                     )
 
             agent.hook_manager.add(point, _hook)
             registered[point] = _hook
 
-        self._hooks[agent_id] = registered
+        self._hooks[agent] = registered
 
     def detach(self, agent: Agent) -> None:
         """Remove previously registered guardrail hooks from an agent.
@@ -136,8 +168,7 @@ class BaseGuardrail:
         Args:
             agent: The agent to detach from.
         """
-        agent_id = id(agent)
-        registered = self._hooks.pop(agent_id, None)
+        registered = self._hooks.pop(agent, None)
         if registered is None:
             return
         for point, hook in registered.items():

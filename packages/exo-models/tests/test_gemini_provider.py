@@ -606,3 +606,95 @@ class TestGeminiRegistration:
         provider = get_provider("gemini:gemini-2.0-flash", api_key="test-key")
         assert isinstance(provider, GeminiProvider)
         assert provider.config.model_name == "gemini-2.0-flash"
+
+
+# ---------------------------------------------------------------------------
+# Safety-blocked response guard (findings #1, #2)
+# ---------------------------------------------------------------------------
+
+
+class TestParseResponseSafetyBlocked:
+    def test_empty_candidates_returns_content_filter(self) -> None:
+        """Safety-blocked responses have candidates=[] — must not raise IndexError."""
+        raw = SimpleNamespace(
+            candidates=[],
+            usage_metadata=SimpleNamespace(
+                prompt_token_count=10,
+                candidates_token_count=0,
+                total_token_count=10,
+            ),
+        )
+        resp = _parse_response(raw, "gemini-2.0-flash")
+        assert resp.content == ""
+        assert resp.finish_reason == "content_filter"
+        assert resp.tool_calls == []
+        assert resp.usage.input_tokens == 10
+
+    def test_empty_candidates_no_usage(self) -> None:
+        raw = SimpleNamespace(candidates=[], usage_metadata=None)
+        resp = _parse_response(raw, "gemini-2.0-flash")
+        assert resp.finish_reason == "content_filter"
+        assert resp.usage.total_tokens == 0
+
+    def test_null_candidate_content_returns_empty(self) -> None:
+        """A candidate with content=None must not raise AttributeError."""
+        candidate = SimpleNamespace(content=None, finish_reason="SAFETY")
+        raw = SimpleNamespace(
+            candidates=[candidate],
+            usage_metadata=None,
+        )
+        resp = _parse_response(raw, "gemini-2.0-flash")
+        assert resp.content == ""
+        assert resp.finish_reason == "content_filter"
+
+
+# ---------------------------------------------------------------------------
+# New finish reason codes (finding #9)
+# ---------------------------------------------------------------------------
+
+
+class TestFinishReasonNewCodes:
+    def test_prohibited_content(self) -> None:
+        assert _map_finish_reason("PROHIBITED_CONTENT") == "content_filter"
+
+    def test_spii(self) -> None:
+        assert _map_finish_reason("SPII") == "content_filter"
+
+    def test_image_safety(self) -> None:
+        assert _map_finish_reason("IMAGE_SAFETY") == "content_filter"
+
+    def test_image_prohibited_content(self) -> None:
+        assert _map_finish_reason("IMAGE_PROHIBITED_CONTENT") == "content_filter"
+
+
+# ---------------------------------------------------------------------------
+# Vertex AI missing project validation (finding #5)
+# ---------------------------------------------------------------------------
+
+
+class TestVertexProjectValidation:
+    @patch("exo.models.gemini.genai")
+    def test_location_without_project_raises(self, mock_genai: MagicMock) -> None:
+        """Setting google_location without google_project should raise ModelError early."""
+        config = ModelConfig(
+            provider="gemini",
+            model_name="gemini-2.0-flash",
+            api_key="",
+            google_location="us-central1",  # type: ignore[call-arg]
+        )
+        with pytest.raises(ModelError, match="Google Cloud project"):
+            GeminiProvider(config)
+
+    @patch("exo.models.gemini.genai")
+    def test_project_and_location_ok(self, mock_genai: MagicMock) -> None:
+        """Both project and location provided — should not raise."""
+        config = ModelConfig(
+            provider="gemini",
+            model_name="gemini-2.0-flash",
+            api_key="",
+            google_project="my-project",  # type: ignore[call-arg]
+            google_location="us-central1",  # type: ignore[call-arg]
+        )
+        # Should construct without error
+        provider = GeminiProvider(config)
+        assert provider._prefix == "vertex"

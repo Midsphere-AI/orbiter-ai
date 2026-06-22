@@ -13,12 +13,12 @@ from typing import Any
 
 import redis.asyncio as aioredis
 
-logger = logging.getLogger(__name__)
-
 from exo.observability.health import (  # pyright: ignore[reportMissingImports]
     HealthResult,
     HealthStatus,
 )
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -69,52 +69,76 @@ class WorkerHealthCheck:
 
         Since the HealthCheck protocol requires a sync ``check()`` method,
         this creates a temporary sync Redis connection.
+
+        .. warning::
+            This method is **synchronous** and performs a blocking network call.
+            Do **not** call it from an async context (e.g. inside an
+            ``asyncio`` event loop) — use :meth:`acheck` instead.
         """
         import redis
 
         logger.debug("WorkerHealthCheck checking worker %s", self._worker_id)
-        r = redis.from_url(self._redis_url, decode_responses=True)
+        r = redis.from_url(self._redis_url, decode_responses=True, socket_timeout=5)
         try:
             key = f"exo:workers:{self._worker_id}"
             data: dict[str, str] = r.hgetall(key)  # type: ignore[assignment]
-
-            if not data:
-                return HealthResult(
-                    status=HealthStatus.UNHEALTHY,
-                    message=f"Worker {self._worker_id} not found (no heartbeat)",
-                    metadata={"worker_id": self._worker_id},
-                )
-
-            last_hb = float(data.get("last_heartbeat", "0"))
-            age = time.time() - last_hb
-            metadata: dict[str, Any] = {
-                "worker_id": self._worker_id,
-                "heartbeat_age_seconds": round(age, 2),
-                "tasks_processed": int(data.get("tasks_processed", "0")),
-                "tasks_failed": int(data.get("tasks_failed", "0")),
-            }
-
-            if age > self._heartbeat_timeout:
-                return HealthResult(
-                    status=HealthStatus.UNHEALTHY,
-                    message=f"Worker {self._worker_id} heartbeat expired ({age:.1f}s ago)",
-                    metadata=metadata,
-                )
-
-            if age > self._heartbeat_timeout * 0.8:
-                return HealthResult(
-                    status=HealthStatus.DEGRADED,
-                    message=f"Worker {self._worker_id} heartbeat stale ({age:.1f}s ago)",
-                    metadata=metadata,
-                )
-
-            return HealthResult(
-                status=HealthStatus.HEALTHY,
-                message=f"Worker {self._worker_id} healthy (heartbeat {age:.1f}s ago)",
-                metadata=metadata,
-            )
+            return self._evaluate(data)
         finally:
             r.close()
+
+    async def acheck(self) -> HealthResult:
+        """Async variant of :meth:`check` — safe to call from a running event loop.
+
+        Uses an async Redis connection instead of a blocking sync one.
+        """
+        logger.debug("WorkerHealthCheck (async) checking worker %s", self._worker_id)
+        r: aioredis.Redis = aioredis.from_url(
+            self._redis_url, decode_responses=True, socket_connect_timeout=5, socket_timeout=5
+        )
+        try:
+            key = f"exo:workers:{self._worker_id}"
+            data: dict[str, str] = await r.hgetall(key)  # type: ignore[misc,assignment]
+            return self._evaluate(data)
+        finally:
+            await r.aclose()
+
+    def _evaluate(self, data: dict[str, str]) -> HealthResult:
+        """Compute a :class:`HealthResult` from the raw heartbeat hash."""
+        if not data:
+            return HealthResult(
+                status=HealthStatus.UNHEALTHY,
+                message=f"Worker {self._worker_id} not found (no heartbeat)",
+                metadata={"worker_id": self._worker_id},
+            )
+
+        last_hb = float(data.get("last_heartbeat", "0"))
+        age = time.time() - last_hb
+        metadata: dict[str, Any] = {
+            "worker_id": self._worker_id,
+            "heartbeat_age_seconds": round(age, 2),
+            "tasks_processed": int(data.get("tasks_processed", "0")),
+            "tasks_failed": int(data.get("tasks_failed", "0")),
+        }
+
+        if age > self._heartbeat_timeout:
+            return HealthResult(
+                status=HealthStatus.UNHEALTHY,
+                message=f"Worker {self._worker_id} heartbeat expired ({age:.1f}s ago)",
+                metadata=metadata,
+            )
+
+        if age > self._heartbeat_timeout * 0.8:
+            return HealthResult(
+                status=HealthStatus.DEGRADED,
+                message=f"Worker {self._worker_id} heartbeat stale ({age:.1f}s ago)",
+                metadata=metadata,
+            )
+
+        return HealthResult(
+            status=HealthStatus.HEALTHY,
+            message=f"Worker {self._worker_id} healthy (heartbeat {age:.1f}s ago)",
+            metadata=metadata,
+        )
 
 
 def _parse_worker_health(worker_id: str, data: dict[str, str]) -> WorkerHealth:
@@ -157,7 +181,9 @@ async def get_worker_fleet_status(redis_url: str) -> list[WorkerHealth]:
         List of :class:`WorkerHealth` for all workers found.
     """
     logger.debug("Scanning fleet status from Redis")
-    r: aioredis.Redis = aioredis.from_url(redis_url, decode_responses=True)
+    r: aioredis.Redis = aioredis.from_url(
+        redis_url, decode_responses=True, socket_connect_timeout=5, socket_timeout=5
+    )
     try:
         workers: list[WorkerHealth] = []
         prefix = "exo:workers:"

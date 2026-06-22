@@ -4,21 +4,20 @@ version = "0.1.0"
 description = "Exo: A modern multi-agent framework (meta-package)"
 readme = "README.md"
 license = "MIT"
-requires-python = ">=3.11"
+requires-python = ">=3.13"
 authors = [{ name = "Midsphere AI" }]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.11",
-    "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 dependencies = [
     "exo-core>=0.1.0",
     "exo-models>=0.1.0",
+    "exo-context>=0.1.0",
     "exo-memory>=0.1.0",
     "exo-mcp>=0.1.0",
     "exo-sandbox>=0.1.0",
@@ -31,10 +30,22 @@ dependencies = [
 a2a = ["exo-a2a>=0.1.0"]
 distributed = ["exo-distributed>=0.1.0"]
 search = ["exo-search>=0.1.0"]
+guardrail = ["exo-guardrail>=0.1.0"]
+skills = ["exo-skills>=0.1.0"]
+# Tracing / observability backends. Each pulls the matching extra from
+# exo-observability (OTLP exporter + the vendor's native SDK where applicable).
+tracing = ["exo-observability[tracing]>=0.1.0"]
+langfuse = ["exo-observability[langfuse]>=0.1.0"]
+langsmith = ["exo-observability[langsmith]>=0.1.0"]
+phoenix = ["exo-observability[phoenix]>=0.1.0"]
+braintrust = ["exo-observability[braintrust]>=0.1.0"]
 all = [
     "exo-a2a>=0.1.0",
     "exo-distributed>=0.1.0",
     "exo-search>=0.1.0",
+    "exo-guardrail>=0.1.0",
+    "exo-skills>=0.1.0",
+    "exo-observability[tracing,langfuse,langsmith,phoenix,braintrust]>=0.1.0",
 ]
 
 [project.urls]
@@ -46,6 +57,7 @@ Issues = "https://github.com/midsphere-ai/exo/issues"
 [tool.uv.sources]
 exo-core = { workspace = true }
 exo-models = { workspace = true }
+exo-context = { workspace = true }
 exo-memory = { workspace = true }
 exo-mcp = { workspace = true }
 exo-sandbox = { workspace = true }
@@ -55,6 +67,8 @@ exo-retrieval = { workspace = true }
 exo-a2a = { workspace = true }
 exo-distributed = { workspace = true }
 exo-search = { workspace = true }
+exo-guardrail = { workspace = true }
+exo-skills = { workspace = true }
 
 [build-system]
 requires = ["hatchling"]

@@ -575,10 +575,10 @@ class TestToolCallInject:
         assert result.exit_code == 1
         assert "KEY=VALUE" in result.output or "Error" in result.output
 
-    def test_malformed_env_inject_ignored(
+    def test_malformed_env_inject_warns(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Malformed EXO_MCP_TOOL_INJECT is silently ignored."""
+        """Malformed EXO_MCP_TOOL_INJECT prints a yellow warning and is ignored."""
 
         cfg = _make_config(tmp_path)
         session = _mock_session()
@@ -603,5 +603,6 @@ class TestToolCallInject:
             )
 
         assert result.exit_code == 0
+        assert "Warning" in result.output and "EXO_MCP_TOOL_INJECT" in result.output
         call_args = session.call_tool.call_args[0]
         assert call_args[1] == {"x": "1"}

@@ -19,9 +19,10 @@ import asyncio
 import json
 import logging
 import re
+import shutil
 import subprocess
 from abc import ABC, abstractmethod
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncGenerator, Callable
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -36,9 +37,16 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Branch names may contain slashes (e.g. feat/my-branch).  We capture the
+# branch as *everything* up to the first "/" that precedes an optional
+# subdirectory segment.  To allow subdirectories we split on "/tree/" and then
+# use a greedy match that consumes as little as possible once we detect that a
+# subdir is present.  The regex keeps the existing behaviour for branch-only
+# URLs and adds multi-slash branch support.
 _GITHUB_RE = re.compile(
-    r"https?://github\.com/(?P<owner>[^/]+)/(?P<repo>[^/]+)"
-    r"(?:/tree/(?P<branch>[^/]+)(?:/(?P<subdir>.+))?)?"
+    r"https?://github\.com/(?P<owner>[^/]+)/(?P<repo>[^/.]+?)(?:\.git)?"
+    r"(?:/tree/(?P<branch>[^?#]+?)(?:/(?P<subdir>[^?#]+))?)?"
+    r"(?:[?#].*)?$"
 )
 
 DEFAULT_CACHE_DIR = Path.home() / ".exo" / "skills"
@@ -122,6 +130,13 @@ def extract_front_matter(text: str) -> tuple[dict[str, Any], str]:
     Returns:
         Tuple of (front-matter dict, body string). Front-matter keys
         are lowercased. The ``tool_list`` value is JSON-parsed if present.
+
+    Note:
+        This parser handles **single-line** ``key: value`` pairs only.
+        Multi-line YAML values (block scalars, flow sequences that span
+        lines, etc.) are *not* supported.  The value is everything after
+        the first ``:`` on the line, stripped.  Use a proper YAML parser
+        (e.g. ``yaml.safe_load``) if you need richer front-matter.
     """
     lines = text.splitlines()
     if not lines or lines[0].strip() != "---":
@@ -145,7 +160,12 @@ def extract_front_matter(text: str) -> tuple[dict[str, Any], str]:
         if key == "tool_list":
             try:
                 meta[key] = json.loads(val)
-            except (json.JSONDecodeError, TypeError):
+            except (json.JSONDecodeError, TypeError) as exc:
+                logger.warning(
+                    "Malformed tool_list in front-matter — expected JSON object, got %r: %s",
+                    val,
+                    exc,
+                )
                 meta[key] = {}
         elif key == "active":
             meta[key] = val.lower() == "true"
@@ -170,17 +190,40 @@ def _clone_github(parsed: dict[str, str], cache_dir: Path) -> Path:
     clone_dir = cache_dir / owner / repo / branch
     if not clone_dir.exists():
         clone_dir.parent.mkdir(parents=True, exist_ok=True)
-        url = f"https://github.com/{owner}/{repo}.git"
-        subprocess.run(
-            ["git", "clone", "--depth", "1", "--branch", branch, url, str(clone_dir)],
-            check=True,
-            capture_output=True,
-        )
+        clone_url = f"https://github.com/{owner}/{repo}.git"
+        try:
+            subprocess.run(
+                ["git", "clone", "--depth", "1", "--branch", branch, clone_url, str(clone_dir)],
+                check=True,
+                capture_output=True,
+                timeout=60,
+            )
+        except subprocess.TimeoutExpired as exc:
+            # Partial clone directory may exist — remove it so the next attempt
+            # does not short-circuit to a corrupt/empty clone.
+            shutil.rmtree(clone_dir, ignore_errors=True)
+            raise SkillError(
+                f"git clone timed out for {owner}/{repo}@{branch}",
+                context={"url": clone_url, "branch": branch},
+                hint="The clone exceeded 60 seconds. Check your network connection.",
+            ) from exc
+        except (subprocess.CalledProcessError, FileNotFoundError, OSError) as exc:
+            # Remove any partial clone directory left by a failed git clone.
+            shutil.rmtree(clone_dir, ignore_errors=True)
+            raise SkillError(
+                f"Failed to clone {owner}/{repo}@{branch}",
+                context={"url": clone_url, "branch": branch},
+                hint="Ensure git is installed and the repository URL and branch exist.",
+            ) from exc
 
     if subdir:
         target = clone_dir / subdir
         if not target.is_dir():
-            raise SkillError(f"Subdirectory '{subdir}' not found in {owner}/{repo}@{branch}")
+            raise SkillError(
+                f"Subdirectory '{subdir}' not found in {owner}/{repo}@{branch}",
+                context={"owner": owner, "repo": repo, "branch": branch, "subdir": subdir},
+                hint=f"Check that '{subdir}' exists in the {branch} branch of {owner}/{repo}.",
+            )
         return target
     return clone_dir
 
@@ -194,19 +237,42 @@ def _collect_skills(root: Path) -> dict[str, Skill]:
     for skill_file in root.rglob("*"):
         if skill_file.name not in SKILL_FILENAMES or not skill_file.is_file():
             continue
-        text = skill_file.read_text(encoding="utf-8")
-        meta, body = extract_front_matter(text)
-        name = meta.get("name") or skill_file.parent.name
-        skill = Skill(
-            name=name,
-            description=meta.get("description", meta.get("desc", "")),
-            usage=body,
-            tool_list=meta.get("tool_list") if isinstance(meta.get("tool_list"), dict) else {},
-            skill_type=meta.get("type", ""),
-            active=meta.get("active", True) if isinstance(meta.get("active"), bool) else True,
-            path=str(skill_file),
-        )
-        skills[name] = skill
+        try:
+            text = skill_file.read_text(encoding="utf-8")
+            meta, body = extract_front_matter(text)
+            if not meta.get("name"):
+                logger.warning(
+                    "Skill file %s has no 'name' front-matter field; using directory name %r",
+                    skill_file,
+                    skill_file.parent.name,
+                )
+            name = meta.get("name") or skill_file.parent.name
+            skill = Skill(
+                name=name,
+                description=meta.get("description", meta.get("desc", "")),
+                usage=body,
+                tool_list=meta.get("tool_list") if isinstance(meta.get("tool_list"), dict) else {},
+                skill_type=meta.get("type", ""),
+                active=meta.get("active", True) if isinstance(meta.get("active"), bool) else True,
+                path=str(skill_file),
+            )
+            if name in skills:
+                logger.warning(
+                    "Duplicate skill name %r within the same source scan: "
+                    "existing path %s, new path %s — last one wins",
+                    name,
+                    skills[name].path,
+                    skill_file,
+                )
+            skills[name] = skill
+        except Exception as exc:
+            logger.warning(
+                "Failed to load skill file %s — skipping: %s",
+                skill_file,
+                exc,
+                exc_info=True,
+            )
+            continue
     return skills
 
 
@@ -249,6 +315,11 @@ class SkillRegistry:
 
         Raises:
             SkillError: On conflict when strategy is ``raise``.
+
+        Note:
+            This method performs **blocking** I/O (including a ``subprocess``
+            call for GitHub sources).  Call :meth:`aload_all` from async code
+            to avoid blocking the event loop.
         """
         self._skills.clear()
         for source in self._sources:
@@ -258,11 +329,31 @@ class SkillRegistry:
             else:
                 root = Path(source).expanduser().resolve()
                 if not root.is_dir():
-                    raise SkillError(f"Skill source directory not found: {root}")
+                    raise SkillError(
+                        f"Skill source directory not found: {root}",
+                        context={"path": str(root)},
+                        hint="Create the directory or pass a valid GitHub URL (https://github.com/...) instead of a local path.",
+                    )
             new_skills = _collect_skills(root)
             for name, skill in new_skills.items():
                 self._merge(name, skill)
         return dict(self._skills)
+
+    async def aload_all(self) -> dict[str, Skill]:
+        """Async version of :meth:`load_all` — offloads blocking I/O to a thread.
+
+        Equivalent to ``load_all()`` but safe to ``await`` from an async
+        context because the blocking ``subprocess`` clone is executed in a
+        thread-pool executor rather than on the event loop.
+
+        Returns:
+            Dict mapping skill name to Skill.
+
+        Raises:
+            SkillError: On conflict when strategy is ``raise``.
+        """
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, self.load_all)
 
     def _merge(self, name: str, skill: Skill) -> None:
         """Merge a skill into the registry, applying conflict strategy."""
@@ -274,7 +365,16 @@ class SkillRegistry:
         if self._conflict == ConflictStrategy.KEEP_LAST:
             self._skills[name] = skill
             return
-        raise SkillError(f"Duplicate skill '{name}' (conflict_strategy=raise)")
+        existing = self._skills[name]
+        raise SkillError(
+            f"Duplicate skill '{name}' (conflict_strategy=raise)",
+            context={
+                "skill": name,
+                "existing_path": existing.path,
+                "new_path": skill.path,
+            },
+            hint="Rename one of the skill definitions or use conflict='keep_first'/'keep_last' to resolve automatically.",
+        )
 
     def get(self, name: str) -> Skill:
         """Retrieve a skill by name.
@@ -283,7 +383,11 @@ class SkillRegistry:
             SkillError: If the skill is not found.
         """
         if name not in self._skills:
-            raise SkillError(f"Skill '{name}' not found")
+            raise SkillError(
+                f"Skill '{name}' not found",
+                context={"name": name},
+                hint=f"Call registry.list_names() to see available skills. Loaded: {list(self._skills)[:5]}",
+            )
         return self._skills[name]
 
     def search(
@@ -319,6 +423,22 @@ class SkillRegistry:
         """Return all loaded skill names."""
         return list(self._skills.keys())
 
+    def add_skill(self, skill: Skill) -> None:
+        """Add a skill to the registry, applying the conflict strategy.
+
+        Raises:
+            SkillError: If a duplicate name is found and strategy is ``raise``.
+        """
+        self._merge(skill.name, skill)
+
+    def remove_skill(self, name: str) -> Skill | None:
+        """Remove and return a skill by name, or ``None`` if not present."""
+        return self._skills.pop(name, None)
+
+    def update_skill(self, skill: Skill) -> None:
+        """Replace an existing skill entry (unconditional overwrite)."""
+        self._skills[skill.name] = skill
+
 
 # ---------------------------------------------------------------------------
 # Hot-reload abstractions
@@ -345,9 +465,10 @@ class SkillWatcher(ABC):
     """
 
     @abstractmethod
-    async def watch(self) -> AsyncIterator[list[SkillChangeEvent]]:
+    async def watch(self) -> AsyncGenerator[list[SkillChangeEvent]]:
         """Yield batches of change events.  Blocks between batches."""
         ...  # pragma: no cover
+        yield  # make type-checkers treat this as an async generator
 
     @abstractmethod
     async def stop(self) -> None:
@@ -378,12 +499,16 @@ class DictToolResolver:
 
 
 def _skill_fingerprint(skill: Skill) -> tuple[str, str, str, str, str, bool]:
-    """Return a comparable tuple for change detection (Skill has no __eq__)."""
+    """Return a comparable tuple for change detection (Skill has no __eq__).
+
+    ``tool_list`` is serialised with ``sort_keys=True`` so that insertion-order
+    differences in the dict do not cause spurious "modified" events.
+    """
     return (
         skill.name,
         skill.description,
         skill.usage,
-        str(skill.tool_list),
+        json.dumps(skill.tool_list, sort_keys=True),
         skill.skill_type,
         skill.active,
     )
@@ -463,7 +588,7 @@ class SkillSyncManager:
             except asyncio.CancelledError:
                 pass
             except Exception:
-                logger.warning("Error awaiting watcher task", exc_info=True)
+                logger.warning("Error awaiting watcher task %s", task, exc_info=True)
 
         self._tasks.clear()
 
@@ -507,14 +632,14 @@ class SkillSyncManager:
 
         # Rebuild instructions for all bound agents after the batch
         if self._instructions_builder is not None:
-            active_skills = list(self._registry._skills.values())
+            active_skills = list(self._registry.skills.values())
             new_instructions = self._instructions_builder(active_skills)
             for agent in self._agents:
                 agent.instructions = new_instructions
 
     async def _handle_added(self, event: SkillChangeEvent) -> None:
         assert event.skill is not None
-        self._registry._skills[event.skill_name] = event.skill
+        self._registry.add_skill(event.skill)
 
         tools = self._resolver.resolve(event.skill)
         tool_names: list[str] = []
@@ -524,9 +649,10 @@ class SkillSyncManager:
                     await agent.add_tool(t)
                 except Exception:
                     logger.warning(
-                        "Failed to add tool '%s' to agent '%s'",
+                        "Failed to add tool '%s' to agent '%s' (skill '%s')",
                         t.name,
                         agent.name,
+                        event.skill_name,
                         exc_info=True,
                     )
             tool_names.append(t.name)
@@ -537,7 +663,11 @@ class SkillSyncManager:
 
     async def _handle_modified(self, event: SkillChangeEvent) -> None:
         assert event.skill is not None
-        old_skill = self._registry._skills.get(event.skill_name)
+        old_skill = (
+            self._registry.get(event.skill_name)
+            if event.skill_name in self._registry._skills
+            else None
+        )
 
         # Remove old tools
         old_tool_names = self._skill_tools.pop(event.skill_name, [])
@@ -547,14 +677,15 @@ class SkillSyncManager:
                     agent.remove_tool(name)
                 except Exception:
                     logger.warning(
-                        "Failed to remove tool '%s' from agent '%s'",
+                        "Failed to remove tool '%s' from agent '%s' (skill '%s')",
                         name,
                         agent.name,
+                        event.skill_name,
                         exc_info=True,
                     )
 
         # Update registry and add new tools
-        self._registry._skills[event.skill_name] = event.skill
+        self._registry.update_skill(event.skill)
         tools = self._resolver.resolve(event.skill)
         tool_names: list[str] = []
         for t in tools:
@@ -563,9 +694,10 @@ class SkillSyncManager:
                     await agent.add_tool(t)
                 except Exception:
                     logger.warning(
-                        "Failed to add tool '%s' to agent '%s'",
+                        "Failed to add tool '%s' to agent '%s' (skill '%s')",
                         t.name,
                         agent.name,
+                        event.skill_name,
                         exc_info=True,
                     )
             tool_names.append(t.name)
@@ -575,7 +707,7 @@ class SkillSyncManager:
             await self._bus.emit("skill:modified", old_skill=old_skill, new_skill=event.skill)
 
     async def _handle_removed(self, event: SkillChangeEvent) -> None:
-        old_skill = self._registry._skills.pop(event.skill_name, None)
+        old_skill = self._registry.remove_skill(event.skill_name)
 
         old_tool_names = self._skill_tools.pop(event.skill_name, [])
         for name in old_tool_names:
@@ -584,9 +716,10 @@ class SkillSyncManager:
                     agent.remove_tool(name)
                 except Exception:
                     logger.warning(
-                        "Failed to remove tool '%s' from agent '%s'",
+                        "Failed to remove tool '%s' from agent '%s' (skill '%s')",
                         name,
                         agent.name,
+                        event.skill_name,
                         exc_info=True,
                     )
 

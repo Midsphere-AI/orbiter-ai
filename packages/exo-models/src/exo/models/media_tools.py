@@ -16,9 +16,11 @@ Usage::
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import logging
 import os
+import time
 
 from exo.tool import ToolError, tool
 from exo.types import ImageDataBlock, ImageURLBlock, VideoBlock
@@ -54,7 +56,7 @@ async def dalle_generate_image(
     except ImportError as exc:
         raise ToolError("openai package is required for dalle_generate_image") from exc
 
-    client = AsyncOpenAI()
+    client = AsyncOpenAI(timeout=30.0, max_retries=2)
     try:
         response = await client.images.generate(
             model="dall-e-3",
@@ -108,14 +110,21 @@ async def imagen_generate_image(
 
     client = genai.Client(api_key=api_key)
     try:
-        response = await client.aio.models.generate_images(
-            model="imagen-3.0-generate-002",
-            prompt=prompt,
-            config={
-                "number_of_images": number_of_images,
-                "aspect_ratio": aspect_ratio,
-            },
+        response = await asyncio.wait_for(
+            client.aio.models.generate_images(
+                model="imagen-3.0-generate-002",
+                prompt=prompt,
+                config={
+                    "number_of_images": number_of_images,
+                    "aspect_ratio": aspect_ratio,
+                },
+            ),
+            timeout=60.0,
         )
+    except TimeoutError as exc:
+        raise ToolError(
+            "Imagen 3 generation timed out after 60s — check Vertex AI quota and try again."
+        ) from exc
     except Exception as exc:
         raise ToolError(f"Imagen 3 generation failed: {exc}") from exc
 
@@ -166,23 +175,42 @@ async def veo_generate_video(
 
     client = genai.Client(vertexai=True, project=project, location=location)
     try:
-        operation = await client.aio.models.generate_videos(
-            model="veo-2.0-generate-001",
-            prompt=prompt,
-            config={
-                "duration_seconds": duration_seconds,
-                "aspect_ratio": aspect_ratio,
-                "number_of_videos": 1,
-            },
+        operation = await asyncio.wait_for(
+            client.aio.models.generate_videos(
+                model="veo-2.0-generate-001",
+                prompt=prompt,
+                config={
+                    "duration_seconds": duration_seconds,
+                    "aspect_ratio": aspect_ratio,
+                    "number_of_videos": 1,
+                },
+            ),
+            timeout=30.0,
         )
-        # Poll until operation is complete
-        while not operation.done:
-            import asyncio
-
-            await asyncio.sleep(5)
-            operation = await client.aio.operations.get(operation)
+    except TimeoutError as exc:
+        raise ToolError(
+            "Veo 2 video generation request timed out after 30s — check network connectivity."
+        ) from exc
     except Exception as exc:
         raise ToolError(f"Veo 2 generation failed: {exc}") from exc
+
+    # Poll until operation is complete — guard against indefinite hangs.
+    _poll_timeout = 300.0  # 5 minutes total
+    _poll_interval = 5.0
+    _deadline = time.monotonic() + _poll_timeout
+    try:
+        while not operation.done:
+            if time.monotonic() >= _deadline:
+                raise ToolError(
+                    f"Veo 2 operation timed out after {int(_poll_timeout)}s — "
+                    "check the Vertex AI console for job status.",
+                )
+            await asyncio.sleep(_poll_interval)
+            operation = await client.aio.operations.get(operation)
+    except ToolError:
+        raise
+    except Exception as exc:
+        raise ToolError(f"Veo 2 polling failed: {exc}") from exc
 
     blocks: list[VideoBlock] = []
     for video in operation.result.generated_videos:

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import time
@@ -79,7 +78,10 @@ def _deserialize_event(data: dict[str, Any]) -> StreamEvent:
     cls = _EVENT_TYPE_MAP.get(event_type)  # type: ignore[arg-type]
     if cls is None:
         msg = f"Unknown event type: {event_type!r}"
-        raise ExoError(msg)
+        raise ExoError(
+            msg,
+            hint=f"Valid types: {sorted(_EVENT_TYPE_MAP)}",
+        )
     return cls(**data)  # type: ignore[return-value]
 
 
@@ -160,25 +162,49 @@ class EventSubscriber(RedisConnectionMixin):
         """Connect to Redis."""
         await super().connect()
 
-    async def subscribe(self, task_id: str) -> AsyncIterator[StreamEvent]:
+    async def subscribe(
+        self,
+        task_id: str,
+        *,
+        deadline: float | None = None,
+    ) -> AsyncIterator[StreamEvent]:
         """Yield live events via Redis Pub/Sub.
 
         Listens on channel ``exo:events:{task_id}`` and yields
         deserialized ``StreamEvent`` instances.  The iterator ends when
         a ``StatusEvent`` with status ``"completed"`` or ``"error"`` or
         ``"cancelled"`` is received.
+
+        Args:
+            task_id: The task whose event channel to subscribe to.
+            deadline: Optional maximum number of seconds to wait for a terminal
+                event.  If the task never reaches a terminal state within this
+                window (e.g. because the worker crashed without publishing one),
+                an :exc:`ExoError` is raised.  ``None`` (default) waits
+                indefinitely — safe only when callers manage their own timeout.
         """
+        import time as _time
+
         r = self._client()
         channel_name = f"exo:events:{task_id}"
         pubsub = r.pubsub()
         await pubsub.subscribe(channel_name)  # type: ignore[misc]
         logger.debug("EventSubscriber subscribed to %s", channel_name)
         terminal_statuses = {"completed", "error", "cancelled"}
+        deadline_at: float | None = (_time.monotonic() + deadline) if deadline is not None else None
         try:
             while True:
+                if deadline_at is not None and _time.monotonic() >= deadline_at:
+                    raise ExoError(
+                        f"Task {task_id} did not reach a terminal state within {deadline}s.",
+                        context={"task_id": task_id, "deadline_seconds": deadline},
+                        hint=(
+                            "Increase the deadline, check worker health with get_worker_fleet_status(), "
+                            "or inspect worker logs to see if the task is still running."
+                        ),
+                    )
                 msg = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
                 if msg is None:
-                    await asyncio.sleep(0.01)
                     continue
                 if msg["type"] != "message":
                     continue

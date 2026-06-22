@@ -36,7 +36,7 @@ By the end of this section you will know how to:
 
 ## Prerequisites
 
-- Python 3.11 or later
+- Python 3.13 or later
 - An API key for at least one LLM provider (OpenAI or Anthropic)
 - Basic familiarity with `async`/`await` in Python (helpful but not required -- `run.sync()` provides a blocking API)
 

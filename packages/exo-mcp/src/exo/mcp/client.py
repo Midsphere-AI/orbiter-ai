@@ -10,6 +10,10 @@ from datetime import timedelta
 from enum import StrEnum
 from typing import Any
 
+from exo._internal.errors import (  # pyright: ignore[reportMissingImports]
+    describe_exception_group,
+    unwrap_exception_group,
+)
 from exo.mcp.transport import create_transport_streams  # pyright: ignore[reportMissingImports]
 from exo.types import ExoError  # pyright: ignore[reportMissingImports]
 from mcp import ClientSession
@@ -306,15 +310,40 @@ class MCPServerConnection:
             session = await self._exit_stack.enter_async_context(
                 ClientSession(read, write, session_timeout)
             )
-            self._init_result = await session.initialize()
+            handshake_timeout = self._config.timeout
+            try:
+                self._init_result = await asyncio.wait_for(
+                    session.initialize(), timeout=handshake_timeout
+                )
+            except TimeoutError as exc:
+                raise MCPClientError(
+                    f"Server '{self.name}': MCP handshake timed out after {handshake_timeout}s.",
+                    context={"server": self.name, "transport": str(self._config.transport)},
+                    hint=(
+                        f"The server started but didn't complete the MCP handshake within "
+                        f"{handshake_timeout}s — verify the command is a valid MCP server. "
+                        f"Increase 'timeout' in MCPServerConfig if the server is slow to start."
+                    ),
+                ) from exc
             self._session = session
             logger.debug(
                 "Connected to MCP server '%s' (transport=%s)", self.name, self._config.transport
             )
+        except MCPClientError:
+            await self.cleanup()
+            raise
         except Exception as exc:
             logger.error("Error connecting to MCP server %r: %s", self.name, exc)
             await self.cleanup()
-            raise MCPClientError(f"Failed to connect to server '{self.name}': {exc}") from exc
+            cause = unwrap_exception_group(exc)
+            raise MCPClientError(
+                f"Failed to connect to server '{self.name}': {cause}",
+                context={"server": self.name, "transport": str(self._config.transport)},
+                hint=(
+                    f"For stdio transport, verify '{self._config.command}' is installed and on "
+                    f"PATH. For HTTP transport, check the URL is reachable."
+                ),
+            ) from exc
 
     def _create_streams(self) -> Any:
         """Create the appropriate transport streams based on config."""
@@ -340,8 +369,20 @@ class MCPServerConnection:
                 "Tools cache hit for server '%s' (%d tools)", self.name, len(self._tools_cache)
             )
             return self._tools_cache
+        tool_timeout = self._config.session_timeout or 120.0
+        try:
+            result = await asyncio.wait_for(self._session.list_tools(), timeout=tool_timeout)
+        except TimeoutError as exc:
+            raise MCPClientError(
+                f"Server '{self.name}': list_tools timed out after {tool_timeout}s.",
+                context={"server": self.name, "operation": "list_tools"},
+                hint=(
+                    f"The server did not respond to list_tools within {tool_timeout}s. "
+                    f"Increase 'session_timeout' in MCPServerConfig or check the server health."
+                ),
+            ) from exc
         self._cache_dirty = False
-        self._tools_cache = (await self._session.list_tools()).tools
+        self._tools_cache = result.tools
         logger.debug("Listed %d tools from server '%s'", len(self._tools_cache), self.name)
         return self._tools_cache
 
@@ -367,9 +408,24 @@ class MCPServerConnection:
         if not self._session:
             raise MCPClientError(f"Server '{self.name}' not connected. Call connect() first.")
         logger.debug("Calling tool '%s' on server '%s'", tool_name, self.name)
-        return await self._session.call_tool(
-            name=tool_name, arguments=arguments, progress_callback=progress_callback
-        )
+        call_timeout = self._config.session_timeout or 120.0
+        try:
+            return await asyncio.wait_for(
+                self._session.call_tool(
+                    name=tool_name, arguments=arguments, progress_callback=progress_callback
+                ),
+                timeout=call_timeout,
+            )
+        except TimeoutError as exc:
+            raise MCPClientError(
+                f"Server '{self.name}': call_tool '{tool_name}' timed out after {call_timeout}s.",
+                context={"server": self.name, "tool": tool_name, "operation": "call_tool"},
+                hint=(
+                    f"The server did not respond to tool call '{tool_name}' within "
+                    f"{call_timeout}s. Increase 'session_timeout' in MCPServerConfig or "
+                    f"check the server health."
+                ),
+            ) from exc
 
     async def cleanup(self) -> None:
         """Close the transport and session."""
@@ -378,7 +434,7 @@ class MCPServerConnection:
             try:
                 await self._exit_stack.aclose()
             except Exception as exc:
-                logger.debug("Error closing MCP server %r: %s", self.name, exc)
+                logger.warning("Error closing MCP server %r: %s", self.name, exc)
             self._exit_stack = AsyncExitStack()
 
     async def __aenter__(self) -> MCPServerConnection:
@@ -415,16 +471,18 @@ class MCPClient:
             result = await client.call_tool("my-server", "tool_name", {"arg": "val"})
     """
 
-    __slots__ = ("_configs", "_connections")
+    __slots__ = ("_configs", "_connect_locks", "_connections")
 
     def __init__(self) -> None:
         self._configs: dict[str, MCPServerConfig] = {}
         self._connections: dict[str, MCPServerConnection] = {}
+        self._connect_locks: dict[str, asyncio.Lock] = {}
 
     def add_server(self, config: MCPServerConfig) -> MCPClient:
         """Register a server configuration. Returns self for chaining."""
         config.validate()
         self._configs[config.name] = config
+        self._connect_locks.setdefault(config.name, asyncio.Lock())
         return self
 
     def remove_server(self, name: str) -> None:
@@ -442,22 +500,94 @@ class MCPClient:
 
     async def connect(self, name: str) -> MCPServerConnection:
         """Connect to a specific server. Re-uses cached connection if alive."""
+        # Fast path: already connected (no lock needed for reads once established)
         if name in self._connections and self._connections[name].is_connected:
             logger.debug("Reusing connection to server '%s'", name)
             return self._connections[name]
         config = self._configs.get(name)
         if not config:
             raise MCPClientError(f"No server registered with name '{name}'")
-        conn = MCPServerConnection(config)
-        await conn.connect()
-        self._connections[name] = conn
-        logger.debug("Established new connection to server '%s'", name)
-        return conn
+        # Per-server lock prevents concurrent callers from racing to create
+        # duplicate connections and orphaning one of them.
+        lock = self._connect_locks.setdefault(name, asyncio.Lock())
+        async with lock:
+            # Double-check inside the lock — another waiter may have connected
+            if name in self._connections and self._connections[name].is_connected:
+                logger.debug("Reusing connection to server '%s' (post-lock check)", name)
+                return self._connections[name]
+            conn = MCPServerConnection(config)
+            await conn.connect()
+            self._connections[name] = conn
+            logger.debug("Established new connection to server '%s'", name)
+            return conn
 
     async def connect_all(self) -> None:
-        """Connect to all registered servers."""
-        for name in self._configs:
-            await self.connect(name)
+        """Connect to all registered servers concurrently.
+
+        Servers are connected in parallel. If some servers fail to connect,
+        the successfully-connected servers remain available. A summary error is
+        raised listing which servers failed and which succeeded.
+
+        Raises:
+            MCPClientError: If one or more servers failed to connect, with a
+                summary of all failures and successes.
+        """
+        names = list(self._configs)
+        if not names:
+            return
+
+        results = await asyncio.gather(*[self.connect(n) for n in names], return_exceptions=True)
+
+        failures: list[tuple[str, BaseException]] = []
+        successes: list[str] = []
+        for name, result in zip(names, results, strict=True):
+            if isinstance(result, BaseException):
+                failures.append((name, result))
+                logger.error(
+                    "Failed to connect to MCP server '%s': %s", name, result, exc_info=result
+                )
+            else:
+                successes.append(name)
+
+        if failures:
+            failure_lines = "; ".join(
+                f"'{name}': {unwrap_exception_group(exc)}" for name, exc in failures
+            )
+            failure_names = [name for name, _ in failures]
+            if len(failures) == 1:
+                # Single failure: re-raise the original cause directly for cleaner tracebacks
+                _, original_exc = failures[0]
+                cause = unwrap_exception_group(original_exc)
+                raise MCPClientError(
+                    f"Failed to connect to MCP server '{failure_names[0]}': {cause}",
+                    context={
+                        "failed_servers": failure_names,
+                        "connected_servers": successes,
+                    },
+                    hint=(
+                        f"Server '{failure_names[0]}' failed to connect; "
+                        f"{len(successes)} server(s) connected successfully: {successes}. "
+                        f"Check the server config and that the command/URL is reachable."
+                    ),
+                ) from cause
+            # Multiple failures: build a descriptive summary
+            eg: BaseExceptionGroup = BaseExceptionGroup(
+                "MCP connect_all failures",
+                [exc for _, exc in failures],
+            )
+            summary = describe_exception_group(eg)
+            raise MCPClientError(
+                f"{len(failures)} MCP server(s) failed to connect: {failure_lines}",
+                context={
+                    "failed_servers": failure_names,
+                    "connected_servers": successes,
+                    "error_summary": summary,
+                },
+                hint=(
+                    f"{len(successes)} server(s) connected successfully: {successes}. "
+                    f"Check the config and reachability for the failing servers: {failure_names}."
+                ),
+            ) from eg
 
     async def disconnect(self, name: str) -> None:
         """Disconnect a specific server."""

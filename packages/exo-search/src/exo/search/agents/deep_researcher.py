@@ -182,7 +182,12 @@ async def _plan_research(
             plan.reasoning[:120] if plan.reasoning else "",
         )
     except Exception as exc:
-        _log.warning("plan parse failed (%s), falling back to single step", exc)
+        _log.warning(
+            "plan parse failed (%s), falling back to single step — model=%s raw=%r",
+            exc,
+            config.model,
+            raw[:200],
+        )
         plan = ResearchPlan(
             steps=[
                 ResearchStep(
@@ -310,7 +315,9 @@ async def _execute_step(
         extract_result = await run(extractor, step.extraction_goal, provider=provider)
         extracted_info = str(extract_result.output) if extract_result.output else "NOT FOUND"
     except Exception as exc:
-        _log.warning("extraction failed for step %s: %s", step.step_id, exc)
+        _log.warning(
+            "extraction failed for step %s (model=%s): %s", step.step_id, config.fast_model, exc
+        )
         # Fall back to using the raw results titles as extracted info
         extracted_info = "; ".join(r.title for r in results[:5]) if results else "NOT FOUND"
 

@@ -88,13 +88,19 @@ async def _mediocre_eval_fn(agent: Any, data: Sequence[dict[str, Any]]) -> list[
     return [{"input": d["input"], "output": "meh", "score": 0.5} for d in data]
 
 
-async def _improving_eval_fn(agent: Any, data: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Eval function that improves over calls."""
-    if not hasattr(_improving_eval_fn, "_call_count"):
-        _improving_eval_fn._call_count = 0  # type: ignore[attr-defined]
-    _improving_eval_fn._call_count += 1  # type: ignore[attr-defined]
-    score = min(1.0, 0.3 * _improving_eval_fn._call_count)  # type: ignore[attr-defined]
-    return [{"input": d["input"], "output": "better", "score": score} for d in data]
+def _make_improving_eval_fn() -> Any:
+    """Return an eval function that improves its score over successive calls."""
+    call_count = 0
+
+    async def _improving_eval_fn(
+        agent: Any, data: Sequence[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        nonlocal call_count
+        call_count += 1
+        score = min(1.0, 0.3 * call_count)
+        return [{"input": d["input"], "output": "better", "score": score} for d in data]
+
+    return _improving_eval_fn
 
 
 async def _failing_eval_fn(agent: Any, data: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:

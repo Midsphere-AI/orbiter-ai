@@ -9,6 +9,8 @@ from collections.abc import Sequence
 from exo.memory.base import (  # pyright: ignore[reportMissingImports]
     MemoryCategory,
     MemoryItem,
+    MemoryMetadata,
+    MemoryStatus,
     MemoryStore,
 )
 
@@ -36,6 +38,9 @@ class SearchManager:
         *,
         limit: int = 10,
         category: MemoryCategory | None = None,
+        memory_type: str | None = None,
+        status: MemoryStatus | None = None,
+        metadata: MemoryMetadata | None = None,
     ) -> list[MemoryItem]:
         """Search all stores and return merged, deduplicated results.
 
@@ -43,12 +48,28 @@ class SearchManager:
         return more than *limit* items.  After merging, duplicates (by
         ``item.id``) are removed and the combined list is sorted by
         ``created_at`` descending then trimmed to *limit*.
+
+        Args:
+            query: Text query (passed to each backend's search).
+            limit: Maximum items per store and in the merged result.
+            category: Optional category filter.
+            memory_type: Optional memory_type filter (e.g. ``"human"``).
+            status: Optional lifecycle status filter.
+            metadata: Optional metadata scope filter.
         """
         if not self._stores:
             return []
 
         tasks = [
-            store.search(query=query, category=category, limit=limit) for store in self._stores
+            store.search(
+                query=query,
+                category=category,
+                memory_type=memory_type,
+                status=status,
+                metadata=metadata,
+                limit=limit,
+            )
+            for store in self._stores
         ]
         raw_results = await asyncio.gather(*tasks, return_exceptions=True)
 

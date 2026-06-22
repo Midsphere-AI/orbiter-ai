@@ -16,6 +16,7 @@ from enum import StrEnum
 from typing import Any, Protocol, runtime_checkable
 
 from exo.memory.base import (  # pyright: ignore[reportMissingImports]
+    ExoMemoryError,
     MemoryCategory,
     MemoryItem,
     MemoryMetadata,
@@ -99,6 +100,7 @@ class ExtractionTask:
         status: Current task lifecycle status.
         result: Extracted text (set on completion).
         error: Error message (set on failure).
+        metadata: Default metadata to attach to extracted items (set by submit()).
         created_at: ISO-8601 creation timestamp.
         completed_at: ISO-8601 completion timestamp (set on completion/failure).
     """
@@ -109,6 +111,7 @@ class ExtractionTask:
     status: MemoryTaskStatus = MemoryTaskStatus.PENDING
     result: str | None = None
     error: str | None = None
+    metadata: MemoryMetadata | None = None
     created_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
     completed_at: str | None = None
 
@@ -144,7 +147,7 @@ class LongTermMemory:
         namespace: Isolation namespace for multi-tenant usage.
     """
 
-    __slots__ = ("_items", "_update_checker", "namespace")
+    __slots__ = ("_content_hashes", "_items", "_update_checker", "namespace")
 
     def __init__(
         self,
@@ -155,17 +158,19 @@ class LongTermMemory:
         self.namespace = namespace
         self._items: dict[str, MemoryItem] = {}
         self._update_checker = update_checker
+        # O(1) exact-match dedup: keyed by (memory_type, content) tuples.
+        self._content_hashes: set[tuple[str, str]] = set()
 
     async def add(self, item: MemoryItem) -> None:
         """Persist a memory item, deduplicating by content.
 
         When an ``update_checker`` is configured, it is consulted to decide
         whether to ADD, SKIP, DELETE existing items, or MERGE contents.
-        Without a checker the original exact-match dedup behaviour is used.
+        Without a checker the exact-match dedup behaviour is used (O(1) via
+        an internal content-hash set).
         """
-        existing_items = list(self._items.values())
-
         if self._update_checker is not None:
+            existing_items = list(self._items.values())
             result = await self._update_checker.check(item, existing_items)
             decision = result.decision
 
@@ -175,8 +180,11 @@ class LongTermMemory:
 
             if decision == UpdateDecision.DELETE:
                 for did in result.delete_ids:
-                    self._items.pop(did, None)
+                    deleted = self._items.pop(did, None)
+                    if deleted is not None:
+                        self._content_hashes.discard((deleted.memory_type, deleted.content))
                 self._items[item.id] = item
+                self._content_hashes.add((item.memory_type, item.content))
                 logger.debug(
                     "checker: delete ids=%s, added item id=%s namespace=%s",
                     result.delete_ids,
@@ -187,10 +195,13 @@ class LongTermMemory:
 
             if decision == UpdateDecision.MERGE:
                 for did in result.delete_ids:
-                    self._items.pop(did, None)
+                    deleted = self._items.pop(did, None)
+                    if deleted is not None:
+                        self._content_hashes.discard((deleted.memory_type, deleted.content))
                 merged_content = result.merged_content if result.merged_content else item.content
                 merged_item = item.model_copy(update={"content": merged_content})
                 self._items[merged_item.id] = merged_item
+                self._content_hashes.add((merged_item.memory_type, merged_item.content))
                 logger.debug(
                     "checker: merge delete_ids=%s, added merged item id=%s namespace=%s",
                     result.delete_ids,
@@ -201,13 +212,14 @@ class LongTermMemory:
 
             # decision == UpdateDecision.ADD — fall through to normal add
         else:
-            # Original exact-match dedup (no checker)
-            for existing in existing_items:
-                if existing.content == item.content and existing.memory_type == item.memory_type:
-                    logger.debug("skipping duplicate item type=%s id=%s", item.memory_type, item.id)
-                    return
+            # O(1) exact-match dedup via content-hash set
+            key = (item.memory_type, item.content)
+            if key in self._content_hashes:
+                logger.debug("skipping duplicate item type=%s id=%s", item.memory_type, item.id)
+                return
 
         self._items[item.id] = item
+        self._content_hashes.add((item.memory_type, item.content))
         logger.debug(
             "added item type=%s id=%s namespace=%s", item.memory_type, item.id, self.namespace
         )
@@ -255,9 +267,15 @@ class LongTermMemory:
         metadata: MemoryMetadata | None = None,
     ) -> int:
         """Remove memory items matching the filter."""
+        if metadata is not None and not any(
+            [metadata.user_id, metadata.session_id, metadata.task_id, metadata.agent_id]
+        ):
+            logger.debug("clear() called with all-None metadata fields — returning 0")
+            return 0
         if metadata is None:
             count = len(self._items)
             self._items.clear()
+            self._content_hashes.clear()
             logger.debug("cleared all items count=%d namespace=%s", count, self.namespace)
             return count
 
@@ -267,7 +285,8 @@ class LongTermMemory:
             if self._matches_metadata(item.metadata, metadata)
         ]
         for item_id in to_remove:
-            del self._items[item_id]
+            removed = self._items.pop(item_id)
+            self._content_hashes.discard((removed.memory_type, removed.content))
         logger.debug("cleared filtered items count=%d namespace=%s", len(to_remove), self.namespace)
         return len(to_remove)
 
@@ -366,6 +385,7 @@ class MemoryOrchestrator:
             task = ExtractionTask(
                 extraction_type=etype,
                 source_items=list(items),
+                metadata=metadata,
             )
             self._tasks[task.task_id] = task
             tasks.append(task)
@@ -397,8 +417,11 @@ class MemoryOrchestrator:
         """
         task = self._tasks.get(task_id)
         if task is None:
-            msg = f"No task with id {task_id!r}"
-            raise KeyError(msg)
+            raise ExoMemoryError(
+                f"No extraction task with id {task_id!r}.",
+                context={"task_id": task_id},
+                hint="Check the task_id returned by submit(). Use list_tasks() to inspect known tasks.",
+            )
 
         task.start()
         logger.debug("processing extraction task=%s type=%s", task.task_id, task.extraction_type)
@@ -409,11 +432,13 @@ class MemoryOrchestrator:
             task.complete(result)
             logger.debug("extraction completed task=%s", task.task_id)
 
-            # Store extracted knowledge
+            # Store extracted knowledge.
+            # Precedence: explicit metadata arg > task.metadata > empty default.
+            effective_metadata = metadata or task.metadata or MemoryMetadata()
             item = MemoryItem(
                 content=result,
                 memory_type=task.extraction_type.value,
-                metadata=metadata or MemoryMetadata(),
+                metadata=effective_metadata,
             )
             await self.store.add(item)
         except Exception as exc:

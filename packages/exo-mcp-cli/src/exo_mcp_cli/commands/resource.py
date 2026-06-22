@@ -10,6 +10,7 @@ import typer
 
 from exo_mcp_cli.connection import MCPConnectionError, connect_to_server
 from exo_mcp_cli.output import (
+    _render_exc,
     console,
     print_error,
     print_json,
@@ -64,7 +65,7 @@ def resource_list(
         print_error(str(exc))
         raise typer.Exit(code=1) from exc
     except Exception as exc:
-        print_error(f"Failed to list resources: {exc}")
+        print_error(f"Failed to list resources: {_render_exc(exc)}")
         if ctx.obj.get("verbose"):
             console.print_exception()
         raise typer.Exit(code=1) from exc
@@ -100,11 +101,15 @@ def resource_read(
                     out_path = Path(output)
                     item = contents[0]
                     text = getattr(item, "text", None)
-                    if text is not None:
-                        out_path.write_text(text, encoding="utf-8")
-                    else:
-                        blob = getattr(item, "blob", "")
-                        out_path.write_bytes(base64.b64decode(blob))
+                    try:
+                        if text is not None:
+                            out_path.write_text(text, encoding="utf-8")
+                        else:
+                            blob = getattr(item, "blob", "")
+                            out_path.write_bytes(base64.b64decode(blob))
+                    except OSError as exc:
+                        print_error(f"Failed to write output file '{out_path}': {exc}")
+                        raise typer.Exit(code=1) from exc
                     print_success(f"Written to {out_path}")
                 else:
                     # Multi-blob: index filenames as <base>.<n>[.<ext>] so no item
@@ -116,11 +121,15 @@ def resource_read(
                     for idx, item in enumerate(contents):
                         indexed_path = base_path.with_name(f"{stem}.{idx}{suffix}")
                         text = getattr(item, "text", None)
-                        if text is not None:
-                            indexed_path.write_text(text, encoding="utf-8")
-                        else:
-                            blob = getattr(item, "blob", "")
-                            indexed_path.write_bytes(base64.b64decode(blob))
+                        try:
+                            if text is not None:
+                                indexed_path.write_text(text, encoding="utf-8")
+                            else:
+                                blob = getattr(item, "blob", "")
+                                indexed_path.write_bytes(base64.b64decode(blob))
+                        except OSError as exc:
+                            print_error(f"Failed to write output file '{indexed_path}': {exc}")
+                            raise typer.Exit(code=1) from exc
                         written.append(indexed_path)
                     for p in written:
                         print_success(f"Written to {p}")
@@ -133,7 +142,7 @@ def resource_read(
         print_error(str(exc))
         raise typer.Exit(code=1) from exc
     except Exception as exc:
-        print_error(f"Failed to read resource: {exc}")
+        print_error(f"Failed to read resource: {_render_exc(exc)}")
         if ctx.obj.get("verbose"):
             console.print_exception()
         raise typer.Exit(code=1) from exc

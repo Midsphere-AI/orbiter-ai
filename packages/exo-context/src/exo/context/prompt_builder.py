@@ -95,7 +95,14 @@ class PromptBuilder:
         except Exception as exc:
             msg = f"PromptSection {section_name!r} not found in registry"
             logger.warning(msg)
-            raise PromptBuilderError(msg) from exc
+            raise PromptBuilderError(
+                msg,
+                hint=(
+                    f"Available sections: {section_registry.list_all()}. "
+                    "Register custom sections via section_registry.register()."
+                ),
+                context={"section_name": section_name},
+            ) from exc
         self._entries.append(_SectionEntry(section=section, kwargs=kwargs))
         return self
 

@@ -94,7 +94,13 @@ def load_mcp_config(path: str | Path) -> list[MCPServerConfig]:
     """
     path = Path(path)
     if not path.exists():
-        raise MCPExecutionError(f"MCP config file not found: {path}")
+        raise MCPExecutionError(
+            f"MCP config file not found: {path}",
+            hint=(
+                f"Create {path} or pass the correct path to load_mcp_config(). "
+                f"See docs for the expected mcp.json format."
+            ),
+        )
 
     try:
         raw = path.read_text(encoding="utf-8")
@@ -104,12 +110,27 @@ def load_mcp_config(path: str | Path) -> list[MCPServerConfig]:
 
     servers_raw = data.get("mcpServers", {})
     if not isinstance(servers_raw, dict):
-        raise MCPExecutionError(f"Expected 'mcpServers' to be a dict in '{path}'")
+        raise MCPExecutionError(
+            f"Expected 'mcpServers' to be a dict in '{path}', got {type(servers_raw).__name__}.",
+            hint=(
+                f"The 'mcpServers' key in {path} must map server names to config objects. "
+                f"Check that the JSON is well-formed."
+            ),
+        )
 
     configs: list[MCPServerConfig] = []
     for name, raw_cfg in servers_raw.items():
         cfg = _substitute_recursive(raw_cfg)
-        transport = MCPTransport(cfg.get("transport", "stdio"))
+        raw_transport = cfg.get("transport", "stdio")
+        try:
+            transport = MCPTransport(raw_transport)
+        except ValueError as exc:
+            valid = ", ".join(t.value for t in MCPTransport)
+            raise MCPExecutionError(
+                f"Server '{name}': unknown transport {raw_transport!r} in '{path}'.",
+                context={"server": name, "transport": raw_transport, "config_path": str(path)},
+                hint=f"Valid transports are: {valid}. Check the 'transport' field in {path}.",
+            ) from exc
         configs.append(
             MCPServerConfig(
                 name=name,
@@ -121,7 +142,10 @@ def load_mcp_config(path: str | Path) -> list[MCPServerConfig]:
                 url=cfg.get("url"),
                 headers=cfg.get("headers"),
                 timeout=cfg.get("timeout", 30.0),
+                sse_read_timeout=cfg.get("sse_read_timeout", 300.0),
                 cache_tools=cfg.get("cache_tools", False),
+                session_timeout=cfg.get("session_timeout", 120.0),
+                large_output_tools=cfg.get("large_output_tools"),
             )
         )
 

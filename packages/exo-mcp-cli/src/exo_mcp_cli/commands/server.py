@@ -9,13 +9,14 @@ from typing import Annotated
 import typer
 
 from exo_mcp_cli.config import (
+    MCPConfigError,
     ServerEntry,
     add_server,
     default_config_path,
     remove_server,
 )
 from exo_mcp_cli.connection import MCPConnectionError, connect_to_server
-from exo_mcp_cli.output import console, print_error, print_servers_table, print_success
+from exo_mcp_cli.output import _render_exc, console, print_error, print_servers_table, print_success
 
 server_app = typer.Typer(
     name="server",
@@ -78,12 +79,23 @@ def server_add(
     Sensitive values in --header and --env are automatically stored in the
     encrypted vault and replaced with ${vault:...} references in mcp.json.
     """
+    from pathlib import Path
+
+    from exo_mcp_cli.config import find_config
     from exo_mcp_cli.main import get_vault
 
     config_path_str = ctx.obj.get("config_path")
-    from pathlib import Path
-
-    config_path = Path(config_path_str) if config_path_str else default_config_path()
+    if config_path_str:
+        # Explicit --config: use the given path (may not exist yet — that's fine for add).
+        config_path = Path(config_path_str)
+    else:
+        # No explicit path: prefer an existing config (same discovery as list/remove)
+        # so that `server add` writes to the same file that `server list` reads.
+        try:
+            existing = find_config(None)
+        except MCPConfigError:
+            existing = None
+        config_path = existing if existing is not None else default_config_path()
 
     # Parse headers and auto-vault sensitive values
     parsed_headers: dict[str, str] | None = None
@@ -126,7 +138,7 @@ def server_add(
 
     try:
         entry.validate()
-    except Exception as exc:
+    except MCPConfigError as exc:
         print_error(str(exc))
         raise typer.Exit(code=1) from exc
 
@@ -146,7 +158,10 @@ def server_remove(
 
     path, _servers = resolve_config(ctx)
     if path is None:
-        print_error("No config file found.")
+        print_error(
+            "No config file found. "
+            "Create one with `exo-mcp server add <name> ...` or use --config to point to an existing file."
+        )
         raise typer.Exit(code=1)
     if not remove_server(path, name):
         print_error(f"Server '{name}' not found in config.")
@@ -173,12 +188,12 @@ def server_test(
             console.print(f"  Connected in {connect_time:.1f}s")
 
             ping_start = time.monotonic()
-            await session.send_ping()
+            await asyncio.wait_for(session.send_ping(), timeout=entry.timeout)
             ping_time = time.monotonic() - ping_start
             console.print(f"  Ping: {ping_time * 1000:.0f}ms")
 
             # Show server info
-            tools = await session.list_tools()
+            tools = await asyncio.wait_for(session.list_tools(), timeout=entry.timeout)
             console.print(f"  Tools: {len(tools.tools)}")
 
         print_success(f"Server '{name}' is reachable.")
@@ -189,7 +204,7 @@ def server_test(
         print_error(str(exc))
         raise typer.Exit(code=1) from exc
     except Exception as exc:
-        print_error(f"Connection failed: {exc}")
+        print_error(f"Connection failed: {_render_exc(exc)}")
         if ctx.obj.get("verbose"):
             console.print_exception()
         raise typer.Exit(code=1) from exc

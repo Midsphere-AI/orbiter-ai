@@ -319,7 +319,7 @@ class TestEdgeCases:
         assert "tool" in result
 
     async def test_score_clamped_to_range(self) -> None:
-        """Scores outside 0.0–1.0 should be clamped."""
+        """Scores outside 0.0-1.0 should be clamped."""
 
         async def _extreme_scorer(*, system_prompt: str, user_prompt: str, **kw: Any) -> str:
             if "rate" in system_prompt.lower() or "evaluating" in system_prompt.lower():

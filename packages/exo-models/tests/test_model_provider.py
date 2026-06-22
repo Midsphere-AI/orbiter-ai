@@ -197,3 +197,67 @@ class TestIncompleteProvider:
 
         with pytest.raises(TypeError):
             NoStream(ModelConfig())  # type: ignore[abstract]
+
+
+# ---------------------------------------------------------------------------
+# TestContextWindows — model name key alignment (finding #10)
+# ---------------------------------------------------------------------------
+
+
+class TestContextWindowLookup:
+    """Context window entries must be keyed by the model_name (after the colon)."""
+
+    def setup_method(self) -> None:
+        model_registry.register("stub", StubProvider)
+
+    def teardown_method(self) -> None:
+        model_registry._items.pop("stub", None)
+
+    def _ctx(self, model_name: str) -> int | None:
+        from exo.models.context_windows import MODEL_CONTEXT_WINDOWS
+
+        return MODEL_CONTEXT_WINDOWS.get(model_name)
+
+    def test_gpt4o_resolves(self) -> None:
+        assert self._ctx("gpt-4o") == 128_000
+
+    def test_gpt4o_mini_resolves(self) -> None:
+        assert self._ctx("gpt-4o-mini") == 128_000
+
+    def test_gpt41_resolves(self) -> None:
+        assert self._ctx("gpt-4.1") == 1_047_576
+
+    def test_o1_resolves(self) -> None:
+        assert self._ctx("o1") == 200_000
+
+    def test_o3_resolves(self) -> None:
+        assert self._ctx("o3") == 200_000
+
+    def test_o4_mini_resolves(self) -> None:
+        assert self._ctx("o4-mini") == 200_000
+
+    def test_claude_sonnet_4_5_resolves(self) -> None:
+        assert self._ctx("claude-sonnet-4-5-20250929") == 200_000
+
+    def test_claude_sonnet_4_6_resolves(self) -> None:
+        assert self._ctx("claude-sonnet-4-6") == 200_000
+
+    def test_claude_opus_4_6_resolves(self) -> None:
+        assert self._ctx("claude-opus-4-6") == 200_000
+
+    def test_gemini_2_5_pro_resolves(self) -> None:
+        assert self._ctx("gemini-2.5-pro") == 1_048_576
+
+    def test_gemini_2_5_flash_resolves(self) -> None:
+        assert self._ctx("gemini-2.5-flash") == 1_048_576
+
+    def test_gemini_2_0_flash_resolves(self) -> None:
+        assert self._ctx("gemini-2.0-flash") == 1_048_576
+
+    def test_get_provider_wires_context_window(self) -> None:
+        """get_provider() must pass the resolved context window to ModelConfig."""
+        provider = get_provider("stub:gpt-4o")
+        assert provider.config.context_window_tokens == 128_000
+
+    def test_unknown_model_returns_none(self) -> None:
+        assert self._ctx("totally-unknown-model-xyz") is None

@@ -93,6 +93,12 @@ def namespace_tool_name(
     # separators in the result are unambiguous delimiters.
     safe_server = re.sub(r"[^a-zA-Z0-9]+", "_", server_name).strip("_")
     safe_tool = re.sub(r"[^a-zA-Z0-9]+", "_", tool_name).strip("_")
+    if not safe_server:
+        raise MCPToolError(
+            f"Cannot namespace tool '{tool_name}': server name '{server_name}' "
+            "contains no alphanumeric characters and cannot be used as a namespace segment.",
+            hint="Use a server name that contains at least one letter or digit.",
+        )
     return f"{namespace}__{safe_server}__{safe_tool}"
 
 
@@ -222,8 +228,10 @@ class MCPToolWrapper(Tool):
         # Set large_output from server_config.large_output_tools membership
         large_output_tools = getattr(server_config, "large_output_tools", None) or []
         self.large_output: bool = mcp_tool.name in large_output_tools
-        # Queue for progress notifications captured during execute(); drained by agent.stream()
-        self.progress_queue: asyncio.Queue[Any] = asyncio.Queue()
+        # Bounded queue for progress notifications captured during execute(); drained by
+        # agent.stream(). The cap (256) prevents unbounded memory growth if the consumer
+        # is slow; excess notifications are dropped with a warning.
+        self.progress_queue: asyncio.Queue[Any] = asyncio.Queue(maxsize=256)
 
     @property
     def original_name(self) -> str:
@@ -280,7 +288,7 @@ class MCPToolWrapper(Tool):
         wrapper._connection = None
         wrapper._reconnect_lock = asyncio.Lock()
         wrapper.large_output = data.get("large_output", False)
-        wrapper.progress_queue = asyncio.Queue()
+        wrapper.progress_queue = asyncio.Queue(maxsize=256)
         if "server_config" in data:
             wrapper._server_config = MCPServerConfig.from_dict(data["server_config"])
         else:
@@ -314,11 +322,34 @@ class MCPToolWrapper(Tool):
                             self._server_name,
                         )
                         conn = MCPServerConnection(self._server_config)
+                        reconnect_timeout = getattr(self._server_config, "timeout", None) or 30.0
                         try:
-                            await conn.connect()
+                            await asyncio.wait_for(conn.connect(), timeout=reconnect_timeout)
+                        except TimeoutError as exc:
+                            raise MCPToolError(
+                                f"MCP server '{self._server_name}' reconnection timed out "
+                                f"after {reconnect_timeout}s.",
+                                context={
+                                    "server": self._server_name,
+                                    "tool": self._original_name,
+                                    "operation": "reconnect",
+                                },
+                                hint=(
+                                    "Check the MCP server is reachable from the worker node "
+                                    "and that 'timeout' in MCPServerConfig is large enough."
+                                ),
+                            ) from exc
                         except Exception as exc:
                             raise MCPToolError(
-                                f"MCP server reconnection failed for server '{self._server_name}'"
+                                f"MCP server '{self._server_name}' reconnection failed: {exc}",
+                                context={
+                                    "server": self._server_name,
+                                    "tool": self._original_name,
+                                },
+                                hint=(
+                                    "Check the server command is on PATH and the server_config "
+                                    "is valid."
+                                ),
                             ) from exc
                         self._connection = conn
                         self._call_fn = conn.call_tool
@@ -343,11 +374,17 @@ class MCPToolWrapper(Tool):
             ) -> None:
                 event = MCPProgressEvent(
                     tool_name=_tool_name,
-                    progress=int(progress),
-                    total=int(total) if total is not None else None,
+                    progress=round(progress),
+                    total=round(total) if total is not None else None,
                     message=message or "",
                 )
-                await _queue.put(event)
+                try:
+                    _queue.put_nowait(event)
+                except asyncio.QueueFull:
+                    logger.warning(
+                        "Progress queue full for MCP tool '%s' — dropping notification",
+                        _tool_name,
+                    )
 
         except ImportError:
             _progress_callback = None  # type: ignore[assignment]
@@ -370,7 +407,10 @@ class MCPToolWrapper(Tool):
 
         if result.isError:
             error_text = _format_call_result(result)
-            raise MCPToolError(f"MCP tool '{self._original_name}' returned error: {error_text}")
+            raise MCPToolError(
+                f"MCP tool '{self._original_name}' returned error: {error_text}",
+                context={"server": self._server_name, "tool": self._original_name},
+            )
 
         return _format_call_result(result)
 
@@ -391,6 +431,13 @@ class MCPToolWrapper(Tool):
         (or use the wrapper as an async context manager) to prevent connection
         accumulation.
         """
+        # Drain any unconsumed progress events to keep memory bounded.
+        while not self.progress_queue.empty():
+            try:
+                self.progress_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+
         if self._connection is not None:
             try:
                 await self._connection.cleanup()

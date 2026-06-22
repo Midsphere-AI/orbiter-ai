@@ -30,6 +30,7 @@ from exo.observability.config import (  # pyright: ignore[reportMissingImports]
     TracingConfig,
     reset,
 )
+from exo.types import ExoError  # pyright: ignore[reportMissingImports]
 
 
 @pytest.fixture(autouse=True)
@@ -77,15 +78,15 @@ class TestLoggingConfigNamespace:
         assert cfg.log_format == "json"
 
     def test_conflict_with_log_level_raises(self) -> None:
-        with pytest.raises(ValueError, match="log_level"):
+        with pytest.raises(ExoError, match="log_level"):
             ObservabilityConfig(logging=LoggingConfig(level="DEBUG"), log_level="INFO")
 
     def test_conflict_with_log_format_raises(self) -> None:
-        with pytest.raises(ValueError, match="log_format"):
+        with pytest.raises(ExoError, match="log_format"):
             ObservabilityConfig(logging=LoggingConfig(), log_format="json")
 
     def test_invalid_grouped_type_raises(self) -> None:
-        with pytest.raises(ValueError, match="LoggingConfig"):
+        with pytest.raises(ExoError, match="LoggingConfig"):
             ObservabilityConfig(logging="bad-value")  # type: ignore[arg-type]
 
     def test_logging_property_returns_view(self) -> None:
@@ -143,15 +144,15 @@ class TestTracingConfigNamespace:
         assert cfg.sample_rate == 0.75
 
     def test_conflict_with_trace_enabled_raises(self) -> None:
-        with pytest.raises(ValueError, match="trace_enabled"):
+        with pytest.raises(ExoError, match="trace_enabled"):
             ObservabilityConfig(tracing=TracingConfig(enabled=True), trace_enabled=False)
 
     def test_conflict_with_sample_rate_raises(self) -> None:
-        with pytest.raises(ValueError, match="sample_rate"):
+        with pytest.raises(ExoError, match="sample_rate"):
             ObservabilityConfig(tracing=TracingConfig(), sample_rate=0.5)
 
     def test_invalid_grouped_type_raises(self) -> None:
-        with pytest.raises(ValueError, match="TracingConfig"):
+        with pytest.raises(ExoError, match="TracingConfig"):
             ObservabilityConfig(tracing=42)  # type: ignore[arg-type]
 
     def test_tracing_property_returns_view(self) -> None:
@@ -200,11 +201,11 @@ class TestMetricsConfigNamespace:
         assert cfg.metrics_enabled is True
 
     def test_conflict_raises(self) -> None:
-        with pytest.raises(ValueError, match="metrics_enabled"):
+        with pytest.raises(ExoError, match="metrics_enabled"):
             ObservabilityConfig(metrics=MetricsConfig(enabled=True), metrics_enabled=False)
 
     def test_invalid_grouped_type_raises(self) -> None:
-        with pytest.raises(ValueError, match="MetricsConfig"):
+        with pytest.raises(ExoError, match="MetricsConfig"):
             ObservabilityConfig(metrics="bad")  # type: ignore[arg-type]
 
     def test_metrics_property_returns_view(self) -> None:

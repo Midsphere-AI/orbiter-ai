@@ -146,6 +146,46 @@ class TestWorkerHealthCheck:
         assert result.status == HealthStatus.DEGRADED
         assert "stale" in result.message
 
+    @pytest.mark.asyncio
+    async def test_acheck_healthy(self) -> None:
+        """acheck() must work from an async context (uses async Redis, not blocking)."""
+        from unittest.mock import patch as async_patch
+
+        import fakeredis.aioredis
+
+        now = time.time()
+        fake_redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
+        await fake_redis.hset(  # type: ignore[misc]
+            "exo:workers:w-async",
+            mapping={
+                "status": "running",
+                "last_heartbeat": str(now),
+                "tasks_processed": "3",
+                "tasks_failed": "0",
+            },
+        )
+
+        check = WorkerHealthCheck("redis://localhost", "w-async", heartbeat_timeout=60.0)
+        with async_patch("exo.distributed.health.aioredis.from_url", return_value=fake_redis):
+            result = await check.acheck()
+
+        assert result.status == HealthStatus.HEALTHY
+        assert "w-async" in result.message
+
+    @pytest.mark.asyncio
+    async def test_acheck_unhealthy_no_heartbeat(self) -> None:
+        from unittest.mock import patch as async_patch
+
+        import fakeredis.aioredis
+
+        fake_redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
+        check = WorkerHealthCheck("redis://localhost", "missing-w", heartbeat_timeout=60.0)
+        with async_patch("exo.distributed.health.aioredis.from_url", return_value=fake_redis):
+            result = await check.acheck()
+
+        assert result.status == HealthStatus.UNHEALTHY
+        assert "not found" in result.message
+
 
 # ---------------------------------------------------------------------------
 # _parse_worker_health

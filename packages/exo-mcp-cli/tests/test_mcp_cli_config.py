@@ -169,6 +169,28 @@ class TestSubstituteEnvVars:
     def test_no_placeholders(self) -> None:
         assert substitute_env_vars("plain text") == "plain text"
 
+    def test_warn_missing_emits_warning(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        monkeypatch.delenv("MISSING_CMD_VAR", raising=False)
+        import logging
+
+        with caplog.at_level(logging.WARNING, logger="exo_mcp_cli.config"):
+            result = substitute_env_vars("${MISSING_CMD_VAR}", warn_missing=True)
+        assert result == ""
+        assert "MISSING_CMD_VAR" in caplog.text
+
+    def test_warn_missing_silent_by_default(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        monkeypatch.delenv("MISSING_CMD_VAR", raising=False)
+        import logging
+
+        with caplog.at_level(logging.WARNING, logger="exo_mcp_cli.config"):
+            result = substitute_env_vars("${MISSING_CMD_VAR}")
+        assert result == ""
+        assert "MISSING_CMD_VAR" not in caplog.text
+
 
 # ---------------------------------------------------------------------------
 # find_config
@@ -177,22 +199,23 @@ class TestSubstituteEnvVars:
 
 class TestFindConfig:
     def test_finds_mcp_json_in_cwd(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.chdir(tmp_path)
-        _write_mcp_json(tmp_path / "mcp.json")
+        # Patch _cwd_path (a helper in the module) so the test does not mutate the
+        # global process cwd — chdir is not safe under xdist parallel workers.
+        cfg = _write_mcp_json(tmp_path / "mcp.json")
+        monkeypatch.setattr("exo_mcp_cli.config._cwd", lambda: tmp_path)
         result = find_config()
         assert result is not None
-        assert result.name == "mcp.json"
+        assert result == cfg
 
     def test_finds_home_fallback(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        # Use an empty cwd so local search fails
+        # Use a directory with no mcp.json so the local cwd search fails.
         empty_dir = tmp_path / "empty"
         empty_dir.mkdir()
-        monkeypatch.chdir(empty_dir)
-        # Create the home config dir structure inside tmp_path
+        monkeypatch.setattr("exo_mcp_cli.config._cwd", lambda: empty_dir)
+        # Create the home config dir structure inside tmp_path.
         home_cfg = tmp_path / "home_cfg"
         home_cfg.mkdir()
         _write_mcp_json(home_cfg / "mcp.json")
-        # Patch _HOME_CONFIG_DIR to point inside tmp_path
         monkeypatch.setattr("exo_mcp_cli.config._HOME_CONFIG_DIR", home_cfg)
         result = find_config()
         assert result is not None
@@ -201,8 +224,10 @@ class TestFindConfig:
     def test_returns_none_when_no_config(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.chdir(tmp_path)
-        # Patch home dir too so it doesn't pick up real config
+        # Empty dir + patched home dir → no config anywhere.
+        empty_dir = tmp_path / "empty"
+        empty_dir.mkdir()
+        monkeypatch.setattr("exo_mcp_cli.config._cwd", lambda: empty_dir)
         monkeypatch.setattr("exo_mcp_cli.config._HOME_CONFIG_DIR", tmp_path / "nope")
         assert find_config() is None
 
@@ -266,6 +291,46 @@ class TestLoadConfig:
         cfg = _write_mcp_json(tmp_path / "mcp.json", {})
         servers = load_config(cfg)
         assert servers == {}
+
+    def test_missing_command_env_var_emits_warning(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A missing env var in 'command' should emit a warning, not silently become ''."""
+        import logging
+
+        monkeypatch.delenv("MISSING_MCP_CMD", raising=False)
+        cfg = tmp_path / "mcp.json"
+        cfg.write_text(
+            '{"mcpServers": {"s": {"transport": "stdio", "command": "${MISSING_MCP_CMD}"}}}',
+            encoding="utf-8",
+        )
+        with caplog.at_level(logging.WARNING, logger="exo_mcp_cli.config"):
+            servers = load_config(cfg)
+        assert servers["s"].command == ""
+        assert "MISSING_MCP_CMD" in caplog.text
+
+    def test_missing_url_env_var_emits_warning(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A missing env var in 'url' should emit a warning."""
+        import logging
+
+        monkeypatch.delenv("MISSING_MCP_URL", raising=False)
+        cfg = tmp_path / "mcp.json"
+        cfg.write_text(
+            '{"mcpServers": {"s": {"transport": "sse", "url": "${MISSING_MCP_URL}"}}}',
+            encoding="utf-8",
+        )
+        with caplog.at_level(logging.WARNING, logger="exo_mcp_cli.config"):
+            servers = load_config(cfg)
+        assert servers["s"].url == ""
+        assert "MISSING_MCP_URL" in caplog.text
 
 
 # ---------------------------------------------------------------------------
@@ -373,6 +438,62 @@ class TestRemoveServer:
 
 class TestDefaultConfigPath:
     def test_returns_cwd_mcp_json(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr("exo_mcp_cli.config._cwd", lambda: tmp_path)
         result = default_config_path()
         assert result == tmp_path / "mcp.json"
+
+
+# ---------------------------------------------------------------------------
+# Hints on validate / find_config / load_config / save_config (error DX)
+# ---------------------------------------------------------------------------
+
+
+class TestValidateHints:
+    def test_stdio_missing_command_has_hint(self) -> None:
+        entry = ServerEntry(name="my-srv", transport="stdio")
+        with pytest.raises(MCPConfigError) as exc_info:
+            entry.validate()
+        assert exc_info.value.hint is not None
+        assert "exo-mcp server add" in exc_info.value.hint
+
+    def test_sse_missing_url_has_hint(self) -> None:
+        entry = ServerEntry(name="my-srv", transport="sse")
+        with pytest.raises(MCPConfigError) as exc_info:
+            entry.validate()
+        assert exc_info.value.hint is not None
+        assert "exo-mcp server add" in exc_info.value.hint
+
+
+class TestFindConfigHint:
+    def test_nonexistent_explicit_path_has_hint(self) -> None:
+        with pytest.raises(MCPConfigError) as exc_info:
+            find_config("/does/not/exist/mcp.json")
+        assert exc_info.value.hint is not None
+        assert "--config" in exc_info.value.hint
+
+
+class TestLoadConfigContext:
+    def test_parse_error_carries_config_context(self, tmp_path: Path) -> None:
+        cfg = tmp_path / "bad.json"
+        cfg.write_text("{not json}", encoding="utf-8")
+        with pytest.raises(MCPConfigError) as exc_info:
+            load_config(cfg)
+        assert exc_info.value.context is not None
+        assert "config" in exc_info.value.context
+        assert str(cfg) in str(exc_info.value.context["config"])
+
+
+class TestSaveConfigOSError:
+    def test_permission_error_raises_mcp_config_error(self, tmp_path: Path) -> None:
+        """An OSError on write is re-raised as MCPConfigError with context."""
+        from unittest.mock import patch
+
+        cfg_path = tmp_path / "out.json"
+        entry = ServerEntry(name="s1", command="echo")
+        with (
+            patch("pathlib.Path.write_text", side_effect=OSError("disk full")),
+            pytest.raises(MCPConfigError) as exc_info,
+        ):
+            save_config(cfg_path, {"s1": entry})
+        assert "config" in (exc_info.value.context or {})
+        assert exc_info.value.hint is not None

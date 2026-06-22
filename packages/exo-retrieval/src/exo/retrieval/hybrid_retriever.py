@@ -8,10 +8,16 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Any
 
 from exo.retrieval.retriever import Retriever  # pyright: ignore[reportMissingImports]
-from exo.retrieval.types import RetrievalResult  # pyright: ignore[reportMissingImports]
+from exo.retrieval.types import (  # pyright: ignore[reportMissingImports]
+    RetrievalError,
+    RetrievalResult,
+)
+
+logger = logging.getLogger(__name__)
 
 # Default RRF constant (controls how much low-ranked results are penalised).
 _DEFAULT_K = 60
@@ -62,10 +68,43 @@ class HybridRetriever(Retriever):
             A list of ``RetrievalResult`` objects ranked by fused RRF score
             (highest first).
         """
-        vector_results, sparse_results = await asyncio.gather(
+        raw = await asyncio.gather(
             self.vector_retriever.retrieve(query, top_k=top_k, **kwargs),
             self.sparse_retriever.retrieve(query, top_k=top_k, **kwargs),
+            return_exceptions=True,
         )
+        vector_raw, sparse_raw = raw[0], raw[1]
+
+        vector_failed = isinstance(vector_raw, BaseException)
+        sparse_failed = isinstance(sparse_raw, BaseException)
+
+        if vector_failed and sparse_failed:
+            raise RetrievalError(
+                "Both vector and sparse retrieval failed.",
+                context={
+                    "vector_error": str(vector_raw),
+                    "sparse_error": str(sparse_raw),
+                },
+                hint="Check both retriever configurations and that the vector store is reachable.",
+            )
+
+        if vector_failed:
+            logger.warning(
+                "HybridRetriever: vector retrieval failed (%s); continuing with sparse results only.",
+                vector_raw,
+            )
+            vector_results: list[RetrievalResult] = []
+        else:
+            vector_results = vector_raw  # type: ignore[assignment]
+
+        if sparse_failed:
+            logger.warning(
+                "HybridRetriever: sparse retrieval failed (%s); continuing with vector results only.",
+                sparse_raw,
+            )
+            sparse_results: list[RetrievalResult] = []
+        else:
+            sparse_results = sparse_raw  # type: ignore[assignment]
 
         # Build a mapping from chunk identity to fused score.
         # Use (document_id, index) as the dedup key since Chunk is frozen.
@@ -87,8 +126,8 @@ class HybridRetriever(Retriever):
             if key not in chunks:
                 chunks[key] = result
 
-        # Sort by fused score descending.
-        ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+        # Sort by fused score descending; break ties deterministically by doc key.
+        ranked = sorted(scores.items(), key=lambda x: (x[1], x[0][0], x[0][1]), reverse=True)
 
         return [
             RetrievalResult(

@@ -58,11 +58,22 @@ class SubagentsConfig:
             copies of itself for parallel sub-tasks.
         max_depth: Maximum recursive spawn depth.
         max_children: Maximum number of children spawned in one call (1..8).
+        background: Also register the fire-and-forget background sub-agent
+            tools (``spawn_background``/``check_subagent``/``list_subagents``)
+            so the agent can launch a child, keep working, and have the
+            result injected back when it completes.  Gated behind *enabled*.
+        background_timeout: Per-child wall-clock timeout in seconds for
+            background sub-agents (``None`` means no timeout).
+        background_max: Maximum number of concurrently running background
+            sub-agents (back-pressure cap).
     """
 
     enabled: bool = True
     max_depth: int = 3
     max_children: int = 4
+    background: bool = True
+    background_timeout: float | None = None
+    background_max: int = 8
 
 
 @dataclass(frozen=True)
@@ -85,6 +96,36 @@ class ToolBatchConfig:
     max_output_bytes: int = 200_000
     max_tool_calls: int = 200
     extra_args: dict[str, str] | None = None
+
+
+@dataclass(frozen=True)
+class WorkspaceConfig:
+    """Workspace-backed knowledge/file tool configuration (opt-in).
+
+    These tools are **off by default** — a bare agent does not advertise them.
+    Pass ``workspace=WorkspaceConfig(enabled=True)`` to give the agent a
+    :class:`~exo.context.workspace.Workspace` plus a ``KnowledgeStore`` wired
+    into its context, which turns on the knowledge tools (``search_knowledge``,
+    ``get_knowledge``, ``grep_knowledge``).  Artifacts the agent offloads are
+    auto-indexed into the same store, so the knowledge tools can search them.
+
+    ``read_file`` is registered only when *working_dir* is set, and is scoped
+    to that directory (path traversal outside it is rejected).  Leaving
+    *working_dir* unset keeps the host filesystem off-limits.
+
+    Args:
+        enabled: Register the workspace-backed knowledge tools.
+        working_dir: If set, also register ``read_file`` scoped to this directory.
+        storage_path: Optional filesystem root to persist workspace artifacts.
+        chunk_size: Maximum characters per knowledge-store chunk.
+        chunk_overlap: Overlap between consecutive chunks.
+    """
+
+    enabled: bool = False
+    working_dir: str | None = None
+    storage_path: str | None = None
+    chunk_size: int = 512
+    chunk_overlap: int = 64
 
 
 @dataclass(frozen=True)

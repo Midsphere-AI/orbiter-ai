@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
@@ -18,6 +19,10 @@ from exo.observability.logging import get_logger  # pyright: ignore[reportMissin
 from exo.types import ExoError
 
 _log = get_logger(__name__)
+
+# Cap the rolling partial-output buffer so a chatty background child cannot
+# grow a background task's progress unbounded while it streams.
+_PARTIAL_OUTPUT_CAP = 4_000
 
 
 class BackgroundTaskError(ExoError):
@@ -29,6 +34,26 @@ class MergeMode(StrEnum):
 
     HOT = "hot"
     WAKEUP = "wakeup"
+
+
+@dataclass
+class BackgroundProgress:
+    """Live, mutable snapshot of what a background task is doing right now.
+
+    Updated in place by the stream consumer that drives the background
+    child, so a parent can poll it at any time (via ``check_subagent``)
+    to see the child's current step, latest tool call, partial output,
+    and token usage — not just its terminal status.
+    """
+
+    step_number: int = 0
+    step_status: str = ""
+    current_tool: str = ""
+    current_tool_args: str = ""
+    last_tool_result: str = ""
+    last_tool_error: str | None = None
+    partial_output: str = ""
+    tokens_used: int = 0
 
 
 class BackgroundTask:
@@ -54,6 +79,26 @@ class BackgroundTask:
         self.error: str | None = None
         self.status: RunNodeStatus = RunNodeStatus.INIT
         self.merge_mode: MergeMode | None = None
+        self.progress: BackgroundProgress = BackgroundProgress()
+
+    def update_progress(self, **fields: Any) -> None:
+        """Update one or more live-progress fields in place.
+
+        Unknown field names are ignored so the stream consumer can pass
+        whatever it has without guarding each event type.
+        """
+        for key, value in fields.items():
+            if hasattr(self.progress, key):
+                setattr(self.progress, key, value)
+
+    def append_partial(self, text: str) -> None:
+        """Append streamed text to the capped partial-output buffer."""
+        if not text:
+            return
+        combined = self.progress.partial_output + text
+        if len(combined) > _PARTIAL_OUTPUT_CAP:
+            combined = combined[-_PARTIAL_OUTPUT_CAP:]
+        self.progress.partial_output = combined
 
     def start(self) -> None:
         """Mark task as running."""

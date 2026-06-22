@@ -349,3 +349,59 @@ class TestScanDirectory:
         result = scan_directory(tmp_path)
         assert "md_agent" in result
         assert "yml_agent" in result
+
+
+# ---------------------------------------------------------------------------
+# sys.modules cleanup (Finding #6)
+# ---------------------------------------------------------------------------
+
+
+class TestSysModulesCleanup:
+    def test_python_agent_not_left_in_sys_modules(self, tmp_path: Path) -> None:
+        """After loading a Python agent, the transient module is removed from sys.modules."""
+        import sys
+
+        code = (
+            "from exo.agent import Agent\n"
+            "def create_agent():\n"
+            "    return Agent(name='cleanup_test', model='test:m')\n"
+        )
+        p = tmp_path / "cleanup_test.py"
+        _write(p, code)
+        module_name = "_exo_agent_cleanup_test"
+
+        # Ensure it's not already there
+        sys.modules.pop(module_name, None)
+        load_python_agent(p)
+        assert module_name not in sys.modules
+
+    def test_same_stem_files_load_independently(self, tmp_path: Path) -> None:
+        """Two files with the same stem in different directories load without collision."""
+        import sys
+
+        dir1 = tmp_path / "d1"
+        dir2 = tmp_path / "d2"
+        dir1.mkdir()
+        dir2.mkdir()
+
+        code1 = (
+            "from exo.agent import Agent\n"
+            "def create_agent():\n"
+            "    return Agent(name='agent_one', model='test:m')\n"
+        )
+        code2 = (
+            "from exo.agent import Agent\n"
+            "def create_agent():\n"
+            "    return Agent(name='agent_two', model='test:m')\n"
+        )
+        _write(dir1 / "myagent.py", code1)
+        _write(dir2 / "myagent.py", code2)
+
+        r1 = load_python_agent(dir1 / "myagent.py")
+        r2 = load_python_agent(dir2 / "myagent.py")
+
+        # Names come from the Agent, not the file stem
+        assert "agent_one" in r1
+        assert "agent_two" in r2
+        # Neither should pollute sys.modules
+        assert "_exo_agent_myagent" not in sys.modules

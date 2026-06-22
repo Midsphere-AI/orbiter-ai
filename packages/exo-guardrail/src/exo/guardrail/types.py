@@ -46,6 +46,17 @@ class RiskAssessment(BaseModel):
     details: dict[str, Any] = Field(default_factory=dict)
 
 
+class GuardrailConfigError(ExoError):
+    """Raised when a guardrail is misconfigured at construction time.
+
+    Examples: passing ``backend=None``, an unrecognised ``HookPoint`` name.
+
+    Attributes:
+        context: Dict of involved identifiers (field name, supplied value, …).
+        hint: Actionable fix — e.g. which enum values are valid.
+    """
+
+
 class GuardrailError(ExoError):
     """Raised when a guardrail blocks an operation.
 
@@ -62,8 +73,11 @@ class GuardrailError(ExoError):
         risk_level: RiskLevel,
         risk_type: str | None = None,
         details: dict[str, Any] | None = None,
+        context: dict[str, Any] | None = None,
+        hint: str | None = None,
+        doc: str | None = None,
     ) -> None:
-        super().__init__(message)
+        super().__init__(message, context=context, hint=hint, doc=doc)
         self.risk_level = risk_level
         self.risk_type = risk_type
         self.details = details or {}

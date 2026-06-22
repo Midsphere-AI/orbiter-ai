@@ -6,6 +6,17 @@ from collections.abc import Mapping
 
 from pydantic import BaseModel, Field
 
+from exo.types import ExoError
+
+
+class ConfigError(ExoError, ValueError):
+    """Raised for invalid Agent/config values.
+
+    Inherits ``ValueError`` as well as ``ExoError`` so existing
+    ``except ValueError`` call sites keep working while the message gains an
+    actionable ``hint=`` and structured ``context=``.
+    """
+
 
 def parse_model_string(model: str) -> tuple[str, str]:
     """Split a model string into provider and model name.
@@ -23,8 +34,10 @@ def parse_model_string(model: str) -> tuple[str, str]:
         ValueError: If *model* is not a string.
     """
     if not isinstance(model, str):
-        raise ValueError(
-            f"model must be a string like 'openai:gpt-4o-mini', got {type(model).__name__!r}"
+        raise ConfigError(
+            f"model must be a string, got {type(model).__name__!r}.",
+            context={"model": model},
+            hint="Pass a 'provider:model' string, e.g. model='openai:gpt-4o-mini'.",
         )
     if ":" in model:
         provider, _, model_name = model.partition(":")
@@ -50,11 +63,19 @@ def validate_planning_model(model: str | None) -> str | None:
 
     normalized = model.strip()
     if not normalized:
-        raise ValueError("planning_model must be a non-empty model string")
+        raise ConfigError(
+            "planning_model must be a non-empty model string.",
+            hint="Pass a 'provider:model' string, e.g. planning_model='openai:gpt-4o', "
+            "or omit it to plan with the executor model.",
+        )
 
     _, model_name = parse_model_string(normalized)
     if not model_name.strip():
-        raise ValueError("planning_model must include a model name")
+        raise ConfigError(
+            "planning_model must include a model name.",
+            context={"planning_model": model},
+            hint="Use the 'provider:model' format, e.g. planning_model='openai:gpt-4o'.",
+        )
 
     return normalized
 
@@ -85,7 +106,12 @@ def validate_budget_awareness(value: str | None) -> str | None:
             if 0 <= limit <= 100:
                 return normalized
 
-    raise ValueError("budget_awareness must be 'per-message' or 'limit:<0-100>'")
+    raise ConfigError(
+        "budget_awareness must be 'per-message' or 'limit:<0-100>'.",
+        context={"budget_awareness": value},
+        hint="Use budget_awareness='per-message' for every-turn awareness, or "
+        "'limit:80' to start warning at 80% of the token budget.",
+    )
 
 
 def validate_injected_tool_args(value: Mapping[str, str] | None) -> dict[str, str]:
@@ -106,9 +132,19 @@ def validate_injected_tool_args(value: Mapping[str, str] | None) -> dict[str, st
     normalized: dict[str, str] = {}
     for key, description in value.items():
         if not isinstance(key, str) or not key.strip():
-            raise ValueError("injected_tool_args keys must be non-empty strings")
+            raise ConfigError(
+                "injected_tool_args keys must be non-empty strings.",
+                context={"key": key},
+                hint="Map each injected arg name to a description string, e.g. "
+                "injected_tool_args={'user_id': 'the caller's id'}.",
+            )
         if not isinstance(description, str):
-            raise ValueError("injected_tool_args values must be strings")
+            raise ConfigError(
+                f"injected_tool_args['{key}'] description must be a string, "
+                f"got {type(description).__name__!r}.",
+                context={"key": key},
+                hint="Each value is the schema description shown to the LLM — pass a string.",
+            )
         normalized[key] = description
 
     return normalized
@@ -128,7 +164,11 @@ def validate_max_spawn_children(value: int) -> int:
     """
     if 1 <= value <= 8:
         return value
-    raise ValueError("max_spawn_children must be between 1 and 8")
+    raise ConfigError(
+        f"max_spawn_children must be between 1 and 8, got {value}.",
+        context={"max_spawn_children": value},
+        hint="Choose a value in 1..8; the cap bounds fan-out per spawn_self call.",
+    )
 
 
 class ModelConfig(BaseModel):

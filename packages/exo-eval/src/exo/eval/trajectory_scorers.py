@@ -11,7 +11,7 @@ from collections import Counter
 from collections.abc import Sequence
 from typing import Any
 
-from exo.eval.base import Scorer, ScorerResult  # pyright: ignore[reportMissingImports]
+from exo.eval.base import EvalError, Scorer, ScorerResult  # pyright: ignore[reportMissingImports]
 from exo.eval.llm_scorer import LLMAsJudgeScorer  # pyright: ignore[reportMissingImports]
 
 logger = logging.getLogger(__name__)
@@ -44,8 +44,18 @@ def scorer_register(
 def get_scorer(name: str) -> type[Scorer]:
     """Lookup a registered scorer class by *name*.
 
-    Raises ``KeyError`` if not found.
+    Raises:
+        EvalError: If *name* is not registered, with a list of available scorers.
     """
+    if name not in _SCORER_REGISTRY:
+        raise EvalError(
+            f"Scorer {name!r} is not registered.",
+            context={"name": name},
+            hint=(
+                f"Available scorers: {list_scorers()}. "
+                "Register custom scorers with @scorer_register(name)."
+            ),
+        )
     return _SCORER_REGISTRY[name]
 
 

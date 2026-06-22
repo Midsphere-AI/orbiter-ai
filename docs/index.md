@@ -11,7 +11,7 @@ pip install exo            # everything
 pip install exo-core       # minimal: agent, tools, runner, swarm
 ```
 
-Requires Python 3.11+.
+Requires Python 3.13+.
 
 ## Quick Start
 

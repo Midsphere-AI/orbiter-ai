@@ -64,8 +64,10 @@ class Context:
         state: ContextState | None = None,
     ) -> None:
         if not task_id:
-            msg = "task_id is required and must be non-empty"
-            raise ContextError(msg)
+            raise ContextError(
+                "task_id is required and must be non-empty.",
+                hint="Pass a non-empty string as task_id, e.g. Context('my-task-123').",
+            )
 
         self._task_id = task_id
         self._config = config or (parent._config if parent else ContextConfig())
@@ -151,7 +153,21 @@ class Context:
         if child._parent is not self:
             msg = f"Context {child.task_id!r} is not a child of {self.task_id!r}"
             logger.warning("merge rejected: %s", msg)
-            raise ContextError(msg)
+            raise ContextError(
+                msg,
+                hint="Only merge a context returned by this context's .fork() method.",
+                context={"parent": self._task_id, "child": child.task_id},
+            )
+
+        # Guard against double-merge of the same child.
+        if child not in self._children:
+            msg = f"Context {child.task_id!r} has already been merged into {self.task_id!r}"
+            logger.warning("merge rejected: %s", msg)
+            raise ContextError(
+                msg,
+                hint="Each forked child can only be merged once.",
+                context={"parent": self._task_id, "child": child.task_id},
+            )
 
         # 1. Merge child's local state into parent
         local = child._state.local_dict()
@@ -166,6 +182,9 @@ class Context:
             net = child_value - snapshot_value
             if net > 0:
                 self._token_usage[key] = self._token_usage.get(key, 0) + net
+
+        # Remove child from registry so double-merge is impossible.
+        self._children.remove(child)
 
         logger.debug(
             "merged child %r into parent %r: %d state keys, token delta applied",
@@ -216,7 +235,7 @@ class Context:
         checkpoint:
             The checkpoint to restore from.
         config:
-            Optional config override.  If ``None``, uses default config.
+            Optional config override.  If ``None``, uses ``ContextConfig()`` (default).
 
         Returns
         -------
@@ -226,10 +245,20 @@ class Context:
         ------
         CheckpointError
             If the checkpoint data is invalid.
+
+        Note
+        ----
+        **Config is not persisted in checkpoints.**  The original context config is
+        not stored in the checkpoint serialization format, so ``restore()`` always
+        applies the *config* argument (or the default ``ContextConfig()`` when
+        omitted).  If you need to recreate the original config you must supply it
+        explicitly via the ``config`` parameter.
         """
         if not isinstance(checkpoint, Checkpoint):
-            msg = f"Expected Checkpoint, got {type(checkpoint).__name__}"
-            raise CheckpointError(msg)
+            raise CheckpointError(
+                f"Expected Checkpoint, got {type(checkpoint).__name__}.",
+                hint="Pass a Checkpoint object returned by .snapshot() or CheckpointStore.get().",
+            )
 
         ctx = cls(checkpoint.task_id, config=config)
         # Restore state from checkpoint values

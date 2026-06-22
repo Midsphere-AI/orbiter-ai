@@ -51,7 +51,10 @@ def load_python_agent(path: Path) -> dict[str, Any]:
     module_name = f"_exo_agent_{path.stem}"
     spec = importlib.util.spec_from_file_location(module_name, path)
     if spec is None or spec.loader is None:
-        raise AgentLoadError(f"Cannot create module spec for {path}")
+        raise AgentLoadError(
+            f"Cannot create module spec for {path}",
+            hint="Verify the file exists and is a valid Python source file.",
+        )
 
     module = importlib.util.module_from_spec(spec)
     sys.modules[module_name] = module
@@ -64,12 +67,19 @@ def load_python_agent(path: Path) -> dict[str, Any]:
     factory = getattr(module, "create_agent", None)
     if factory is None:
         del sys.modules[module_name]
-        raise AgentLoadError(f"No create_agent() function in {path}")
+        raise AgentLoadError(
+            f"No create_agent() function in {path}",
+            hint="Define a top-level create_agent() -> Agent function in the module.",
+        )
 
     try:
         result = factory()
     except Exception as exc:
         raise AgentLoadError(f"create_agent() in {path} raised: {exc}") from exc
+    finally:
+        # Remove the transient module from sys.modules so repeated loads of files
+        # with the same stem don't shadow each other and test runs stay isolated.
+        sys.modules.pop(module_name, None)
 
     if isinstance(result, dict):
         return result

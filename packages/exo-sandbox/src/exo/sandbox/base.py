@@ -2,15 +2,20 @@
 
 from __future__ import annotations
 
+import inspect
 import logging
 import uuid
 from abc import ABC, abstractmethod
+from collections.abc import Awaitable, Callable
 from enum import StrEnum
 from typing import Any
 
 from exo.types import ExoError  # pyright: ignore[reportMissingImports]
 
 logger = logging.getLogger(__name__)
+
+#: A registered tool handler: ``async (sandbox, arguments) -> result``.
+ToolHandler = Callable[["Sandbox", dict[str, Any]], Awaitable[Any]]
 
 
 class SandboxError(ExoError):
@@ -55,6 +60,7 @@ class Sandbox(ABC):
     __slots__ = (
         "_agents",
         "_mcp_config",
+        "_registered_tools",
         "_sandbox_id",
         "_status",
         "_timeout",
@@ -76,6 +82,7 @@ class Sandbox(ABC):
         self._agents = dict(agents) if agents else {}
         self._timeout = timeout
         self._status = SandboxStatus.INIT
+        self._registered_tools: dict[str, ToolHandler] = {}
 
     # -- properties ---------------------------------------------------------
 
@@ -113,6 +120,106 @@ class Sandbox(ABC):
         logger.debug("Sandbox %s: %s -> %s", self._sandbox_id, self._status.value, target.value)
         self._status = target
 
+    # -- custom tool registration -------------------------------------------
+
+    def register_tool(self, tool_or_name: Any, handler: ToolHandler | None = None) -> None:
+        """Register a custom tool for :meth:`run_tool` dispatch.
+
+        Two equivalent forms are accepted, so the same call works on every
+        sandbox backend:
+
+        * ``register_tool(tool)`` — register a ``Tool``-like object (anything
+          with a non-empty string ``.name`` and a callable
+          ``.execute(**arguments)``; ``execute`` may be sync or async).
+        * ``register_tool("name", handler)`` — register an async *handler* with
+          signature ``async (sandbox, arguments) -> result``.
+
+        Registered tools take priority over a backend's built-in dispatch.
+
+        Raises
+        ------
+        SandboxError
+            If the arguments are malformed or *name* is already registered.
+        """
+        if handler is None:
+            tool = tool_or_name
+            name = getattr(tool, "name", None)
+            if not isinstance(name, str) or not name:
+                msg = (
+                    "register_tool(tool) expects a Tool with a non-empty string .name; "
+                    "to register a bare callable use register_tool(name, handler)."
+                )
+                raise SandboxError(msg)
+            if not callable(getattr(tool, "execute", None)):
+                msg = f"Tool {name!r} has no callable .execute(**arguments) method."
+                raise SandboxError(msg)
+            key = name
+            resolved = self._tool_to_handler(tool)
+        else:
+            if not isinstance(tool_or_name, str) or not tool_or_name:
+                msg = "register_tool(name, handler): name must be a non-empty string."
+                raise SandboxError(msg)
+            if not callable(handler):
+                msg = "register_tool(name, handler): handler must be callable."
+                raise SandboxError(msg)
+            key = tool_or_name
+            resolved = handler
+
+        if key in self._registered_tools:
+            msg = f"Tool {key!r} is already registered"
+            raise SandboxError(msg)
+        self._registered_tools[key] = resolved
+        logger.debug("Sandbox %s: registered tool %r", self._sandbox_id, key)
+
+    def unregister_tool(self, name: str) -> None:
+        """Remove a previously registered tool.
+
+        Raises :class:`SandboxError` if no tool with *name* is registered.
+        """
+        if name not in self._registered_tools:
+            msg = f"Tool {name!r} is not registered"
+            raise SandboxError(msg)
+        del self._registered_tools[name]
+        logger.debug("Sandbox %s: unregistered tool %r", self._sandbox_id, name)
+
+    @property
+    def registered_tools(self) -> list[str]:
+        """Names of all registered custom tools."""
+        return list(self._registered_tools)
+
+    @staticmethod
+    def _tool_to_handler(tool: Any) -> ToolHandler:
+        """Adapt a ``Tool``-like object to the ``(sandbox, arguments)`` handler form."""
+
+        async def _handler(_sandbox: Sandbox, arguments: dict[str, Any]) -> Any:
+            result = tool.execute(**arguments)
+            if inspect.isawaitable(result):
+                result = await result
+            return result
+
+        return _handler
+
+    async def _run_registered(self, tool_name: str, arguments: dict[str, Any]) -> tuple[bool, Any]:
+        """Dispatch to a registered tool if one matches *tool_name*.
+
+        Returns ``(handled, result)``. ``handled`` is ``False`` when nothing is
+        registered under *tool_name*, letting the caller fall through to its own
+        built-in dispatch. Handler errors are wrapped in :class:`SandboxError`.
+        """
+        handler = self._registered_tools.get(tool_name)
+        if handler is None:
+            return False, None
+        try:
+            return True, await handler(self, arguments)
+        except SandboxError:
+            raise
+        except Exception as exc:
+            raise SandboxError(
+                f"Registered tool {tool_name!r} failed.",
+                context={"sandbox_id": self._sandbox_id, "tool": tool_name},
+                hint=f"Check the registered handler for {tool_name!r}.",
+            ) from exc
+
     # -- abstract lifecycle -------------------------------------------------
 
     @abstractmethod
@@ -143,6 +250,7 @@ class Sandbox(ABC):
             "status": self._status.value,
             "workspace": self._workspace,
             "timeout": self._timeout,
+            "registered_tools": list(self._registered_tools),
         }
 
     def __repr__(self) -> str:

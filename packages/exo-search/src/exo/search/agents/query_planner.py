@@ -167,7 +167,8 @@ async def _generate_query_plan(
     try:
         plan = QueryPlan.model_validate_json(result.output)
         _log.debug("query_plan queries=%s sufficient=%s", plan.queries, plan.sufficient)
-    except Exception:
+    except Exception as exc:
+        _log.warning("query_plan parse failed: %s — falling back to raw query", exc)
         plan = QueryPlan(queries=[query], sufficient=False)
 
     # Validate and salvage: trim overly long queries, then fill gaps.
@@ -232,7 +233,7 @@ async def adaptive_research(
         seed_results: Pre-fetched results from speculative search to bootstrap
             the first round (avoids redundant initial queries).
     """
-    max_rounds = {"balanced": 1, "quality": 3}.get(mode, 1)
+    max_rounds = {"balanced": 1, "quality": 3, "deep": 3}.get(mode, 1)
     all_results: list[SearchResult] = list(seed_results) if seed_results else []
 
     for round_num in range(max_rounds):
@@ -298,7 +299,7 @@ async def hybrid_research(
     cfg = config or SearchConfig()
 
     async def _timed_agents() -> list[SearchResult]:
-        timeout = {"balanced": 10, "quality": 20}.get(mode, 10)
+        timeout = {"balanced": 10, "quality": 20, "deep": 20}.get(mode, 10)
         _log.debug("hybrid timeout=%ds for parallel agents", timeout)
         try:
             return await asyncio.wait_for(
@@ -312,25 +313,39 @@ async def hybrid_research(
                 ),
                 timeout=timeout,
             )
-        except Exception:
+        except Exception as exc:
+            _log.debug("timed agents failed/timed out: %s", exc)
             return []
 
-    structured_task = adaptive_research(
-        query,
-        chat_history,
-        mode,
-        cfg,
-        sub_questions,
-        seed_results,
+    structured_task = asyncio.ensure_future(
+        adaptive_research(
+            query,
+            chat_history,
+            mode,
+            cfg,
+            sub_questions,
+            seed_results,
+        )
     )
-    agent_task = _timed_agents()
+    agent_task = asyncio.ensure_future(_timed_agents())
 
-    results = await asyncio.gather(structured_task, agent_task)
-    merged = _merge_results(results[0], results[1])
+    gather_results = await asyncio.gather(structured_task, agent_task, return_exceptions=True)
+    structured_r, agent_r = gather_results
+    if isinstance(structured_r, BaseException):
+        _log.warning("adaptive_research failed: %s", structured_r)
+        structured_results: list[SearchResult] = []
+    else:
+        structured_results = structured_r
+    if isinstance(agent_r, BaseException):
+        _log.debug("timed agent gather failed: %s", agent_r)
+        agent_results: list[SearchResult] = []
+    else:
+        agent_results = agent_r
+    merged = _merge_results(structured_results, agent_results)
     _log.info(
         "hybrid merged=%d (structured=%d agents=%d)",
         len(merged),
-        len(results[0]),
-        len(results[1]),
+        len(structured_results),
+        len(agent_results),
     )
     return merged

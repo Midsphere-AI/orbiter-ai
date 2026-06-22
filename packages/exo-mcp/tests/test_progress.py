@@ -69,21 +69,21 @@ class TestMCPProgressEvent:
 
     def test_is_in_stream_event_union(self) -> None:
         """MCPProgressEvent must be part of the StreamEvent type union."""
-        from exo.types import MCPProgressEvent, StreamEvent
-
-        evt = MCPProgressEvent(tool_name="t", progress=1)
-        # StreamEvent is a Union type alias; verify isinstance works with each member
-        # The simplest check: the annotation includes MCPProgressEvent
+        # StreamEvent is a Union type alias; verify the annotation includes MCPProgressEvent
         import typing
+
+        from exo.types import MCPProgressEvent, StreamEvent
 
         args = typing.get_args(StreamEvent)
         assert MCPProgressEvent in args
 
     def test_frozen_model(self) -> None:
+        from pydantic import ValidationError
+
         from exo.types import MCPProgressEvent
 
         evt = MCPProgressEvent(tool_name="t", progress=1)
-        with pytest.raises(Exception):
+        with pytest.raises(ValidationError):
             evt.progress = 99  # type: ignore[misc]
 
     def test_progress_is_int(self) -> None:
@@ -168,8 +168,8 @@ class TestMCPToolWrapperProgressQueue:
         mcp_tool = _make_mcp_tool()
         call_fn = AsyncMock(return_value=_make_call_result("ok"))
         wrapper = MCPToolWrapper(mcp_tool, "srv", call_fn)
-        data = wrapper.to_dict()
-        # Manually add server_config so from_dict can reconstruct
+        # to_dict() is exercised implicitly; from_dict is tested with an explicit payload
+        _ = wrapper.to_dict()
         reconstructed = MCPToolWrapper.from_dict(
             {
                 "__mcp_tool__": True,

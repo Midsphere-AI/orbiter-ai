@@ -318,6 +318,23 @@ class TestContextCheckpoints:
         assert len(parent.checkpoints) == 1
 
 
+class TestSnapshotIsolation:
+    def test_snapshot_deep_copies_nested_values(self) -> None:
+        """Post-snapshot mutation of nested list/dict in state must not corrupt checkpoint."""
+        ctx = Context("main")
+        todos: list[dict[str, object]] = [{"item": "task-1", "done": False}]
+        ctx.state.set("todos", todos)
+        cp = ctx.snapshot()
+
+        # Mutate the original list in-place after snapshotting
+        todos.append({"item": "task-2", "done": False})
+        ctx.state.set("todos", todos)  # re-set mutated list
+
+        # Checkpoint should still reflect the state at snapshot time
+        assert cp.values["todos"] == [{"item": "task-1", "done": False}]
+        assert len(cp.values["todos"]) == 1
+
+
 class TestSnapshotRestoreRoundTrip:
     def test_full_roundtrip(self) -> None:
         """Snapshot -> restore -> verify all state preserved."""

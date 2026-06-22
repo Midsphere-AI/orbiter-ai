@@ -17,6 +17,7 @@ from exo.distributed import (
 )
 from exo.distributed._redis_config import RedisConfig  # pyright: ignore[reportMissingImports]
 from exo.distributed.worker import Worker  # pyright: ignore[reportMissingImports]
+from exo.types import ExoError  # pyright: ignore[reportMissingImports]
 
 # ---------------------------------------------------------------------------
 # RedisConfig dataclass
@@ -108,7 +109,7 @@ class TestWorkerFlatConstructor:
         assert w._heartbeat_ttl == 60
 
     def test_missing_url_raises(self) -> None:
-        with pytest.raises(ValueError, match="Redis URL is required"):
+        with pytest.raises(ExoError, match="Redis URL is required"):
             Worker()  # type: ignore[call-arg]
 
 
@@ -120,17 +121,17 @@ class TestWorkerFlatConstructor:
 class TestWorkerConflictDetection:
     def test_conflict_redis_url(self) -> None:
         cfg = RedisConfig(url="redis://from-config")
-        with pytest.raises(ValueError, match="redis_url"):
+        with pytest.raises(ExoError, match="redis_url"):
             Worker("redis://flat-url", redis=cfg)
 
     def test_conflict_queue_name(self) -> None:
         cfg = RedisConfig(url="redis://localhost")
-        with pytest.raises(ValueError, match="queue_name"):
+        with pytest.raises(ExoError, match="queue_name"):
             Worker(redis=cfg, queue_name="other:q")
 
     def test_conflict_heartbeat_ttl(self) -> None:
         cfg = RedisConfig(url="redis://localhost")
-        with pytest.raises(ValueError, match="heartbeat_ttl"):
+        with pytest.raises(ExoError, match="heartbeat_ttl"):
             Worker(redis=cfg, heartbeat_ttl=99)
 
 

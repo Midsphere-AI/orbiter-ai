@@ -6,22 +6,21 @@ Provides an async context manager that yields a connected
 
 from __future__ import annotations
 
-import re
+import asyncio
 from collections.abc import AsyncIterator
 from contextlib import AsyncExitStack, asynccontextmanager
 from typing import Any
 
 from mcp import ClientSession
 
+from exo._internal.errors import unwrap_exception_group  # pyright: ignore[reportMissingImports]
 from exo.mcp.transport import (  # pyright: ignore[reportMissingImports]
     MCPTransportError,
     create_transport_streams,
 )
 from exo.types import ExoError  # pyright: ignore[reportMissingImports]
-from exo_mcp_cli.config import ServerEntry, substitute_env_vars
+from exo_mcp_cli.config import VAULT_PATTERN, ServerEntry, substitute_env_vars
 from exo_mcp_cli.vault import Vault
-
-_VAULT_PATTERN = re.compile(r"\$\{vault:([^}]+)\}")
 
 
 class MCPConnectionError(ExoError):
@@ -36,7 +35,7 @@ class MCPConnectionError(ExoError):
 def _resolve_value(value: str, vault: Vault | None) -> str:
     """Resolve ``${vault:NAME}`` and ``${ENV}`` references in a string."""
     result = substitute_env_vars(value)
-    if vault and _VAULT_PATTERN.search(result):
+    if vault and VAULT_PATTERN.search(result):
         result = vault.resolve(result)
     return result
 
@@ -89,7 +88,10 @@ def _create_transport(entry: ServerEntry) -> Any:
             allow_websocket=True,
         )
     except MCPTransportError as exc:
-        raise MCPConnectionError(str(exc)) from exc
+        raise MCPConnectionError(
+            str(exc),
+            context={"transport": entry.transport},
+        ) from exc
 
 
 @asynccontextmanager
@@ -115,13 +117,33 @@ async def connect_to_server(
         transport = await stack.enter_async_context(_create_transport(resolved))
         read, write, *_ = transport
         session = await stack.enter_async_context(ClientSession(read, write))
-        await session.initialize()
+        try:
+            await asyncio.wait_for(session.initialize(), timeout=resolved.timeout)
+        except TimeoutError as exc:
+            raise MCPConnectionError(
+                f"MCP handshake with '{entry.name}' timed out after {entry.timeout}s.",
+                context={"server": entry.name, "transport": entry.transport},
+                hint=(
+                    f"The server started but did not complete the MCP handshake within "
+                    f"{entry.timeout}s. Verify the command is a valid MCP server, "
+                    f"or increase 'timeout' in the server entry."
+                ),
+            ) from exc
         yield session
     except MCPConnectionError:
         raise
     except Exception as exc:
+        cause = unwrap_exception_group(exc)
+        # Use entry (unresolved) rather than resolved to avoid leaking plaintext
+        # credentials (URLs with embedded tokens, decrypted env values, etc.)
+        # into exception messages and --verbose tracebacks.
         raise MCPConnectionError(
-            f"Failed to connect to '{entry.name}' ({entry.transport}): {exc}"
+            f"Failed to connect to '{entry.name}': {cause}",
+            context={"server": entry.name, "transport": entry.transport},
+            hint=(
+                "Check the server is running, the command/URL is correct in mcp.json, "
+                "and any required credentials are set."
+            ),
         ) from exc
     finally:
         await stack.aclose()

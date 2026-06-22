@@ -39,6 +39,9 @@ from exo.types import ExoError  # pyright: ignore[reportMissingImports]
 
 logger = logging.getLogger(__name__)
 
+# Sentinel used to detect whether `executor=` was explicitly set by the caller.
+_EXECUTOR_DEFAULT = object()
+
 if TYPE_CHECKING:
     from exo.distributed.temporal import (  # pyright: ignore[reportMissingImports]
         TemporalExecutor,
@@ -86,7 +89,11 @@ def _deserialize_messages(raw: list[dict[str, Any]]) -> list[Any]:
         role = msg.get("role", "")
         cls = _role_map.get(role)
         if cls is None:
-            raise ExoError(f"Unknown message role: {role!r}")
+            raise ExoError(
+                f"Unknown message role: {role!r}",
+                context={"role": role},
+                hint="Valid roles: user, assistant, system, tool.",
+            )
         messages.append(cls(**msg))
     return messages
 
@@ -126,6 +133,10 @@ class Worker:
             When provided, supplies *redis_url*, *queue_name*, and
             *heartbeat_ttl* together.  Raises :exc:`ValueError` if any of
             the flat counterparts are also explicitly set.
+        temporal_executor: A pre-configured :class:`TemporalExecutor` instance
+            to use instead of constructing a default one.  When provided, the
+            worker automatically operates in temporal mode; passing
+            ``executor="local"`` alongside it raises :exc:`ValueError`.
     """
 
     def __init__(
@@ -136,38 +147,56 @@ class Worker:
         concurrency: int = 1,
         queue_name: str = "exo:tasks",
         heartbeat_ttl: int = 30,
-        executor: Literal["local", "temporal"] = "local",
+        executor: Literal["local", "temporal"] | object = _EXECUTOR_DEFAULT,
         provider_factory: Callable[[str], Any] | None = None,
         redis: RedisConfig | None = None,
+        temporal_executor: TemporalExecutor | None = None,
     ) -> None:
+        # --- temporal_executor vs executor conflict check ---
+        # Use the sentinel to distinguish "executor was explicitly set to 'local'" from
+        # "executor was not passed at all" — only the former conflicts with temporal_executor=.
+        if temporal_executor is not None and executor == "local":
+            raise ValueError(
+                "Cannot specify both 'temporal_executor=' and executor='local'. "
+                "Either omit 'executor=' (it will default to temporal) or pass executor='temporal'."
+            )
+        # Resolve the effective executor string now that we've checked for conflicts.
+        resolved_executor: Literal["local", "temporal"] = (
+            "local" if executor is _EXECUTOR_DEFAULT else executor  # type: ignore[assignment]
+        )
+
         # --- grouped vs flat resolution ---
         if redis is not None:
             # Detect explicit conflicts with the flat counterparts.
             # We can only detect positional redis_url if it was given as non-empty;
             # keyword conflicts are checked individually.
             if redis_url:
-                raise ValueError(
+                raise ExoError(
                     "Cannot specify both 'redis=' and 'redis_url='. "
-                    "Use RedisConfig(url=...) or the flat 'redis_url=' kwarg, not both."
+                    "Use RedisConfig(url=...) or the flat 'redis_url=' kwarg, not both.",
+                    hint="Prefer redis=RedisConfig(url=...) for grouped config.",
                 )
             if queue_name != "exo:tasks":
-                raise ValueError(
+                raise ExoError(
                     "Cannot specify both 'redis=' and 'queue_name='. "
-                    "Set queue_name via RedisConfig(queue_name=...) instead."
+                    "Set queue_name via RedisConfig(queue_name=...) instead.",
+                    hint="Prefer redis=RedisConfig(queue_name=...) for grouped config.",
                 )
             if heartbeat_ttl != 30:
-                raise ValueError(
+                raise ExoError(
                     "Cannot specify both 'redis=' and 'heartbeat_ttl='. "
-                    "Set heartbeat_ttl via RedisConfig(heartbeat_ttl=...) instead."
+                    "Set heartbeat_ttl via RedisConfig(heartbeat_ttl=...) instead.",
+                    hint="Prefer redis=RedisConfig(heartbeat_ttl=...) for grouped config.",
                 )
             resolved_url = redis.url
             resolved_queue = redis.queue_name
             resolved_ttl = redis.heartbeat_ttl
         else:
             if not redis_url:
-                raise ValueError(
+                raise ExoError(
                     "A Redis URL is required. Pass redis_url='redis://...' "
-                    "or redis=RedisConfig(url='redis://...')."
+                    "or redis=RedisConfig(url='redis://...').",
+                    hint="Set redis_url='redis://localhost:6379' or redis=RedisConfig(url='redis://...').",
                 )
             resolved_url = redis_url
             resolved_queue = queue_name
@@ -178,7 +207,6 @@ class Worker:
         self._concurrency = concurrency
         self._queue_name = resolved_queue
         self._heartbeat_ttl = resolved_ttl
-        self._executor_type = executor
         self._provider_factory = provider_factory
 
         self._broker = TaskBroker(resolved_url, queue_name=resolved_queue)
@@ -186,7 +214,11 @@ class Worker:
         self._publisher = EventPublisher(resolved_url)
         self._temporal_executor: TemporalExecutor | None = None
 
-        if executor == "temporal":
+        if temporal_executor is not None:
+            # Caller provided a fully-configured executor — use it directly.
+            self._temporal_executor = temporal_executor
+            self._executor_type: Literal["local", "temporal"] = "temporal"
+        elif resolved_executor == "temporal":
             if not HAS_TEMPORAL:
                 msg = (
                     "Temporal executor requires temporalio to be installed. "
@@ -198,11 +230,16 @@ class Worker:
             )
 
             self._temporal_executor = TemporalExecutor()
+            self._executor_type = "temporal"
+        else:
+            self._executor_type = resolved_executor
 
         self._shutdown_event = asyncio.Event()
         self._tasks_processed = 0
         self._tasks_failed = 0
-        self._current_task_id: str | None = None
+        # Set of currently executing task IDs — supports concurrency > 1.
+        # Heartbeat reports all active task IDs as a comma-separated string.
+        self._active_task_ids: set[str] = set()
         self._started_at: float = 0.0
 
     @property
@@ -295,17 +332,23 @@ class Worker:
         self._shutdown_event.set()
 
     async def _heartbeat_loop(self) -> None:
-        """Publish a heartbeat to Redis periodically."""
-        r: aioredis.Redis = aioredis.from_url(self._redis_url, decode_responses=True)
+        """Publish a heartbeat to Redis periodically.
+
+        Recreates the Redis connection inside the loop on failure so a
+        transient Redis outage doesn't permanently stop heartbeats.
+        """
+        r: aioredis.Redis | None = None
         key = f"exo:workers:{self._worker_id}"
         try:
             while not self._shutdown_event.is_set():
                 try:
+                    if r is None:
+                        r = aioredis.from_url(self._redis_url, decode_responses=True)
                     fields = {
                         "status": "running",
                         "tasks_processed": str(self._tasks_processed),
                         "tasks_failed": str(self._tasks_failed),
-                        "current_task_id": self._current_task_id or "",
+                        "current_task_id": ",".join(sorted(self._active_task_ids)),
                         "started_at": str(self._started_at),
                         "last_heartbeat": str(time.time()),
                         "concurrency": str(self._concurrency),
@@ -321,9 +364,16 @@ class Worker:
                         self._worker_id,
                         exc_info=True,
                     )
+                    # Close and discard the possibly-broken connection so it is
+                    # recreated fresh on the next iteration.
+                    if r is not None:
+                        with contextlib.suppress(Exception):
+                            await r.aclose()
+                        r = None
                 await asyncio.sleep(self._heartbeat_ttl / 3)
         finally:
-            await r.aclose()
+            if r is not None:
+                await r.aclose()
 
     async def _claim_loop(self) -> None:
         """Claim tasks and execute them until shutdown."""
@@ -352,7 +402,7 @@ class Worker:
             task.task_id,
             task.input,
         )
-        self._current_task_id = task.task_id
+        self._active_task_ids.add(task.task_id)
         token = CancellationToken()
 
         # Extract trace context from task metadata (injected by client)
@@ -469,7 +519,29 @@ class Worker:
                         await store.add(HumanMemory(content=task.input, metadata=mem_metadata))
                         mem_result = (store, mem_metadata)
 
-                    result_text = await self._run_agent(agent, task, token)
+                    # Enforce task.timeout_seconds so a stuck agent can't
+                    # occupy a worker slot and the PEL entry indefinitely.
+                    try:
+                        result_text = await asyncio.wait_for(
+                            self._run_agent(agent, task, token),
+                            timeout=task.timeout_seconds if task.timeout_seconds > 0 else None,
+                        )
+                    except TimeoutError as exc:
+                        duration = time.time() - started_at
+                        logger.error(
+                            "Task %s timed out after %.2fs (timeout_seconds=%s)",
+                            task.task_id,
+                            duration,
+                            task.timeout_seconds,
+                        )
+                        raise ExoError(
+                            f"Task {task.task_id} timed out after {task.timeout_seconds}s.",
+                            context={
+                                "task_id": task.task_id,
+                                "timeout_seconds": task.timeout_seconds,
+                            },
+                            hint="Increase timeout_seconds in the distributed() call or optimize the agent.",
+                        ) from exc
 
                 duration = time.time() - started_at
 
@@ -524,41 +596,89 @@ class Worker:
                     exc,
                     exc_info=True,
                 )
-                await self._store.set_status(
-                    task.task_id,
-                    TaskStatus.FAILED,
-                    completed_at=time.time(),
-                    error=str(exc),
-                )
-                record_task_failed(
-                    task_id=task.task_id,
-                    worker_id=self._worker_id,
-                    duration=duration,
-                )
 
-                # Check if retries remain
-                status = await self._store.get_status(task.task_id)
-                retries = status.retries if status else 0
-                if retries < self._broker.max_retries:
-                    logger.info(
-                        "Task %s scheduling retry %d/%d",
-                        task.task_id,
-                        retries + 1,
-                        self._broker.max_retries,
+                # Each Redis call in the failure path is individually guarded so
+                # that a secondary Redis outage cannot leave the task stuck in the
+                # PEL forever.  The final ack/nack is guaranteed by the try/finally
+                # below even if set_status throws.
+                _ack_on_failure = True  # default: ack (exhaust-retries path)
+                try:
+                    try:
+                        await self._store.set_status(
+                            task.task_id,
+                            TaskStatus.FAILED,
+                            completed_at=time.time(),
+                            error=str(exc),
+                        )
+                    except Exception:
+                        logger.error(
+                            "Task %s: failed to update status to FAILED in store",
+                            task.task_id,
+                            exc_info=True,
+                        )
+
+                    record_task_failed(
+                        task_id=task.task_id,
+                        worker_id=self._worker_id,
+                        duration=duration,
                     )
-                    await self._store.set_status(
-                        task.task_id,
-                        TaskStatus.RETRYING,
-                        retries=retries + 1,
-                    )
-                    await self._broker.nack(task.task_id)
-                else:
-                    logger.warning(
-                        "Task %s exhausted all %d retries",
-                        task.task_id,
-                        self._broker.max_retries,
-                    )
-                    await self._broker.ack(task.task_id)
+
+                    # Check if retries remain.  If the store read fails, treat
+                    # the task as retries-exhausted (ack it) so a broken store
+                    # doesn't cause an infinite nack/retry storm.
+                    retries: int | None = None
+                    try:
+                        status = await self._store.get_status(task.task_id)
+                        retries = status.retries if status else 0
+                    except Exception:
+                        logger.error(
+                            "Task %s: failed to read retry count from store; "
+                            "treating as retries-exhausted to prevent infinite retry loop",
+                            task.task_id,
+                            exc_info=True,
+                        )
+
+                    if retries is not None and retries < self._broker.max_retries:
+                        logger.info(
+                            "Task %s scheduling retry %d/%d",
+                            task.task_id,
+                            retries + 1,
+                            self._broker.max_retries,
+                        )
+                        try:
+                            await self._store.set_status(
+                                task.task_id,
+                                TaskStatus.RETRYING,
+                                retries=retries + 1,
+                            )
+                        except Exception:
+                            logger.error(
+                                "Task %s: failed to update status to RETRYING; will still nack",
+                                task.task_id,
+                                exc_info=True,
+                            )
+                        _ack_on_failure = False  # nack (re-queue)
+                    else:
+                        logger.warning(
+                            "Task %s exhausted all %d retries",
+                            task.task_id,
+                            self._broker.max_retries,
+                        )
+                finally:
+                    # Guarantee the message leaves the PEL regardless of any
+                    # Redis failures above.  Log and suppress infrastructure
+                    # errors so the message is never orphaned.
+                    try:
+                        if _ack_on_failure:
+                            await self._broker.ack(task.task_id)
+                        else:
+                            await self._broker.nack(task.task_id)
+                    except Exception:
+                        logger.error(
+                            "Task %s: failed to ack/nack message — it may remain stuck in PEL",
+                            task.task_id,
+                            exc_info=True,
+                        )
 
             finally:
                 # Tear down memory persistence
@@ -574,7 +694,7 @@ class Worker:
                         await teardown_memory_store(mem_result[0])
                     logger.debug("Task %s: memory store torn down", task.task_id)
 
-                self._current_task_id = None
+                self._active_task_ids.discard(task.task_id)
                 cancel_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await cancel_task
@@ -585,23 +705,53 @@ class Worker:
                     logger.exception("on_task_done failed for task %s", task.task_id)
 
     async def _listen_for_cancel(self, task_id: str, token: CancellationToken) -> None:
-        """Subscribe to ``exo:cancel:{task_id}`` and set the token on signal."""
-        r: aioredis.Redis = aioredis.from_url(self._redis_url, decode_responses=True)
+        """Subscribe to ``exo:cancel:{task_id}`` and set the token on signal.
+
+        Reconnects automatically on Redis ``ConnectionError``/``RedisError`` so a
+        transient Redis outage does not permanently lose the cancel signal for the
+        remainder of the task's life.
+        """
         channel_name = f"exo:cancel:{task_id}"
-        pubsub = r.pubsub()
+        r: aioredis.Redis | None = None
+        pubsub = None
         try:
-            await pubsub.subscribe(channel_name)  # type: ignore[misc]
             while True:
-                msg = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
-                if msg is not None and msg["type"] == "message":
-                    logger.info("Task %s: cancel signal received", task_id)
-                    token.cancel()
-                    return
-                await asyncio.sleep(0.01)
+                try:
+                    if r is None:
+                        r = aioredis.from_url(self._redis_url, decode_responses=True)
+                        pubsub = r.pubsub()
+                        await pubsub.subscribe(channel_name)  # type: ignore[misc]
+                    msg = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)  # type: ignore[union-attr]
+                    if msg is not None and msg["type"] == "message":
+                        logger.info("Task %s: cancel signal received", task_id)
+                        token.cancel()
+                        return
+                except asyncio.CancelledError:
+                    raise
+                except (aioredis.ConnectionError, aioredis.RedisError):
+                    logger.warning(
+                        "Task %s: cancel listener lost Redis connection, reconnecting in 1s",
+                        task_id,
+                        exc_info=True,
+                    )
+                    if pubsub is not None:
+                        with contextlib.suppress(Exception):
+                            await pubsub.aclose()  # type: ignore[misc]
+                        pubsub = None
+                    if r is not None:
+                        with contextlib.suppress(Exception):
+                            await r.aclose()
+                        r = None
+                    await asyncio.sleep(1)
         finally:
-            await pubsub.unsubscribe(channel_name)
-            await pubsub.aclose()  # type: ignore[misc]
-            await r.aclose()
+            if pubsub is not None:
+                with contextlib.suppress(Exception):
+                    await pubsub.unsubscribe(channel_name)
+                with contextlib.suppress(Exception):
+                    await pubsub.aclose()  # type: ignore[misc]
+            if r is not None:
+                with contextlib.suppress(Exception):
+                    await r.aclose()
 
     def _reconstruct_agent(self, agent_config: dict[str, Any]) -> Any:
         """Reconstruct an Agent or Swarm from the serialized config dict.
@@ -651,7 +801,10 @@ class Worker:
         cancelled, emits a ``StatusEvent(status='cancelled')`` and stops.
         """
         from exo.runner import run  # pyright: ignore[reportMissingImports]
-        from exo.types import StatusEvent, TextEvent  # pyright: ignore[reportMissingImports]
+        from exo.types import (  # pyright: ignore[reportMissingImports]
+            StatusEvent,
+            TextEvent,
+        )
 
         messages = _deserialize_messages(task.messages) if task.messages else None
 
@@ -713,6 +866,7 @@ class Worker:
         logger.debug("Task %s: starting agent stream", task.task_id)
         text_parts: list[str] = []
 
+        cancelled = False
         async for event in run.stream(
             agent,
             task.input,
@@ -728,6 +882,7 @@ class Worker:
                     message=f"Task {task.task_id} cancelled",
                 )
                 await self._publisher.publish(task.task_id, cancelled_event)
+                cancelled = True
                 break
 
             # Publish every event to Redis
@@ -736,5 +891,18 @@ class Worker:
             # Collect text for final result
             if isinstance(event, TextEvent):
                 text_parts.append(event.text)
+
+        # Always publish a terminal StatusEvent so that EventSubscriber.subscribe()
+        # (which exits only on a terminal status) terminates even when
+        # detailed=False (in which case run.stream() never emits one itself).
+        # When detailed=True, run.stream() already yields StatusEvent("completed")
+        # and the subscriber exits on that — no extra publish needed.
+        if not cancelled and not task.detailed:
+            terminal_event = StatusEvent(
+                status="completed",
+                agent_name=getattr(agent, "name", ""),
+                message=f"Task {task.task_id} completed",
+            )
+            await self._publisher.publish(task.task_id, terminal_event)
 
         return "".join(text_parts)

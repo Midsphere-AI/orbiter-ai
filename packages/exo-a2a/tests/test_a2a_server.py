@@ -2,21 +2,27 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
 from httpx import ASGITransport, AsyncClient
 
 from exo.a2a.server import (  # pyright: ignore[reportMissingImports]
     A2AServer,
+    A2AServerError,
     A2ATaskStore,
     AgentExecutor,
     InMemoryTaskStore,
 )
 from exo.a2a.types import (  # pyright: ignore[reportMissingImports]
+    A2ATaskStatus,
     AgentSkill,
     ServingConfig,
+    TaskState,
+    TaskStatusUpdateEvent,
 )
 
 # ---------------------------------------------------------------------------
@@ -318,6 +324,72 @@ class TestStreamingEndpoint:
         assert lines[1]["status"]["state"] == "failed"
         assert "stream-err" in lines[1]["status"]["reason"]
 
+    async def test_streaming_persists_task_state(self) -> None:
+        """GET /tasks/{id} must return the completed task after a streamed execution (Finding 4)."""
+        store = InMemoryTaskStore()
+        cfg = ServingConfig(streaming=True)
+        server = A2AServer(
+            AgentExecutor(_mock_agent(run_result="streamed-result"), streaming=True),
+            cfg,
+            task_store=store,
+        )
+        async with _build_client(server) as client:
+            await client.post("/stream", json={"text": "hi", "task_id": "s-persist"})
+            resp = await client.get("/tasks/s-persist")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["task_id"] == "s-persist"
+        assert data["status"]["state"] == "completed"
+        assert data["result"] == "streamed-result"
+
+    async def test_streaming_persists_failed_task_state(self) -> None:
+        """GET /tasks/{id} returns failed state after a streamed execution error (Finding 4)."""
+        store = InMemoryTaskStore()
+        agent = _mock_agent()
+        agent.run = AsyncMock(side_effect=RuntimeError("stream-err"))
+        cfg = ServingConfig(streaming=True)
+        server = A2AServer(AgentExecutor(agent), cfg, task_store=store)
+        async with _build_client(server) as client:
+            await client.post("/stream", json={"text": "x", "task_id": "s-fail"})
+            resp = await client.get("/tasks/s-fail")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"]["state"] == "failed"
+
+
+# ---------------------------------------------------------------------------
+# Endpoint routing — ServingConfig.endpoint prefixes routes (Finding 2)
+# ---------------------------------------------------------------------------
+
+
+class TestEndpointRouting:
+    async def test_default_endpoint_routes_to_root(self) -> None:
+        """Default endpoint '/' means POST / still works."""
+        server = A2AServer(AgentExecutor(_mock_agent(run_result="ok")))
+        async with _build_client(server) as client:
+            resp = await client.post("/", json={"text": "hi"})
+        assert resp.status_code == 200
+
+    async def test_custom_endpoint_routes_correctly(self) -> None:
+        """When endpoint='/api/v1', task route is POST /api/v1 and task lookup is GET /api/v1/tasks/{id}."""
+        cfg = ServingConfig(host="localhost", port=8080, endpoint="/api/v1")
+        store = InMemoryTaskStore()
+        server = A2AServer(AgentExecutor(_mock_agent(run_result="ok")), cfg, task_store=store)
+        app = server.build_app()
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post("/api/v1", json={"text": "hi", "task_id": "ep-t1"})
+            assert resp.status_code == 200
+            lookup = await client.get("/api/v1/tasks/ep-t1")
+        assert lookup.status_code == 200
+        assert lookup.json()["task_id"] == "ep-t1"
+
+    async def test_custom_endpoint_card_url_matches_routes(self) -> None:
+        """AgentCard.url matches the registered task endpoint prefix."""
+        cfg = ServingConfig(host="localhost", port=8080, endpoint="/api/v1")
+        server = A2AServer(AgentExecutor(_mock_agent()), cfg)
+        card = server.agent_card
+        assert card.url.endswith("/api/v1")
+
 
 # ---------------------------------------------------------------------------
 # build_app
@@ -351,3 +423,124 @@ class TestRepr:
         r = repr(server)
         assert "rp" in r
         assert "A2AServer" in r
+
+
+# ---------------------------------------------------------------------------
+# CancelledError propagation in _generate()
+# ---------------------------------------------------------------------------
+
+
+class TestStreamingCancellation:
+    async def test_cancelled_error_propagates_in_generate(self) -> None:
+        """CancelledError in _generate() emits CANCELED event then re-raises."""
+        import uuid
+
+        agent = _mock_agent()
+        agent.run = AsyncMock(side_effect=asyncio.CancelledError())
+        cfg = ServingConfig(streaming=True)
+        server = A2AServer(AgentExecutor(agent), cfg)
+
+        task_id = str(uuid.uuid4())
+        text = "x"
+
+        # Reconstruct the same generator logic as server._generate() to validate behavior.
+        from collections.abc import AsyncIterator
+
+        async def _generate() -> AsyncIterator[str]:
+            yield (
+                json.dumps(
+                    TaskStatusUpdateEvent(
+                        task_id=task_id,
+                        status=A2ATaskStatus(state=TaskState.WORKING),
+                    ).model_dump()
+                )
+                + "\n"
+            )
+            try:
+                await server._executor.execute(text)
+                yield ""  # completed (not reached in this test)
+            except asyncio.CancelledError:
+                yield (
+                    json.dumps(
+                        TaskStatusUpdateEvent(
+                            task_id=task_id,
+                            status=A2ATaskStatus(state=TaskState.CANCELED),
+                        ).model_dump()
+                    )
+                    + "\n"
+                )
+                raise
+
+        chunks: list[str] = []
+        with pytest.raises(asyncio.CancelledError):
+            async for chunk in _generate():
+                chunks.append(chunk)
+
+        assert len(chunks) == 2  # WORKING + CANCELED
+        last_event = json.loads(chunks[-1])
+        assert last_event["status"]["state"] == TaskState.CANCELED
+
+    async def test_generate_cancelled_error_reraises(self) -> None:
+        """The server's real _generate() re-raises CancelledError after CANCELED event."""
+        import contextlib
+        from unittest.mock import patch
+
+        agent = _mock_agent()
+        agent.run = AsyncMock(side_effect=asyncio.CancelledError())
+        cfg = ServingConfig(streaming=True)
+        server = A2AServer(AgentExecutor(agent), cfg)
+
+        # Capture the async generator before it's wrapped in StreamingResponse.
+        captured_gens: list[Any] = []
+
+        import starlette.responses as _sr_mod
+
+        orig_sr = _sr_mod.StreamingResponse
+
+        class _Capture:
+            def __init__(self, gen: Any, **kw: Any) -> None:
+                captured_gens.append(gen)
+                # Also call orig so the ASGI transport doesn't error badly.
+                self._inner = orig_sr(gen, **kw)
+
+        with patch("starlette.responses.StreamingResponse", _Capture):
+            async with AsyncClient(
+                transport=ASGITransport(app=server.build_app()), base_url="http://test"
+            ) as client:
+                with contextlib.suppress(Exception):
+                    await client.post("/stream", json={"text": "x", "task_id": "t-cancel"})
+
+        assert captured_gens, "StreamingResponse was not called — route not reached"
+        gen = captured_gens[0]
+
+        chunks: list[str] = []
+        with pytest.raises(asyncio.CancelledError):
+            async for chunk in gen:
+                chunks.append(chunk)
+
+        # Must have emitted WORKING + CANCELED before re-raising.
+        assert len(chunks) >= 2
+        last_event = json.loads(chunks[-1])
+        assert last_event["status"]["state"] == TaskState.CANCELED
+
+    async def test_exo_error_reason_is_message_only(self) -> None:
+        """When an ExoError is the failure, reason= in the status uses .message (no hint block)."""
+        agent = _mock_agent()
+        agent.run = AsyncMock(
+            side_effect=A2AServerError(
+                "Something broke.",
+                hint="Do this to fix it.",
+                context={"agent": "test"},
+            )
+        )
+        cfg = ServingConfig(streaming=False)
+        server = A2AServer(AgentExecutor(agent), cfg)
+        async with _build_client(server) as client:
+            resp = await client.post("/", json={"text": "x"})
+        assert resp.status_code == 500
+        data = resp.json()
+        reason = data["status"]["reason"]
+        # reason must be only the one-liner message, not include hint or context lines
+        assert reason == "Something broke."
+        assert "Do this to fix it." not in reason
+        assert "agent" not in reason

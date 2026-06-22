@@ -7,7 +7,7 @@ import logging
 import re
 from typing import Any, ClassVar
 
-from exo.eval.base import Scorer, ScorerResult  # pyright: ignore[reportMissingImports]
+from exo.eval.base import EvalError, Scorer, ScorerResult  # pyright: ignore[reportMissingImports]
 
 logger = logging.getLogger(__name__)
 
@@ -29,8 +29,11 @@ class FormatValidationScorer(Scorer):
     def __init__(self, fmt: str = "json", *, name: str | None = None) -> None:
         fmt = fmt.lower()
         if fmt not in self._VALIDATORS:
-            msg = f"Unsupported format: {fmt!r}. Choose from: {sorted(self._VALIDATORS)}"
-            raise ValueError(msg)
+            raise EvalError(
+                f"Unsupported format: {fmt!r}.",
+                context={"fmt": fmt},
+                hint=f"Choose from: {sorted(self._VALIDATORS)}.",
+            )
         self._format = fmt
         self._name = name or f"format_{fmt}"
 
@@ -364,15 +367,35 @@ class OutputCompletenessScorer(Scorer):
 
     __slots__ = ("_name", "_sections")
 
-    def __init__(self, required_sections: list[str], *, name: str = "completeness") -> None:
-        self._sections = required_sections
+    def __init__(
+        self,
+        required_sections: list[str] | None = None,
+        *,
+        sections: list[str] | None = None,
+        name: str = "completeness",
+    ) -> None:
+        # Accept required_sections positionally for backward compatibility;
+        # new callers should prefer the kw-only alias ``sections=``.
+        if required_sections is not None and sections is not None:
+            raise EvalError(
+                "Pass either required_sections or sections=, not both.",
+                hint="Use sections= (keyword-only) for new code.",
+            )
+        resolved = sections if sections is not None else (required_sections or [])
+        self._sections = resolved
         self._name = name
 
     async def score(self, case_id: str, input: Any, output: Any) -> ScorerResult:
+        if not self._sections:
+            return ScorerResult(
+                scorer_name=self._name,
+                score=0.0,
+                details={"error": "No sections configured"},
+            )
         text = str(output).lower() if output is not None else ""
         found = [s for s in self._sections if s.lower() in text]
         missing = [s for s in self._sections if s.lower() not in text]
-        ratio = len(found) / len(self._sections) if self._sections else 0.0
+        ratio = len(found) / len(self._sections)
         return ScorerResult(
             scorer_name=self._name,
             score=ratio,

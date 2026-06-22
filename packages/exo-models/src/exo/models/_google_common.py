@@ -125,6 +125,7 @@ def content_blocks_to_google(blocks: list[ContentBlock]) -> list[dict[str, Any]]
                 raise ModelError(
                     "VideoBlock has neither url nor data — cannot send to Google provider",
                     model="google",
+                    hint="Set either VideoBlock.url or VideoBlock.data before passing to the Google provider.",
                 )
         elif isinstance(block, DocumentBlock):
             parts.append({"inline_data": {"mime_type": block.media_type, "data": block.data}})
@@ -141,6 +142,10 @@ _FINISH_REASON_MAP: dict[str | None, FinishReason] = {
     "SAFETY": "content_filter",
     "RECITATION": "content_filter",
     "BLOCKLIST": "content_filter",
+    "PROHIBITED_CONTENT": "content_filter",
+    "SPII": "content_filter",
+    "IMAGE_SAFETY": "content_filter",
+    "IMAGE_PROHIBITED_CONTENT": "content_filter",
     "MALFORMED_FUNCTION_CALL": "stop",
     "OTHER": "stop",
     None: "stop",
@@ -214,7 +219,20 @@ def _to_google_contents(messages: list[Message]) -> tuple[list[dict[str, Any]], 
                 else:
                     parts.extend(content_blocks_to_google(msg.content))
             for tc in msg.tool_calls:
-                args = json.loads(tc.arguments) if tc.arguments else {}
+                if tc.arguments:
+                    try:
+                        args = json.loads(tc.arguments)
+                    except json.JSONDecodeError as exc:
+                        from exo.models.types import ModelError
+
+                        raise ModelError(
+                            f"Failed to parse tool call arguments for '{tc.name}': {exc}",
+                            model="google",
+                            hint="Ensure tool call arguments are valid JSON.",
+                            context={"tool_name": tc.name, "arguments": tc.arguments},
+                        ) from exc
+                else:
+                    args = {}
                 fc_part: dict[str, Any] = {"function_call": {"name": tc.name, "args": args}}
                 if tc.thought_signature is not None:
                     fc_part["thought_signature"] = tc.thought_signature
@@ -223,9 +241,12 @@ def _to_google_contents(messages: list[Message]) -> tuple[list[dict[str, Any]], 
                 parts.append({"text": ""})
             contents.append({"role": "model", "parts": parts})
         elif isinstance(msg, ToolResult):
-            # Build function_response part; append media parts alongside it
+            # Build function_response part; append media parts alongside it.
+            # Compute once to avoid duplicating the conversion for list content.
+            media_parts: list[dict[str, Any]] = []
             if isinstance(msg.content, list):
-                response_data: Any = content_blocks_to_google(msg.content)
+                media_parts = content_blocks_to_google(msg.content)
+                response_data: Any = media_parts
             else:
                 response_data = msg.error if msg.error else msg.content
             function_response_part: dict[str, Any] = {
@@ -234,9 +255,6 @@ def _to_google_contents(messages: list[Message]) -> tuple[list[dict[str, Any]], 
                     "response": {"content": response_data},
                 },
             }
-            media_parts: list[dict[str, Any]] = []
-            if isinstance(msg.content, list):
-                media_parts = content_blocks_to_google(msg.content)
             pending_tool_parts.extend([function_response_part, *media_parts])
 
     # Flush any trailing tool results
@@ -321,11 +339,30 @@ def _parse_response(raw: Any, model_name: str) -> ModelResponse:
     Returns:
         A normalized ``ModelResponse``.
     """
+    # Safety-blocked or filtered responses may have no candidates at all.
+    if not raw.candidates:
+        usage = Usage()
+        if raw.usage_metadata:
+            usage = Usage(
+                input_tokens=raw.usage_metadata.prompt_token_count or 0,
+                output_tokens=raw.usage_metadata.candidates_token_count or 0,
+                total_tokens=raw.usage_metadata.total_token_count or 0,
+            )
+        return ModelResponse(
+            id="",
+            model=model_name,
+            content="",
+            tool_calls=[],
+            usage=usage,
+            finish_reason="content_filter",
+        )
+
     candidate = raw.candidates[0]
     content_parts: list[str] = []
     tool_calls: list[ToolCall] = []
 
-    for i, part in enumerate(candidate.content.parts):
+    # candidate.content may be None for safety-blocked candidates.
+    for i, part in enumerate(candidate.content.parts if candidate.content else []):
         text = getattr(part, "text", None)
         if text and not getattr(part, "thought", False):
             content_parts.append(text)

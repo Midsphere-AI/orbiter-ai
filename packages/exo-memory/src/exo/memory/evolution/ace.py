@@ -7,12 +7,13 @@ reflection for counter updates and periodic curation.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
-from exo.memory.base import MemoryItem  # pyright: ignore[reportMissingImports]
+from exo.memory.base import ExoMemoryError, MemoryItem  # pyright: ignore[reportMissingImports]
 from exo.memory.evolution import MemoryEvolutionStrategy  # pyright: ignore[reportMissingImports]
 
 logger = logging.getLogger(__name__)
@@ -131,10 +132,27 @@ class ACEStrategy(MemoryEvolutionStrategy):
             logger.warning("ACE: failed to load counters: %s", exc)
 
     def _save(self) -> None:
-        """Persist counters to disk (if configured)."""
+        """Persist counters to disk (if configured).
+
+        When called from an async context, use :meth:`_async_save` instead
+        to avoid blocking the event loop on the file write.
+        """
         if self._counter_path is None:
             return
         data = {mid: c.to_dict() for mid, c in self._counters.items()}
+        self._counter_path.parent.mkdir(parents=True, exist_ok=True)
+        self._counter_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+    async def _async_save(self) -> None:
+        """Persist counters to disk without blocking the event loop."""
+        if self._counter_path is None:
+            return
+        data = {mid: c.to_dict() for mid, c in self._counters.items()}
+        await asyncio.to_thread(self._write_data, data)
+
+    def _write_data(self, data: dict[str, Any]) -> None:
+        """Blocking helper that writes *data* to disk (called via to_thread)."""
+        assert self._counter_path is not None
         self._counter_path.parent.mkdir(parents=True, exist_ok=True)
         self._counter_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
@@ -157,10 +175,15 @@ class ACEStrategy(MemoryEvolutionStrategy):
             ValueError: If *label* is not a valid classification.
         """
         if label not in _VALID_LABELS:
-            msg = f"Invalid label {label!r}; expected one of {sorted(_VALID_LABELS)}"
-            raise ValueError(msg)
+            raise ExoMemoryError(
+                f"Invalid feedback label {label!r}.",
+                context={"label": label, "valid": sorted(_VALID_LABELS)},
+                hint=f"Pass one of: {sorted(_VALID_LABELS)}.",
+            )
         counters = self.get_counters(memory_id)
         setattr(counters, label, getattr(counters, label) + 1)
+        # _save() does a blocking write — callers from async code should use
+        # _async_save() after updating all counters (e.g. reflect() does this).
         self._save()
 
     async def evolve(
@@ -213,8 +236,18 @@ class ACEStrategy(MemoryEvolutionStrategy):
                     label = "neutral"
             else:
                 label = "neutral"
-            self.record(item.id, label)
+            # Update in-memory counters only (skip the blocking _save() per item).
+            if label not in _VALID_LABELS:
+                raise ExoMemoryError(
+                    f"Invalid feedback label {label!r}.",
+                    context={"label": label, "valid": sorted(_VALID_LABELS)},
+                    hint=f"Pass one of: {sorted(_VALID_LABELS)}.",
+                )
+            counters = self.get_counters(item.id)
+            setattr(counters, label, getattr(counters, label) + 1)
             labels[item.id] = label
+        # Flush all counter updates to disk once (non-blocking).
+        await self._async_save()
         return labels
 
     async def curate(

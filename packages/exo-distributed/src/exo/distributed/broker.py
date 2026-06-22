@@ -10,10 +10,14 @@ import redis.asyncio as aioredis
 from exo.distributed._redis_mixin import (  # pyright: ignore[reportMissingImports]
     RedisConnectionMixin,
 )
+from exo.distributed.metrics import (  # pyright: ignore[reportMissingImports]
+    record_task_submitted,
+)
 from exo.distributed.models import (  # pyright: ignore[reportMissingImports]
     TaskPayload,
     TaskStatus,
 )
+from exo.types import ExoError  # pyright: ignore[reportMissingImports]
 
 logger = logging.getLogger(__name__)
 
@@ -31,11 +35,13 @@ class TaskBroker(RedisConnectionMixin):
         *,
         queue_name: str = "exo:tasks",
         max_retries: int = 3,
+        task_key_prefix: str = "exo:task:",
     ) -> None:
         super().__init__()
         self._redis_url = redis_url
         self._queue_name = queue_name
         self._max_retries = max_retries
+        self._task_key_prefix = task_key_prefix
         self._group_name = f"{queue_name}:group"
         self._pending_ids: dict[str, str] = {}
 
@@ -48,12 +54,23 @@ class TaskBroker(RedisConnectionMixin):
         await super().connect()
         r = self._client()
         try:
-            await r.xgroup_create(self._queue_name, self._group_name, id="0", mkstream=True)
+            # id="$" means "only deliver messages added after this point" — a
+            # fresh group should not replay historical undelivered entries on
+            # the first connect.  Use id="0" only when you intentionally want
+            # to reprocess the full backlog (e.g. a replay consumer).
+            await r.xgroup_create(self._queue_name, self._group_name, id="$", mkstream=True)
             logger.debug("TaskBroker created consumer group %s", self._group_name)
         except aioredis.ResponseError as exc:
             # Group already exists — safe to ignore.
             if "BUSYGROUP" not in str(exc):
-                raise
+                raise ExoError(
+                    f"Failed to create consumer group {self._group_name!r} on stream {self._queue_name!r}: {exc}",
+                    context={"stream": self._queue_name, "group": self._group_name},
+                    hint=(
+                        "Ensure Redis is reachable and the stream key is not occupied by a different type. "
+                        "If the stream already exists as a different data type, delete it and reconnect."
+                    ),
+                ) from exc
             logger.debug("TaskBroker consumer group %s already exists", self._group_name)
 
     async def submit(self, task: TaskPayload) -> str:
@@ -61,6 +78,7 @@ class TaskBroker(RedisConnectionMixin):
         r = self._client()
         data = task.model_dump()
         await r.xadd(self._queue_name, {"payload": json.dumps(data)})
+        record_task_submitted(task_id=task.task_id, queue_name=self._queue_name)
         logger.debug("TaskBroker submitted task %s to %s", task.task_id, self._queue_name)
         return task.task_id
 
@@ -116,17 +134,48 @@ class TaskBroker(RedisConnectionMixin):
         if msg_id is not None:
             # Read the original message data before acking.
             msgs = await r.xrange(self._queue_name, min=msg_id, max=msg_id)
-            await r.xack(self._queue_name, self._group_name, msg_id)
             if msgs:
+                # Happy path: ack the original entry then re-add it so any
+                # consumer in the group can pick it up for retry.
                 _mid, fields = msgs[0]
-                await r.xadd(self._queue_name, {"payload": fields["payload"]})
-                logger.debug("TaskBroker nacked task %s — re-queued for retry", task_id)
+                try:
+                    await r.xack(self._queue_name, self._group_name, msg_id)
+                except Exception:
+                    logger.error(
+                        "TaskBroker nack for task %s: xack failed — message may remain stuck in PEL",
+                        task_id,
+                        exc_info=True,
+                    )
+                    return
+                try:
+                    await r.xadd(self._queue_name, {"payload": fields["payload"]})
+                    logger.debug("TaskBroker nacked task %s — re-queued for retry", task_id)
+                except Exception:
+                    logger.error(
+                        "TaskBroker nack for task %s: xadd re-queue failed — task may be lost",
+                        task_id,
+                        exc_info=True,
+                    )
             else:
-                logger.warning(
-                    "TaskBroker nack for task %s: original message %s not found in stream",
+                # The original stream entry is gone (stream trimmed or Redis
+                # restarted).  Ack it to clear the PEL so the worker is not
+                # permanently blocked, but log at ERROR so the operator knows
+                # the retry payload is unrecoverable.
+                logger.error(
+                    "TaskBroker nack for task %s: original message %s not found in stream — "
+                    "acking to clear PEL; retry payload is unrecoverable",
                     task_id,
                     msg_id,
                 )
+                try:
+                    await r.xack(self._queue_name, self._group_name, msg_id)
+                except Exception:
+                    logger.error(
+                        "TaskBroker nack for task %s: xack (PEL-clear) also failed — "
+                        "message stuck in PEL",
+                        task_id,
+                        exc_info=True,
+                    )
         else:
             logger.warning(
                 "TaskBroker nack called for unknown task %s (no pending msg_id)", task_id
@@ -144,6 +193,6 @@ class TaskBroker(RedisConnectionMixin):
         await r.publish(  # type: ignore[misc]
             f"exo:cancel:{task_id}", "cancel"
         )
-        # Update status in the task hash (using TaskStore key convention).
-        key = f"exo:task:{task_id}"
+        # Update status in the task hash using the same prefix as TaskStore.
+        key = f"{self._task_key_prefix}{task_id}"
         await r.hset(key, mapping={"status": str(TaskStatus.CANCELLED)})  # type: ignore[misc]

@@ -88,15 +88,17 @@ async def call_runner(
             max_retries=max_retries,
         )
 
+        # Detect endless loops BEFORE marking the node as success so that if
+        # the check raises, node.fail() in the except branch transitions a
+        # still-RUNNING node (not an already-SUCCESS one).
+        _check_loop(state, output, loop_threshold)
+
         # Record usage and mark success
         if output.usage:
             state.record_usage(output.usage)
             node.succeed(usage=output.usage)
         else:
             node.succeed()
-
-        # Detect endless loops by checking repeated tool-call patterns
-        _check_loop(state, output, loop_threshold)
 
         # Build final message list for the result
         instr = await resolve_instructions(agent)

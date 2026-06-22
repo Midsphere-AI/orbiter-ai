@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 
-from exo.eval.base import Scorer  # pyright: ignore[reportMissingImports]
+from exo.eval.base import EvalError, Scorer  # pyright: ignore[reportMissingImports]
 from exo.eval.llm_scorer import (  # pyright: ignore[reportMissingImports]
     ConstraintSatisfactionScorer,
     LLMAsJudgeScorer,
@@ -50,6 +50,21 @@ class TestExtractJson:
     def test_empty_string(self) -> None:
         assert extract_json("") == {}
 
+    def test_brace_inside_string_value(self) -> None:
+        # Regression: a "}" inside a string value must not confuse the depth counter.
+        assert extract_json('prefix {"key": "a}b"} suffix') == {"key": "a}b"}
+
+    def test_opening_brace_inside_string(self) -> None:
+        # Similarly, "{" inside a string must not inflate the depth.
+        assert extract_json('{"key": "a{b", "score": 1.0}') == {"key": "a{b", "score": 1.0}
+
+    def test_escaped_quote_in_string(self) -> None:
+        # Backslash-escaped quote must not toggle the in_string flag.
+        assert extract_json(r'{"key": "a\"b"}') == {"key": 'a"b'}
+
+    def test_nested_braces(self) -> None:
+        assert extract_json('{"outer": {"inner": 1}}') == {"outer": {"inner": 1}}
+
 
 # ---------------------------------------------------------------------------
 # LLMAsJudgeScorer -- base
@@ -74,9 +89,9 @@ class TestLLMAsJudgeScorerInit:
 
 class TestLLMAsJudgeScorerScore:
     async def test_no_judge_raises(self) -> None:
-        """judge=None must raise ValueError — silent 0.0 was a footgun."""
+        """judge=None must raise EvalError — silent 0.0 was a footgun."""
         s = LLMAsJudgeScorer()
-        with pytest.raises(ValueError, match="judge callable"):
+        with pytest.raises(EvalError, match="judge callable"):
             await s.score("c1", "input", "output")
 
     async def test_with_judge(self) -> None:
@@ -300,7 +315,7 @@ class TestLogicConsistencyScorerScore:
 
     async def test_no_judge(self) -> None:
         s = LogicConsistencyScorer()
-        with pytest.raises(ValueError, match="judge callable"):
+        with pytest.raises(EvalError, match="judge callable"):
             await s.score("c1", None, "text")
 
 
@@ -347,7 +362,7 @@ class TestReasoningValidityScorerScore:
 
     async def test_no_judge(self) -> None:
         s = ReasoningValidityScorer()
-        with pytest.raises(ValueError, match="judge callable"):
+        with pytest.raises(EvalError, match="judge callable"):
             await s.score("c1", None, "text")
 
 
@@ -431,8 +446,41 @@ class TestConstraintSatisfactionScorerScore:
 
     async def test_no_judge(self) -> None:
         s = ConstraintSatisfactionScorer(["a"])
-        with pytest.raises(ValueError, match="judge callable"):
+        with pytest.raises(EvalError, match="judge callable"):
             await s.score("c1", None, "text")
+
+    async def test_more_results_than_constraints_clamped(self) -> None:
+        """Extras from LLM beyond configured constraints are ignored; score uses configured count."""
+        judge = _mock_judge(
+            {
+                "constraint_results": [
+                    {"id": 1, "status": "PASS"},
+                    {"id": 2, "status": "PASS"},
+                    {"id": 3, "status": "PASS"},  # extra — LLM hallucinated a third constraint
+                ],
+            }
+        )
+        s = ConstraintSatisfactionScorer(["a", "b"], judge)  # only 2 constraints configured
+        sr = await s.score("c1", None, "output")
+        # Clamped to 2 constraints: 2 PASS / 2 = 1.0
+        assert sr.score == pytest.approx(1.0)
+        assert "constraint_count_mismatch" in sr.details
+
+    async def test_fewer_results_than_constraints_counted(self) -> None:
+        """Missing results (LLM returned fewer than configured) are treated as FAILs."""
+        judge = _mock_judge(
+            {
+                "constraint_results": [
+                    {"id": 1, "status": "PASS"},
+                    # second constraint missing from LLM response
+                ],
+            }
+        )
+        s = ConstraintSatisfactionScorer(["a", "b"], judge)
+        sr = await s.score("c1", None, "output")
+        # 1 PASS out of 2 configured = 0.5
+        assert sr.score == pytest.approx(0.5)
+        assert "constraint_count_mismatch" in sr.details
 
 
 # ---------------------------------------------------------------------------

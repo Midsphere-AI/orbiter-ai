@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from exo.retrieval.types import Chunk, RetrievalResult
+from exo.retrieval.types import Chunk, RetrievalError, RetrievalResult
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -163,7 +163,7 @@ class TestPgVectorStoreAdd:
             from exo.retrieval.backends.pgvector import PgVectorStore
 
             store = PgVectorStore(pool=mock_pool)
-            with pytest.raises(ValueError, match="must match"):
+            with pytest.raises(RetrievalError, match="must match"):
                 await store.add([_chunk()], [[1.0], [2.0]])
 
     @pytest.mark.asyncio
@@ -325,6 +325,47 @@ class TestPgVectorStoreSearch:
             params = mock_conn.fetch.call_args.args
             assert params[1] == "[1.5,2.5,3.5]"
             assert params[2] == 3
+
+    @pytest.mark.asyncio
+    async def test_search_rejects_invalid_filter_key(self) -> None:
+        """SQL injection: filter keys with non-alphanumeric chars must be rejected."""
+        mock_pool, mock_conn = _make_mock_pool()
+        mock_conn.fetch = AsyncMock(return_value=[])
+
+        with patch.dict("sys.modules", {"asyncpg": MagicMock()}):
+            from exo.retrieval.backends.pgvector import PgVectorStore
+
+            store = PgVectorStore(pool=mock_pool)
+
+            # These keys contain characters that could allow SQL injection
+            bad_keys = [
+                "'; DROP TABLE exo_vectors; --",
+                "key WITH INJECTION",
+                "key'quote",
+                "key-with-hyphens",
+                "key.with.dots",
+                "key with spaces",
+            ]
+            for bad_key in bad_keys:
+                with pytest.raises(RetrievalError, match="Invalid metadata filter key"):
+                    await store.search([1.0, 0.0], filter={bad_key: "value"})
+
+    @pytest.mark.asyncio
+    async def test_search_accepts_valid_filter_keys(self) -> None:
+        """Valid alphanumeric/underscore filter keys pass through without error."""
+        mock_pool, mock_conn = _make_mock_pool()
+        mock_conn.fetch = AsyncMock(return_value=[])
+
+        with patch.dict("sys.modules", {"asyncpg": MagicMock()}):
+            from exo.retrieval.backends.pgvector import PgVectorStore
+
+            store = PgVectorStore(pool=mock_pool)
+
+            valid_keys = ["source", "lang", "chunk_type", "Page123", "snake_case_key"]
+            for key in valid_keys:
+                await store.search([1.0, 0.0], filter={key: "value"})
+                # Should reach the DB without raising
+                assert mock_conn.fetch.called
 
 
 # ---------------------------------------------------------------------------

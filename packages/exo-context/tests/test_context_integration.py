@@ -604,6 +604,7 @@ class TestAgentContextWindowing:
 
         from exo.agent import _apply_context_windowing
         from exo.types import AssistantMessage, SystemMessage, UserMessage
+
         context = _types.SimpleNamespace(
             overflow="summarize",
             history_rounds=100,

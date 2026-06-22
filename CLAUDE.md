@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What is Exo
 
-Exo is a modular multi-agent framework for building LLM-powered applications in Python. It's a UV workspace monorepo with 19 packages. Requires Python 3.11+.
+Exo is a modular multi-agent framework for building LLM-powered applications in Python. It's a UV workspace monorepo with 19 packages. Requires Python 3.13+.
 
 A bare `Agent(...)` is batteries-included by default — memory, context management, checkpoints, message injections, and sub-agent orchestration are all on by default with no extra configuration required.
 
@@ -55,7 +55,7 @@ exo-skills, exo-mcp-cli
     ↑
 exo-server [experimental], exo-train [experimental]
     ↑
-exo (meta-package, re-exports everyday framework; extras for distributed/a2a/search)
+exo (meta-package, re-exports everyday framework; extras for distributed/a2a/search/guardrail/skills/tracing/langfuse/langsmith/phoenix/braintrust)
 ```
 
 There are no `orbiter-*` mirror packages present in `packages/` at this time. (They were planned as thin re-export wrappers for a public `orbiter` distribution but have not been created yet — do not assume they exist.)
@@ -78,10 +78,15 @@ There are no `orbiter-*` mirror packages present in `packages/` at this time. (T
 Install the meta-package with extras for optional capabilities:
 
 ```
-pip install exo-ai                  # core + models + memory + mcp + sandbox + observability + eval + retrieval
+pip install exo-ai                  # core + models + context + memory + mcp + sandbox + observability + eval + retrieval
 pip install "exo-ai[distributed]"   # + exo-distributed (Redis task queue / workers)
-pip install "exo-ai[a2a]"           # + exo-a2a (agent-to-agent protocol, drops httpx for base users)
+pip install "exo-ai[a2a]"           # + exo-a2a (agent-to-agent protocol)
 pip install "exo-ai[search]"        # + exo-search (AI search engine)
+pip install "exo-ai[guardrail]"     # + exo-guardrail (prompt injection / jailbreak detection)
+pip install "exo-ai[skills]"        # + exo-skills (dynamic skill packages)
+pip install "exo-ai[tracing]"       # + OTLP tracing backend
+pip install "exo-ai[langfuse]"      # + Langfuse tracing integration
+pip install "exo-ai[langsmith]"     # + LangSmith tracing integration
 pip install "exo-ai[all]"           # everything above combined
 ```
 
@@ -108,7 +113,7 @@ The `_internal/` subpackage is the engine room. Understanding the call chain is 
 ## Code Conventions
 
 - **Ruff**: line-length 100, rules `E,F,I,N,W,UP,B,SIM,RUF`, ignore `E501`. Use `datetime.UTC` not `timezone.utc`.
-- **Pyright**: basic mode, Python 3.11 target.
+- **Pyright**: basic mode, Python 3.13 target.
 - **Async-first**: all core APIs are async. Tests use `asyncio_mode = "auto"` (no `@pytest.mark.asyncio` needed).
 - **Pydantic v2**: for all schemas and validation.
 - **Test file names must be unique** across all packages (pytest `--import-mode=importlib`).

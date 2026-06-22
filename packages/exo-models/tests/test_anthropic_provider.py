@@ -694,19 +694,13 @@ class TestExtraCreateKwargs:
 
     def test_thinking_passthrough(self) -> None:
         thinking = {"type": "enabled", "budget_tokens": 8000}
-        provider = AnthropicProvider(
-            _make_config(extra_create_kwargs={"thinking": thinking})
-        )
-        kwargs = provider._build_kwargs(
-            [UserMessage(content="hi")], max_tokens=16000
-        )
+        provider = AnthropicProvider(_make_config(extra_create_kwargs={"thinking": thinking}))
+        kwargs = provider._build_kwargs([UserMessage(content="hi")], max_tokens=16000)
         assert kwargs["thinking"] == thinking
         assert kwargs["max_tokens"] == 16000  # budget headroom preserved
 
     def test_extra_merged_last_overrides(self) -> None:
-        provider = AnthropicProvider(
-            _make_config(extra_create_kwargs={"top_k": 5})
-        )
+        provider = AnthropicProvider(_make_config(extra_create_kwargs={"top_k": 5}))
         kwargs = provider._build_kwargs([UserMessage(content="hi")])
         assert kwargs["top_k"] == 5
 
@@ -742,3 +736,134 @@ class TestOpenAIExtraCreateKwargs:
         # MUST be under extra_body (OpenAI SDK rejects unknown top-level kwargs).
         assert kwargs["extra_body"] == reasoning
         assert "reasoning" not in kwargs
+
+
+# ---------------------------------------------------------------------------
+# JSON parse error in tool call arguments (finding #7)
+# ---------------------------------------------------------------------------
+
+
+class TestBuildMessagesToolCallJsonError:
+    def test_invalid_json_arguments_raises_model_error(self) -> None:
+        """Invalid JSON in tc.arguments must raise ModelError, not ValueError."""
+        msg = AssistantMessage(
+            tool_calls=[ToolCall(id="tc1", name="search", arguments="not valid json {")]
+        )
+        with pytest.raises(ModelError, match="parse tool call arguments"):
+            _build_messages([msg])
+
+    def test_empty_arguments_ok(self) -> None:
+        msg = AssistantMessage(tool_calls=[ToolCall(id="tc1", name="search", arguments="")])
+        _, converted = _build_messages([msg])
+        assert converted[0]["content"][0]["input"] == {}
+
+    def test_valid_arguments_ok(self) -> None:
+        msg = AssistantMessage(
+            tool_calls=[ToolCall(id="tc1", name="search", arguments='{"q": "test"}')]
+        )
+        _, converted = _build_messages([msg])
+        assert converted[0]["content"][0]["input"] == {"q": "test"}
+
+
+# ---------------------------------------------------------------------------
+# Streaming thinking / reasoning (finding #8)
+# ---------------------------------------------------------------------------
+
+
+class TestAnthropicStreamThinking:
+    async def test_thinking_delta_accumulates_in_final_chunk(self) -> None:
+        """thinking_delta events must appear as reasoning_content on the final chunk."""
+        config = _make_config()
+        provider = AnthropicProvider(config)
+
+        events = [
+            SimpleNamespace(
+                type="message_start",
+                message=SimpleNamespace(usage=SimpleNamespace(input_tokens=20)),
+            ),
+            SimpleNamespace(
+                type="content_block_start",
+                index=0,
+                content_block=SimpleNamespace(type="thinking"),
+            ),
+            SimpleNamespace(
+                type="content_block_delta",
+                index=0,
+                delta=SimpleNamespace(type="thinking_delta", thinking="I need to "),
+            ),
+            SimpleNamespace(
+                type="content_block_delta",
+                index=0,
+                delta=SimpleNamespace(type="thinking_delta", thinking="think more"),
+            ),
+            SimpleNamespace(
+                type="content_block_start",
+                index=1,
+                content_block=SimpleNamespace(type="text"),
+            ),
+            SimpleNamespace(
+                type="content_block_delta",
+                index=1,
+                delta=SimpleNamespace(type="text_delta", text="answer"),
+            ),
+            SimpleNamespace(
+                type="message_delta",
+                delta=SimpleNamespace(stop_reason="end_turn"),
+                usage=SimpleNamespace(output_tokens=10),
+            ),
+        ]
+
+        async def mock_stream(**kwargs: Any) -> Any:
+            async def gen():
+                for e in events:
+                    yield e
+
+            return gen()
+
+        provider._client.messages.create = AsyncMock(side_effect=mock_stream)
+
+        collected = []
+        async for chunk in provider.stream([UserMessage(content="hi")]):
+            collected.append(chunk)
+
+        final = collected[-1]
+        assert final.reasoning_content == "I need to think more"
+
+    async def test_no_thinking_gives_none_reasoning(self) -> None:
+        """Streams without thinking blocks must have reasoning_content=None (not empty str)."""
+        config = _make_config()
+        provider = AnthropicProvider(config)
+
+        events = [
+            SimpleNamespace(
+                type="message_start",
+                message=SimpleNamespace(usage=SimpleNamespace(input_tokens=5)),
+            ),
+            SimpleNamespace(
+                type="content_block_delta",
+                index=0,
+                delta=SimpleNamespace(type="text_delta", text="hello"),
+            ),
+            SimpleNamespace(
+                type="message_delta",
+                delta=SimpleNamespace(stop_reason="end_turn"),
+                usage=SimpleNamespace(output_tokens=1),
+            ),
+        ]
+
+        async def mock_stream(**kwargs: Any) -> Any:
+            async def gen():
+                for e in events:
+                    yield e
+
+            return gen()
+
+        provider._client.messages.create = AsyncMock(side_effect=mock_stream)
+
+        collected = []
+        async for chunk in provider.stream([UserMessage(content="hi")]):
+            collected.append(chunk)
+
+        final = collected[-1]
+        # No thinking blocks — reasoning_content should be None (not an empty string)
+        assert final.reasoning_content is None

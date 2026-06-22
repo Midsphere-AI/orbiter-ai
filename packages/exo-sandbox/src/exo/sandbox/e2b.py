@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
 import os
-from collections.abc import Awaitable, Callable
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -24,10 +25,10 @@ from exo.sandbox.base import (  # pyright: ignore[reportMissingImports]
 
 logger = logging.getLogger(__name__)
 
-#: Type alias for registered tool handlers.
-#: A handler receives the E2B sandbox instance and the tool arguments dict,
-#: and returns any result.
-ToolHandler = Callable[["E2BSandbox", dict[str, Any]], Awaitable[Any]]
+#: Built-in tool names dispatched by :meth:`E2BSandbox.run_tool`.
+_BUILTIN_TOOL_NAMES: frozenset[str] = frozenset(
+    {"shell", "command", "code", "file_read", "file_write", "file_list"}
+)
 
 
 class E2BSandbox(Sandbox):
@@ -48,7 +49,6 @@ class E2BSandbox(Sandbox):
         "_e2b_sandbox_id",
         "_existing_sandbox_id",
         "_metadata",
-        "_registered_tools",
         "_template",
     )
 
@@ -78,7 +78,6 @@ class E2BSandbox(Sandbox):
         self._metadata = dict(metadata) if metadata else {}
         self._e2b_sandbox: Any = None
         self._e2b_sandbox_id: str | None = None
-        self._registered_tools: dict[str, ToolHandler] = {}
 
     # -- properties ---------------------------------------------------------
 
@@ -97,6 +96,30 @@ class E2BSandbox(Sandbox):
     @property
     def existing_sandbox_id(self) -> str | None:
         return self._existing_sandbox_id
+
+    @property
+    def e2b_sandbox(self) -> Any:
+        """Return the underlying ``e2b.Sandbox`` handle for direct SDK access.
+
+        Use this to reach E2B features not wrapped by :meth:`run_tool` — e.g.
+        ``sandbox.e2b_sandbox.files.write(...)`` to upload files, long-running
+        commands, PTY sessions, or watch handlers. The object is the live
+        instance returned by ``e2b.Sandbox.create``/``connect``.
+
+        Raises
+        ------
+        SandboxError
+            If the sandbox has not been started yet (call :meth:`start` or use
+            ``async with E2BSandbox(...)`` first), or has already been closed.
+        """
+        if self._e2b_sandbox is None:
+            msg = (
+                "E2B sandbox is not running — no underlying handle is available. "
+                "Call `await sandbox.start()` (or use `async with E2BSandbox(...)`) "
+                "before accessing `.e2b_sandbox`."
+            )
+            raise SandboxError(msg)
+        return self._e2b_sandbox
 
     # -- E2B helpers --------------------------------------------------------
 
@@ -121,8 +144,12 @@ class E2BSandbox(Sandbox):
 
     async def start(self) -> None:
         """Create or connect to an E2B sandbox."""
-        self._transition(SandboxStatus.RUNNING)
+        # Load (and validate) the e2b package and API key BEFORE transitioning
+        # to RUNNING.  If _load_e2b() raises SandboxError (missing package or no
+        # API key), the object stays in its current state rather than getting
+        # stuck in RUNNING.
         e2b_mod = self._load_e2b()
+        self._transition(SandboxStatus.RUNNING)
 
         try:
             if self._existing_sandbox_id:
@@ -158,8 +185,16 @@ class E2BSandbox(Sandbox):
         except Exception as exc:
             self._status = SandboxStatus.ERROR
             logger.error("Failed to start E2B sandbox %s: %s", self._sandbox_id, exc)
-            msg = f"Failed to start E2B sandbox: {exc}"
-            raise SandboxError(msg) from exc
+            raise SandboxError(
+                "Failed to start E2B sandbox.",
+                context={
+                    "sandbox_id": self._sandbox_id,
+                    "template": self._template or "(default)",
+                    "existing_sandbox_id": self._existing_sandbox_id,
+                },
+                hint="Check E2B_API_KEY is valid and the template ID exists in your E2B account.",
+                doc="https://e2b.dev/docs",
+            ) from exc
 
     async def stop(self) -> None:
         """Kill the E2B sandbox permanently.
@@ -183,60 +218,29 @@ class E2BSandbox(Sandbox):
         if self._e2b_sandbox is None:
             return
         try:
-            await asyncio.to_thread(self._e2b_sandbox.kill)
+            await asyncio.wait_for(
+                asyncio.to_thread(self._e2b_sandbox.kill),
+                timeout=10.0,
+            )
             logger.info("Killed E2B sandbox %s", self._e2b_sandbox_id)
-        except Exception:
-            logger.warning("Failed to kill E2B sandbox %s", self._e2b_sandbox_id)
-        self._e2b_sandbox = None
-        self._e2b_sandbox_id = None
+        except Exception as exc:
+            # Log with the exception object so the diagnostic signal is not lost.
+            # Do NOT swallow CancelledError — it will not reach here because
+            # CancelledError is not a subclass of Exception.
+            logger.warning(
+                "Failed to kill E2B sandbox %s: %s",
+                self._e2b_sandbox_id,
+                exc,
+            )
+        finally:
+            self._e2b_sandbox = None
+            self._e2b_sandbox_id = None
 
-    # -- tool registration --------------------------------------------------
-
-    def register_tool(self, name: str, handler: ToolHandler) -> None:
-        """Register a custom tool handler for this sandbox.
-
-        Registered handlers take precedence over built-in dispatch in
-        :meth:`run_tool`.  A handler is an async callable with signature::
-
-            async def my_handler(sandbox: E2BSandbox, arguments: dict[str, Any]) -> Any:
-                ...
-
-        Parameters
-        ----------
-        name:
-            Tool name used for dispatch in :meth:`run_tool`.
-        handler:
-            Async callable ``(sandbox, arguments) -> result``.
-
-        Raises
-        ------
-        SandboxError
-            If a tool with the same *name* is already registered.
-        """
-        if name in self._registered_tools:
-            msg = f"Tool {name!r} is already registered"
-            raise SandboxError(msg)
-        self._registered_tools[name] = handler
-        logger.debug("Sandbox %s: registered tool %r", self._sandbox_id, name)
-
-    def unregister_tool(self, name: str) -> None:
-        """Remove a previously registered tool handler.
-
-        Raises
-        ------
-        SandboxError
-            If no tool with *name* is registered.
-        """
-        if name not in self._registered_tools:
-            msg = f"Tool {name!r} is not registered"
-            raise SandboxError(msg)
-        del self._registered_tools[name]
-        logger.debug("Sandbox %s: unregistered tool %r", self._sandbox_id, name)
-
-    @property
-    def registered_tools(self) -> list[str]:
-        """Return the names of all registered tool handlers."""
-        return list(self._registered_tools)
+    # ``register_tool`` / ``unregister_tool`` / ``registered_tools`` are
+    # inherited from :class:`~exo.sandbox.base.Sandbox` and shared across all
+    # backends. Both call forms work here:
+    #   sandbox.register_tool("name", handler)   # async (sandbox, args) -> result
+    #   sandbox.register_tool(my_tool)           # a Tool with .name + .execute
 
     # -- tool execution -----------------------------------------------------
 
@@ -246,9 +250,9 @@ class E2BSandbox(Sandbox):
         Dispatch order:
 
         1. **Registered tools** — added via :meth:`register_tool`.
-        2. **Built-in tools** — ``"shell"`` / ``"command"``,
+        2. **Built-in tools** — ``"shell"`` / ``"command"``, ``"code"``,
            ``"file_read"``, ``"file_write"``, ``"file_list"``.
-        3. **Fallback** — returns a metadata dict.
+        3. **Unknown name** — raises :class:`SandboxError` listing valid tools.
 
         Raises :class:`SandboxError` if the sandbox is not running.
         """
@@ -257,15 +261,9 @@ class E2BSandbox(Sandbox):
             raise SandboxError(msg)
 
         # 1. Registered tool handlers take priority
-        handler = self._registered_tools.get(tool_name)
-        if handler is not None:
-            try:
-                return await handler(self, arguments)
-            except SandboxError:
-                raise
-            except Exception as exc:
-                msg = f"Registered tool {tool_name!r} failed: {exc}"
-                raise SandboxError(msg) from exc
+        handled, result = await self._run_registered(tool_name, arguments)
+        if handled:
+            return result
 
         # 2. Built-in dispatch
         sb = self._e2b_sandbox
@@ -296,7 +294,7 @@ class E2BSandbox(Sandbox):
                 await asyncio.to_thread(sb.files.write, path, content)
                 return {
                     "path": path,
-                    "bytes_written": len(content),
+                    "bytes_written": len(content.encode("utf-8")),
                     "sandbox_id": self._sandbox_id,
                     "status": "ok",
                 }
@@ -309,17 +307,39 @@ class E2BSandbox(Sandbox):
                     "sandbox_id": self._sandbox_id,
                     "status": "ok",
                 }
-            else:
+            elif tool_name == "code":
+                # Run Python in the remote VM. base64 the source so arbitrary
+                # quoting/newlines survive the shell round-trip intact.
+                code: str = arguments.get("code", "")
+                encoded = base64.b64encode(code.encode()).decode()
+                result = await asyncio.to_thread(
+                    sb.commands.run, f"echo {encoded} | base64 -d | python3"
+                )
                 return {
-                    "tool": tool_name,
-                    "arguments": arguments,
+                    "stdout": result.stdout,
+                    "stderr": result.stderr,
+                    "exit_code": result.exit_code,
                     "sandbox_id": self._sandbox_id,
                     "e2b_sandbox_id": self._e2b_sandbox_id,
                     "status": "ok",
                 }
+            else:
+                known = sorted({*_BUILTIN_TOOL_NAMES, *self._registered_tools})
+                msg = (
+                    f"Unknown tool {tool_name!r}. "
+                    f"Built-in tools are {sorted(_BUILTIN_TOOL_NAMES)}; "
+                    f"register custom tools with sandbox.register_tool(name, handler). "
+                    f"Available here: {known}."
+                )
+                raise SandboxError(msg)
+        except SandboxError:
+            raise
         except Exception as exc:
-            msg = f"E2B tool {tool_name!r} failed: {exc}"
-            raise SandboxError(msg) from exc
+            raise SandboxError(
+                f"E2B tool {tool_name!r} failed.",
+                context={"sandbox_id": self._sandbox_id, "e2b_sandbox_id": self._e2b_sandbox_id},
+                hint=f"Check the E2B sandbox logs or verify the sandbox is healthy (tool={tool_name!r}).",
+            ) from exc
 
     # -- tool factories -----------------------------------------------------
 
@@ -335,10 +355,19 @@ class E2BSandbox(Sandbox):
         blacklist: frozenset[str] | None = None,
         timeout: float = 30.0,
     ) -> TerminalTool:
-        """Return a :class:`TerminalTool` wired to this E2B sandbox."""
+        """Return a :class:`TerminalTool` wired to this E2B sandbox.
+
+        .. deprecated::
+            Prefer :meth:`shell_tool` (``mode="blacklist"``) directly.
+            This method is kept for backwards compatibility.
+        """
+        import warnings
+
         from exo.sandbox.tools import TerminalTool  # pyright: ignore[reportMissingImports]
 
-        return TerminalTool(blacklist=blacklist, timeout=timeout, sandbox=self)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            return TerminalTool(blacklist=blacklist, timeout=timeout, sandbox=self)
 
     def shell_tool(
         self,
@@ -362,6 +391,77 @@ class E2BSandbox(Sandbox):
 
         return CodeTool(sandbox=self, blocked_names=blocked_names, timeout=timeout)
 
+    # -- convenience: files & commands --------------------------------------
+    #
+    # These cover the everyday operations directly, so you don't have to reach
+    # for the raw ``e2b_sandbox`` handle. Each runs the blocking E2B SDK call on
+    # a worker thread and raises a teaching :class:`SandboxError` if the sandbox
+    # isn't running yet (via the ``e2b_sandbox`` accessor).
+
+    async def upload(self, local_path: str | Path, remote_path: str) -> str:
+        """Upload a local file into the sandbox. Returns the *remote_path*.
+
+        Example::
+
+            await sandbox.upload("data.csv", "/home/user/data.csv")
+        """
+        data = await asyncio.to_thread(Path(local_path).read_bytes)
+        await asyncio.to_thread(self.e2b_sandbox.files.write, remote_path, data)
+        logger.debug("Uploaded %s -> %s", local_path, remote_path)
+        return remote_path
+
+    async def download(self, remote_path: str, local_path: str | Path) -> str:
+        """Download a file from the sandbox to local disk. Returns the local path.
+
+        Example::
+
+            await sandbox.download("/home/user/out.txt", "out.txt")
+        """
+        content = await asyncio.to_thread(self.e2b_sandbox.files.read, remote_path)
+        dest = Path(local_path)
+        if isinstance(content, bytes):
+            await asyncio.to_thread(dest.write_bytes, content)
+        else:
+            await asyncio.to_thread(dest.write_text, content)
+        logger.debug("Downloaded %s -> %s", remote_path, local_path)
+        return str(dest)
+
+    async def write_file(self, remote_path: str, content: str | bytes) -> str:
+        """Write *content* to a file in the sandbox. Returns the *remote_path*."""
+        await asyncio.to_thread(self.e2b_sandbox.files.write, remote_path, content)
+        return remote_path
+
+    async def read_file(self, remote_path: str) -> str:
+        """Read and return the contents of a file in the sandbox."""
+        return await asyncio.to_thread(self.e2b_sandbox.files.read, remote_path)
+
+    async def list_files(self, remote_path: str = "/") -> list[Any]:
+        """List directory entries at *remote_path* in the sandbox."""
+        return await asyncio.to_thread(self.e2b_sandbox.files.list, remote_path)
+
+    async def run(self, command: str, *, background: bool = False) -> Any:
+        """Run a shell command in the sandbox.
+
+        With ``background=False`` (default) this waits for the command and
+        returns ``{"stdout": ..., "stderr": ..., "exit_code": ...}``. With
+        ``background=True`` it returns the live E2B command handle so you can
+        stream or kill it later.
+
+        Example::
+
+            result = await sandbox.run("python script.py")
+            print(result["stdout"])
+        """
+        sb = self.e2b_sandbox
+        if background:
+            return await asyncio.to_thread(sb.commands.run, command, background=True)
+        result = await asyncio.to_thread(sb.commands.run, command)
+        return {
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+            "exit_code": result.exit_code,
+        }
+
     # -- context manager ----------------------------------------------------
 
     async def __aenter__(self) -> E2BSandbox:
@@ -375,13 +475,13 @@ class E2BSandbox(Sandbox):
 
     def describe(self) -> dict[str, Any]:
         info = super().describe()
+        # ``registered_tools`` comes from the base describe().
         info.update(
             {
                 "template": self._template,
                 "e2b_sandbox_id": self._e2b_sandbox_id,
                 "existing_sandbox_id": self._existing_sandbox_id,
                 "api_key": "***" if self._api_key else None,
-                "registered_tools": list(self._registered_tools),
             }
         )
         return info

@@ -3,7 +3,14 @@
 from importlib.metadata import PackageNotFoundError, version
 
 from exo_server.agents import AgentInfo, WorkspaceFile, WorkspaceFileContent
-from exo_server.app import ChatRequest, ChatResponse, create_app, register_agent, serve
+from exo_server.app import (
+    ChatRequest,
+    ChatResponse,
+    InjectRequest,
+    create_app,
+    register_agent,
+    serve,
+)
 from exo_server.sessions import (
     AppendMessageRequest,
     CreateSessionRequest,
@@ -24,6 +31,7 @@ __all__: list[str] = [
     "ChatRequest",
     "ChatResponse",
     "CreateSessionRequest",
+    "InjectRequest",
     "Session",
     "SessionMessage",
     "SessionSummary",

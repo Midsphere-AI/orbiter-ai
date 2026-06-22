@@ -16,6 +16,7 @@ import typer
 
 from exo_mcp_cli.connection import MCPConnectionError, connect_to_server
 from exo_mcp_cli.output import (
+    _render_exc,
     console,
     print_error,
     print_json,
@@ -52,7 +53,9 @@ def _build_arguments(
             if isinstance(env_parsed, dict):
                 arguments.update(env_parsed)
         except json.JSONDecodeError:
-            pass  # Silently ignore malformed env var
+            console.print(
+                f"[yellow]Warning: {_INJECT_ENV_KEY} is not valid JSON — ignored.[/yellow]"
+            )
 
     # 1. --inject flag args (override env inject)
     if inject:
@@ -123,7 +126,7 @@ def tool_list(
         print_error(str(exc))
         raise typer.Exit(code=1) from exc
     except Exception as exc:
-        print_error(f"Failed to list tools: {exc}")
+        print_error(f"Failed to list tools: {_render_exc(exc)}")
         if ctx.obj.get("verbose"):
             console.print_exception()
         raise typer.Exit(code=1) from exc
@@ -192,7 +195,7 @@ def tool_call(
         print_error(str(exc))
         raise typer.Exit(code=1) from exc
     except Exception as exc:
-        print_error(f"Tool call failed: {exc}")
+        print_error(f"Tool call failed: {_render_exc(exc)}")
         if ctx.obj.get("verbose"):
             console.print_exception()
         raise typer.Exit(code=1) from exc

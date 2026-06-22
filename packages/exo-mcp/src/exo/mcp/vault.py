@@ -85,7 +85,13 @@ class Vault:
         except (EOFError, KeyboardInterrupt) as exc:
             raise VaultError("Vault passphrase required") from exc
         if not pwd:
-            raise VaultError("Vault passphrase cannot be empty")
+            raise VaultError(
+                "Vault passphrase cannot be empty",
+                hint=(
+                    "Set EXO_MCP_VAULT_KEY env var to a non-empty passphrase, "
+                    "or enter a non-empty passphrase at the prompt."
+                ),
+            )
         self._passphrase = pwd
         return pwd
 
@@ -111,14 +117,26 @@ class Vault:
             return self._cache
         raw = self._path.read_bytes()
         if len(raw) < _SALT_LEN + 1:
-            raise VaultError(f"Vault file is corrupted: {self._path}")
+            raise VaultError(
+                f"Vault file is corrupted: {self._path}",
+                hint=(
+                    f"Delete {self._path} and re-add secrets with vault.set(), "
+                    "or restore from a backup."
+                ),
+            )
         salt = raw[:_SALT_LEN]
         ciphertext = raw[_SALT_LEN:]
         fernet = self._get_fernet(salt)
         try:
             plaintext = fernet.decrypt(ciphertext)
         except InvalidToken as exc:
-            raise VaultError("Wrong passphrase or corrupted vault") from exc
+            raise VaultError(
+                "Wrong passphrase or corrupted vault",
+                hint=(
+                    "Re-run with the correct passphrase (EXO_MCP_VAULT_KEY env var) "
+                    f"or delete {self._path} to start over."
+                ),
+            ) from exc
         try:
             data = json.loads(plaintext)
         except json.JSONDecodeError as exc:
@@ -129,14 +147,29 @@ class Vault:
         return self._cache
 
     def _save(self, data: dict[str, str]) -> None:
-        """Encrypt and write *data* to the vault file."""
+        """Encrypt and write *data* to the vault file.
+
+        The salt is generated once and reused across calls so that PBKDF2 key
+        derivation is only performed the first time.  The write is atomic: data
+        is written to a ``.tmp`` sibling and then renamed into place so a
+        partial write can never corrupt the live vault file.
+        """
+        # Reuse the salt that was set when the vault was first loaded/created so
+        # we avoid an expensive 480k-iter PBKDF2 re-derivation on every write.
         if self._salt is None:
             self._salt = os.urandom(_SALT_LEN)
         fernet = self._get_fernet(self._salt)
         plaintext = json.dumps(data, sort_keys=True).encode()
         ciphertext = fernet.encrypt(plaintext)
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._path.write_bytes(self._salt + ciphertext)
+        tmp_path = self._path.with_suffix(".tmp")
+        try:
+            tmp_path.write_bytes(self._salt + ciphertext)
+            tmp_path.replace(self._path)
+        except OSError as exc:
+            raise VaultError(f"Failed to write vault to {self._path}: {exc}") from exc
+        # Only update the in-memory cache after the write succeeds so a failure
+        # never leaves the cache diverged from disk.
         self._cache = data
 
     # ------------------------------------------------------------------
@@ -149,17 +182,17 @@ class Vault:
 
     def set(self, name: str, value: str) -> None:
         """Store or update a secret."""
-        data = self._load()
-        data[name] = value
-        self._save(data)
+        # Build a new dict so that cache is only updated after a successful save.
+        new_data = {**self._load(), name: value}
+        self._save(new_data)
 
     def remove(self, name: str) -> bool:
         """Remove a secret. Returns ``True`` if it existed."""
-        data = self._load()
-        if name not in data:
+        existing = self._load()
+        if name not in existing:
             return False
-        del data[name]
-        self._save(data)
+        new_data = {k: v for k, v in existing.items() if k != name}
+        self._save(new_data)
         return True
 
     def list_names(self) -> list[str]:

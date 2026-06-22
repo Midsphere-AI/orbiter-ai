@@ -106,8 +106,12 @@ class MemoryItem(BaseModel):
     created_at: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
     updated_at: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
 
-    def transition(self, new_status: MemoryStatus) -> None:
-        """Transition to a new status.
+    def transition(self, new_status: MemoryStatus) -> MemoryItem:
+        """Transition to a new status and return self for chaining.
+
+        Mutates the model in-place (MemoryItem is intentionally non-frozen
+        because status evolves over its lifetime).  Callers that need an
+        independent copy should call ``model_copy()`` first.
 
         Raises:
             ExoMemoryError: If the transition is invalid.
@@ -120,6 +124,7 @@ class MemoryItem(BaseModel):
         self.status = new_status
         self.updated_at = datetime.now(UTC).isoformat()
         logger.debug("item %s transitioned %s -> %s", self.id, old_status, new_status)
+        return self
 
 
 class SystemMemory(MemoryItem):
@@ -215,6 +220,7 @@ class MemoryStore(Protocol):
     ) -> int:
         """Remove memory items matching the filter. Returns count removed."""
         ...
+
 
 
 # ---------------------------------------------------------------------------

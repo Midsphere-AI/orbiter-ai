@@ -6,10 +6,12 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+import typer
 from typer.testing import CliRunner
 
 from exo_cli.main import (
     CLIError,
+    _cli_run,
     _format_duration,
     _format_timestamp,
     _mask_redis_url,
@@ -181,7 +183,11 @@ class TestCLIRun:
         mock_result.steps = 1
         mock_result.elapsed = 0.1
         mock_result.usage = {}
-        with patch("exo_cli.executor.LocalExecutor.execute", new_callable=AsyncMock, return_value=mock_result):
+        with patch(
+            "exo_cli.executor.LocalExecutor.execute",
+            new_callable=AsyncMock,
+            return_value=mock_result,
+        ):
             result = runner.invoke(app, ["run", "hello"])
         assert result.exit_code == 0
         assert "Running with input:" in result.output
@@ -194,7 +200,11 @@ class TestCLIRun:
         mock_result.steps = 1
         mock_result.elapsed = 0.1
         mock_result.usage = {}
-        with patch("exo_cli.executor.LocalExecutor.execute", new_callable=AsyncMock, return_value=mock_result):
+        with patch(
+            "exo_cli.executor.LocalExecutor.execute",
+            new_callable=AsyncMock,
+            return_value=mock_result,
+        ):
             result = runner.invoke(app, ["run", "--config", str(cfg), "hello"])
         assert result.exit_code == 0
 
@@ -206,7 +216,11 @@ class TestCLIRun:
         mock_result.steps = 1
         mock_result.elapsed = 0.1
         mock_result.usage = {}
-        with patch("exo_cli.executor.LocalExecutor.execute", new_callable=AsyncMock, return_value=mock_result):
+        with patch(
+            "exo_cli.executor.LocalExecutor.execute",
+            new_callable=AsyncMock,
+            return_value=mock_result,
+        ):
             result = runner.invoke(app, ["run", "-c", str(cfg), "-m", "openai:gpt-4o", "test"])
         assert result.exit_code == 0
 
@@ -230,7 +244,11 @@ class TestCLIRun:
         mock_result.steps = 1
         mock_result.elapsed = 0.2
         mock_result.usage = {}
-        with patch("exo_cli.executor.LocalExecutor.execute", new_callable=AsyncMock, return_value=mock_result):
+        with patch(
+            "exo_cli.executor.LocalExecutor.execute",
+            new_callable=AsyncMock,
+            return_value=mock_result,
+        ):
             result = runner.invoke(app, ["--verbose", "run", "-c", str(cfg), "test"])
         assert result.exit_code == 0
         assert "Loaded config" in result.output
@@ -944,9 +962,7 @@ class TestChatCommand:
         assert "--model" in result.output
         assert "--stream" in result.output
 
-    def test_chat_no_config_exits_1(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_chat_no_config_exits_1(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.chdir(tmp_path)
         result = runner.invoke(app, ["chat"])
         assert result.exit_code == 1
@@ -990,9 +1006,7 @@ class TestBatchCommand:
         assert "--config" in result.output
         assert "--concurrency" in result.output
 
-    def test_batch_no_config_exits_1(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_batch_no_config_exits_1(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.chdir(tmp_path)
         inputs = tmp_path / "in.jsonl"
         inputs.write_text('{"input": "hello"}\n')
@@ -1005,7 +1019,7 @@ class TestBatchCommand:
         cfg.write_text("agents:\n  bot:\n    model: test\n")
         result = runner.invoke(app, ["batch", "-c", str(cfg), str(tmp_path / "missing.jsonl")])
         assert result.exit_code == 1
-        assert "Error loading inputs" in result.output
+        assert "loading inputs" in result.output.lower()
 
     def test_batch_runs_and_prints_results(self, tmp_path: Path) -> None:
         cfg = tmp_path / "c.yaml"
@@ -1024,7 +1038,9 @@ class TestBatchCommand:
             succeeded=2,
             failed=0,
         )
-        with patch("exo_cli.batch.batch_execute", new_callable=AsyncMock, return_value=mock_batch_result):
+        with patch(
+            "exo_cli.batch.batch_execute", new_callable=AsyncMock, return_value=mock_batch_result
+        ):
             result = runner.invoke(app, ["batch", "-c", str(cfg), str(inputs)])
         assert result.exit_code == 0
         assert "2 items" in result.output
@@ -1043,8 +1059,71 @@ class TestBatchCommand:
             succeeded=1,
             failed=0,
         )
-        with patch("exo_cli.batch.batch_execute", new_callable=AsyncMock, return_value=mock_batch_result):
+        with patch(
+            "exo_cli.batch.batch_execute", new_callable=AsyncMock, return_value=mock_batch_result
+        ):
             result = runner.invoke(
                 app, ["batch", "-c", str(cfg), str(inputs), "--output-format", "csv"]
             )
         assert result.exit_code == 0
+
+
+# ---------------------------------------------------------------------------
+# _cli_run boundary
+# ---------------------------------------------------------------------------
+
+
+class TestCliRun:
+    """Tests for the _cli_run shared async boundary helper.
+
+    These tests are synchronous because _cli_run itself calls asyncio.run(),
+    which cannot be called from an already-running event loop.
+    """
+
+    def test_exo_error_exits_1(self) -> None:
+        """ExoError from the coroutine → exit code 1, clean message, no traceback."""
+        from exo.types import ExoError  # pyright: ignore[reportMissingImports]
+
+        async def _failing() -> None:
+            raise ExoError("something went wrong", hint="Check your config.")
+
+        with pytest.raises(typer.Exit) as exc_info:
+            _cli_run(_failing())
+        assert exc_info.value.exit_code == 1
+
+    def test_keyboard_interrupt_exits_130(self) -> None:
+        """KeyboardInterrupt → exit code 130."""
+
+        async def _interrupted() -> None:
+            raise KeyboardInterrupt
+
+        with pytest.raises(typer.Exit) as exc_info:
+            _cli_run(_interrupted())
+        assert exc_info.value.exit_code == 130
+
+    def test_exception_group_unwrapped_exits_1(self) -> None:
+        """A single-child BaseExceptionGroup is unwrapped, exits 1."""
+
+        async def _grouped() -> None:
+            raise BaseExceptionGroup("gather", [ValueError("inner cause")])
+
+        with pytest.raises(typer.Exit) as exc_info:
+            _cli_run(_grouped())
+        assert exc_info.value.exit_code == 1
+
+    def test_exception_group_verbose_reraises(self) -> None:
+        """With verbose=True, BaseExceptionGroup is re-raised after printing."""
+
+        async def _grouped() -> None:
+            raise BaseExceptionGroup("gather", [ValueError("inner cause")])
+
+        with pytest.raises(BaseExceptionGroup):
+            _cli_run(_grouped(), verbose=True)
+
+    def test_success_does_not_raise(self) -> None:
+        """Successful coroutine → no exception raised."""
+
+        async def _ok() -> None:
+            return
+
+        _cli_run(_ok())  # should not raise

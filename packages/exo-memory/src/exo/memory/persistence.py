@@ -40,10 +40,16 @@ class MemoryPersistence:
         self,
         store: MemoryStore,
         metadata: MemoryMetadata | None = None,
+        *,
+        history_fetch_multiplier: int = 10,
     ) -> None:
         self.store = store
         self.metadata = metadata or MemoryMetadata()
         self._attached_agent_ids: set[int] = set()
+        # Per-round fetch headroom: each conversation round can generate multiple
+        # memory items (human + ai + tool messages), so fetch this many items per
+        # requested round to avoid truncation.
+        self._history_fetch_multiplier = history_fetch_multiplier
 
     async def _save_llm_response(self, *, agent: Any, response: Any, **_: Any) -> None:
         """POST_LLM_CALL hook — save an AIMemory item."""
@@ -127,7 +133,7 @@ class MemoryPersistence:
         )
 
         meta = MemoryMetadata(agent_id=agent_name, task_id=conversation_id)
-        fetch_limit = max(rounds * 10, 100)
+        fetch_limit = max(rounds * self._history_fetch_multiplier, 100)
         items = await self.store.search(metadata=meta, limit=fetch_limit)
 
         # Normalise to chronological order (SQLite returns newest-first)

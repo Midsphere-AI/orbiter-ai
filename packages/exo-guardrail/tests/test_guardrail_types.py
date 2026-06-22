@@ -7,6 +7,7 @@ import pytest
 
 from exo.guardrail.types import (
     GuardrailBackend,
+    GuardrailConfigError,
     GuardrailError,
     GuardrailResult,
     RiskAssessment,
@@ -112,6 +113,37 @@ class TestGuardrailError:
         with pytest.raises(GuardrailError, match="blocked"):
             raise GuardrailError("blocked", risk_level=RiskLevel.HIGH)
 
+    def test_context_and_hint_forwarded_to_exo_error(self) -> None:
+        """GuardrailError must forward context/hint to ExoError.__init__."""
+        err = GuardrailError(
+            "blocked",
+            risk_level=RiskLevel.HIGH,
+            context={"hook": "pre_llm_call"},
+            hint="Check the guardrail thresholds.",
+        )
+        assert err.context == {"hook": "pre_llm_call"}
+        assert err.hint == "Check the guardrail thresholds."
+        assert "where:" in str(err)
+        assert "→" in str(err)
+
+
+class TestGuardrailConfigError:
+    def test_inherits_exo_error(self) -> None:
+        err = GuardrailConfigError("bad config")
+        assert isinstance(err, ExoError)
+
+    def test_context_and_hint(self) -> None:
+        err = GuardrailConfigError(
+            "Unknown hook point: 'bad'",
+            context={"hook_point": "bad"},
+            hint="Use HookPoint.<NAME>.",
+        )
+        assert err.context == {"hook_point": "bad"}
+        assert err.hint == "Use HookPoint.<NAME>."
+        rendered = str(err)
+        assert "where:" in rendered
+        assert "→" in rendered
+
 
 class TestGuardrailBackend:
     def test_is_abstract(self) -> None:
@@ -128,7 +160,6 @@ class TestGuardrailBackend:
         with pytest.raises(TypeError):
             Incomplete()  # type: ignore[abstract]
 
-    @pytest.mark.asyncio
     async def test_subclass_analyze(self) -> None:
         """A concrete subclass can be instantiated and called."""
 
@@ -141,7 +172,6 @@ class TestGuardrailBackend:
         assert result.has_risk is False
         assert result.risk_level == RiskLevel.SAFE
 
-    @pytest.mark.asyncio
     async def test_subclass_risky(self) -> None:
         """A backend can return a risky assessment."""
 

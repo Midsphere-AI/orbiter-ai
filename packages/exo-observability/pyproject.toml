@@ -4,15 +4,13 @@ version = "0.1.0"
 description = "Unified observability: structured logging, tracing, metrics, cost tracking"
 readme = "README.md"
 license = "MIT"
-requires-python = ">=3.11"
+requires-python = ">=3.13"
 authors = [{ name = "Midsphere AI" }]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.11",
-    "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
@@ -23,6 +21,38 @@ dependencies = [
 [project.optional-dependencies]
 otel = ["opentelemetry-api>=1.20", "opentelemetry-sdk>=1.20"]
 otlp = ["opentelemetry-exporter-otlp>=1.20"]
+# Convenience: OTel spine + a generic OTLP exporter (works with any
+# OTLP-ingesting backend, including Langfuse/LangSmith/Phoenix collectors).
+tracing = [
+    "opentelemetry-api>=1.20",
+    "opentelemetry-sdk>=1.20",
+    "opentelemetry-exporter-otlp-proto-http>=1.20",
+]
+# Vendor backends. The OTLP/HTTP exporter carries traces; the native SDK
+# (where present) is only needed for scores/datasets/prompt management.
+langfuse = [
+    "opentelemetry-api>=1.20",
+    "opentelemetry-sdk>=1.20",
+    "opentelemetry-exporter-otlp-proto-http>=1.20",
+    "langfuse>=2.0",
+]
+langsmith = [
+    "opentelemetry-api>=1.20",
+    "opentelemetry-sdk>=1.20",
+    "opentelemetry-exporter-otlp-proto-http>=1.20",
+    "langsmith>=0.1",
+]
+phoenix = [
+    "opentelemetry-api>=1.20",
+    "opentelemetry-sdk>=1.20",
+    "opentelemetry-exporter-otlp-proto-http>=1.20",
+]
+braintrust = [
+    "opentelemetry-api>=1.20",
+    "opentelemetry-sdk>=1.20",
+    "opentelemetry-exporter-otlp-proto-http>=1.20",
+    "braintrust>=0.0.1",
+]
 
 [project.urls]
 Homepage = "https://github.com/midsphere-ai/exo"

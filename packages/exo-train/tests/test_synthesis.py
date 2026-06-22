@@ -45,7 +45,7 @@ def _sample_items(n: int = 5) -> list[dict[str, Any]]:
 class _StubSynthesiser(DataSynthesiser):
     """Returns source items unchanged, capped to num_samples."""
 
-    async def synthesise(
+    async def synthesize(
         self,
         source: Sequence[dict[str, Any]],
         config: SynthesisConfig,

@@ -52,7 +52,7 @@ class TestTaskBrokerConnect:
 
             mock_from_url.assert_called_once_with("redis://localhost:6379", decode_responses=True)
             mock_redis.xgroup_create.assert_called_once_with(
-                "exo:tasks", "exo:tasks:group", id="0", mkstream=True
+                "exo:tasks", "exo:tasks:group", id="$", mkstream=True
             )
             assert broker._redis is mock_redis
 
@@ -84,7 +84,8 @@ class TestTaskBrokerConnect:
                 side_effect=aioredis.ResponseError("Some other error")
             )
 
-            with pytest.raises(aioredis.ResponseError, match="Some other error"):
+            # Non-BUSYGROUP errors are now re-raised as ExoError with context/hint.
+            with pytest.raises(ExoError, match="Failed to create consumer group"):
                 await broker.connect()
 
     @pytest.mark.asyncio
@@ -239,3 +240,58 @@ class TestTaskBrokerWithFakeRedis:
     async def test_nack_unknown_task_id_is_noop(self, connected_broker: TaskBroker) -> None:
         broker = connected_broker
         await broker.nack("nonexistent-task-id")  # Should not raise.
+
+
+# ---------------------------------------------------------------------------
+# nack resilience — empty-xrange branch clears PEL (P0)
+# ---------------------------------------------------------------------------
+
+
+class TestNackEmptyXrangeClearsPEL:
+    @pytest.mark.asyncio
+    async def test_nack_acks_when_original_message_gone(self) -> None:
+        """nack() must ack (clear PEL) even if xrange returns empty.
+
+        When the stream is trimmed or flushed after the message was claimed
+        but before nack() runs, the original payload is gone.  The code must
+        still ack the pending entry so the worker isn't blocked forever.
+        """
+        from unittest.mock import AsyncMock
+
+        broker = TaskBroker("redis://localhost:6379")
+        broker._pending_ids["missing-task"] = "some-msg-id"
+
+        mock_redis = AsyncMock()
+        # xrange returns nothing — original message gone from stream
+        mock_redis.xrange = AsyncMock(return_value=[])
+        # xack must still be called to clear the PEL
+        mock_redis.xack = AsyncMock()
+        broker._redis = mock_redis  # type: ignore[assignment]
+
+        await broker.nack("missing-task")
+
+        # The PEL must be cleared even though xadd (re-queue) was skipped
+        mock_redis.xack.assert_called_once()
+        # xadd should NOT be called (no payload to re-queue)
+        mock_redis.xadd.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_nack_with_valid_message_acks_and_readds(self) -> None:
+        """nack() with a present message acks the original and xadd re-queues it."""
+        from unittest.mock import AsyncMock
+
+        broker = TaskBroker("redis://localhost:6379")
+        broker._pending_ids["valid-task"] = "msg-id-1"
+
+        mock_redis = AsyncMock()
+        mock_redis.xrange = AsyncMock(
+            return_value=[("msg-id-1", {"payload": '{"task_id":"valid-task"}'})]
+        )
+        mock_redis.xack = AsyncMock()
+        mock_redis.xadd = AsyncMock()
+        broker._redis = mock_redis  # type: ignore[assignment]
+
+        await broker.nack("valid-task")
+
+        mock_redis.xack.assert_called_once()
+        mock_redis.xadd.assert_called_once()

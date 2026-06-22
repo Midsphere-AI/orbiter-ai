@@ -4,7 +4,7 @@ This guide covers setting up your development environment for contributing to Ex
 
 ## Prerequisites
 
-- **Python 3.11+** (required for `asyncio.TaskGroup` and `StrEnum`)
+- **Python 3.13+** (project floor; `asyncio.TaskGroup` and `StrEnum` require 3.11+)
 - **UV** -- Exo uses UV for workspace management and dependency resolution
 
 Install UV if you do not have it:

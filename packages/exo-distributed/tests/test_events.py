@@ -513,3 +513,51 @@ class TestEventSubscriberSubscribe:
         assert len(received) == 1
         assert isinstance(received[0], StatusEvent)
         assert received[0].status == "cancelled"
+
+    @pytest.mark.asyncio
+    async def test_subscribe_deadline_raises_on_hung_task(
+        self,
+        redis_client,  # type: ignore[no-untyped-def]
+    ) -> None:
+        """subscribe(deadline=...) raises ExoError when no terminal event arrives in time."""
+        sub = EventSubscriber("redis://localhost:6379")
+        sub._redis = redis_client
+
+        # No publisher — the channel will stay empty, so the deadline must fire.
+        received: list = []
+        with pytest.raises(ExoError, match="did not reach a terminal state"):
+            async for event in sub.subscribe("task-deadline", deadline=0.1):
+                received.append(event)
+
+        assert received == []
+
+    @pytest.mark.asyncio
+    async def test_subscribe_deadline_none_does_not_expire(
+        self,
+        redis_client,  # type: ignore[no-untyped-def]
+    ) -> None:
+        """subscribe(deadline=None) is equivalent to unlimited wait — terminates on status."""
+        import asyncio
+
+        pub = EventPublisher("redis://localhost:6379")
+        pub._redis = redis_client
+        sub = EventSubscriber("redis://localhost:6379")
+        sub._redis = redis_client
+
+        received: list = []
+
+        async def consume() -> None:
+            async for event in sub.subscribe("task-nodeadline", deadline=None):
+                received.append(event)
+
+        async def produce() -> None:
+            await asyncio.sleep(0.05)
+            await pub.publish(
+                "task-nodeadline",
+                StatusEvent(status="completed", message="done"),
+            )
+
+        await asyncio.wait_for(asyncio.gather(consume(), produce()), timeout=5.0)
+
+        assert len(received) == 1
+        assert isinstance(received[0], StatusEvent)

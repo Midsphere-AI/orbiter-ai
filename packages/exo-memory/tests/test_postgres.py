@@ -16,14 +16,19 @@ import pytest
 
 asyncpg = pytest.importorskip("asyncpg")
 
+from exo.memory.backends._common import (  # noqa: E402  # pyright: ignore[reportMissingImports]
+    extra_fields as _extra_fields,
+)
 from exo.memory.backends.postgres import (  # noqa: E402  # pyright: ignore[reportMissingImports]
     PostgresMemoryStore,
-    _extra_fields,
     _parse_rowcount,
-    _row_to_item,
+)
+from exo.memory.backends.postgres import (  # noqa: E402  # pyright: ignore[reportMissingImports]
+    _row_to_item_postgres as _row_to_item,
 )
 from exo.memory.base import (  # noqa: E402  # pyright: ignore[reportMissingImports]
     AIMemory,
+    ExoMemoryError,
     HumanMemory,
     MemoryItem,
     MemoryMetadata,
@@ -157,7 +162,7 @@ class TestLifecycle:
 
     async def test_operations_before_init_raise(self) -> None:
         store = PostgresMemoryStore()
-        with pytest.raises(RuntimeError, match="not initialized"):
+        with pytest.raises(ExoMemoryError, match="not initialized"):
             await store.add(HumanMemory(content="hello"))
 
     def test_repr(self) -> None:

@@ -7,6 +7,7 @@ taken and any prior version can be restored.
 
 from __future__ import annotations
 
+import copy
 import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -62,16 +63,32 @@ class Checkpoint:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Checkpoint:
         """Deserialize checkpoint from a dictionary."""
-        created = data.get("created_at")
-        if isinstance(created, str):
-            created = datetime.fromisoformat(created)
+        created_raw = data.get("created_at")
+        created: datetime | None = None
+        if isinstance(created_raw, str):
+            try:
+                created = datetime.fromisoformat(created_raw)
+            except ValueError:
+                logger.warning(
+                    "checkpoint from_dict: invalid created_at value %r; using current UTC time",
+                    created_raw,
+                )
+        elif isinstance(created_raw, datetime):
+            created = created_raw
+        elif created_raw is None:
+            logger.warning("checkpoint from_dict: missing created_at; using current UTC time")
+        else:
+            logger.warning(
+                "checkpoint from_dict: unexpected created_at type %s; using current UTC time",
+                type(created_raw).__name__,
+            )
         return cls(
             task_id=data["task_id"],
             version=data["version"],
             values=dict(data.get("values", {})),
             token_usage=dict(data.get("token_usage", {})),
             metadata=dict(data.get("metadata", {})),
-            created_at=created if isinstance(created, datetime) else datetime.now(UTC),
+            created_at=created if created is not None else datetime.now(UTC),
         )
 
     def __repr__(self) -> str:
@@ -90,8 +107,10 @@ class CheckpointStore:
 
     def __init__(self, task_id: str) -> None:
         if not task_id:
-            msg = "task_id is required and must be non-empty"
-            raise CheckpointError(msg)
+            raise CheckpointError(
+                "task_id is required and must be non-empty.",
+                hint="Pass a non-empty string as task_id, e.g. CheckpointStore('my-task-123').",
+            )
         self._task_id = task_id
         self._checkpoints: list[Checkpoint] = []
 
@@ -129,7 +148,7 @@ class CheckpointStore:
         cp = Checkpoint(
             task_id=self._task_id,
             version=self.version + 1,
-            values=dict(values),
+            values=copy.deepcopy(values),
             token_usage=dict(token_usage),
             metadata=dict(metadata) if metadata else {},
         )
@@ -153,7 +172,11 @@ class CheckpointStore:
         if version < 1 or version > len(self._checkpoints):
             msg = f"Checkpoint version {version} not found (available: 1-{len(self._checkpoints)})"
             logger.warning("checkpoint get failed: %s", msg)
-            raise CheckpointError(msg)
+            raise CheckpointError(
+                msg,
+                hint="Call .list_versions() to see which versions exist.",
+                context={"task_id": self._task_id, "requested_version": version},
+            )
         return self._checkpoints[version - 1]
 
     @property

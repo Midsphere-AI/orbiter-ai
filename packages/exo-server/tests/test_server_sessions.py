@@ -135,13 +135,15 @@ class TestListSessions:
         assert "message_count" in data[0]
 
     async def test_newest_first(self) -> None:
+        """Sessions must be listed newest-first with a strictly greater created_at."""
         app = create_app()
         async with _build_client(app) as client:
             await client.post("/sessions", json={"title": "First"})
             await client.post("/sessions", json={"title": "Second"})
             resp = await client.get("/sessions")
         data = resp.json()
-        assert data[0]["created_at"] >= data[1]["created_at"]
+        # _now() assigns strictly increasing timestamps so this is always strict.
+        assert data[0]["created_at"] > data[1]["created_at"]
 
 
 # ---------------------------------------------------------------------------
@@ -347,6 +349,6 @@ class TestSessionLifecycle:
             sid = r.json()["id"]
             created_at = r.json()["updated_at"]
 
-            # Update
+            # Update — _now() guarantees a strictly greater value.
             r = await client.patch(f"/sessions/{sid}", json={"title": "X"})
-            assert r.json()["updated_at"] >= created_at
+            assert r.json()["updated_at"] > created_at

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from exo.search import SearchConfigError
 from exo.search.config import (
     ResearchConfig,
     RevisionConfig,
@@ -38,7 +39,7 @@ class TestSearchModels:
         assert cfg.fast_model == "openai:gpt-4o-mini"
 
     def test_models_config_conflict_raises(self) -> None:
-        with pytest.raises(ValueError, match="Cannot combine models_config"):
+        with pytest.raises(SearchConfigError, match="Cannot combine models_config"):
             SearchConfig(
                 model="openai:gpt-4o",
                 models_config=SearchModels(model="openai:gpt-4o-mini"),
@@ -78,7 +79,7 @@ class TestSearchSources:
         assert "academic" in cfg.sources
 
     def test_sources_config_conflict_raises(self) -> None:
-        with pytest.raises(ValueError, match="Cannot combine sources_config"):
+        with pytest.raises(SearchConfigError, match="Cannot combine sources_config"):
             SearchConfig(
                 searxng_url="http://localhost:8888",
                 sources_config=SearchSources(searxng_url="http://other:9999"),
@@ -116,7 +117,7 @@ class TestResearchConfig:
         assert cfg.max_iterations == 3
 
     def test_research_conflict_raises(self) -> None:
-        with pytest.raises(ValueError, match="Cannot combine research"):
+        with pytest.raises(SearchConfigError, match="Cannot combine research"):
             SearchConfig(
                 research_mode="speed",
                 research=ResearchConfig(research_mode="quality"),
@@ -155,7 +156,7 @@ class TestWriterConfig:
         assert cfg.max_writer_words == 2000
 
     def test_writer_conflict_raises(self) -> None:
-        with pytest.raises(ValueError, match="Cannot combine writer"):
+        with pytest.raises(SearchConfigError, match="Cannot combine writer"):
             SearchConfig(
                 system_instructions="Hello",
                 writer=WriterConfig(system_instructions="World"),
@@ -188,7 +189,7 @@ class TestVerificationConfig:
         assert cfg.llm_verify_source_chars == 5000
 
     def test_verification_conflict_raises(self) -> None:
-        with pytest.raises(ValueError, match="Cannot combine verification"):
+        with pytest.raises(SearchConfigError, match="Cannot combine verification"):
             SearchConfig(
                 llm_verification=True,
                 verification=VerificationConfig(llm_verification=True),
@@ -220,7 +221,7 @@ class TestRevisionConfig:
         assert cfg.revision_threshold == 0.4
 
     def test_revision_conflict_raises(self) -> None:
-        with pytest.raises(ValueError, match="Cannot combine revision"):
+        with pytest.raises(SearchConfigError, match="Cannot combine revision"):
             SearchConfig(
                 max_revision_rounds=3,
                 revision=RevisionConfig(max_revision_rounds=5),

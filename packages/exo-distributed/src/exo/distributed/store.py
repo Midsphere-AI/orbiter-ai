@@ -87,21 +87,55 @@ class TaskStore(RedisConnectionMixin):
         status: TaskStatus | None = None,
         limit: int = 100,
     ) -> list[TaskResult]:
-        """List tasks, optionally filtered by *status*."""
-        r = self._client()
-        task_ids: set[str] = await r.smembers(self._index_key)  # type: ignore[misc]
+        """List tasks, optionally filtered by *status*.
 
+        Uses ``SSCAN`` to iterate the index set in batches (avoids blocking
+        the server with a full ``SMEMBERS`` on large indices) and fetches task
+        hashes in pipelined batches.  Members whose hash no longer exists
+        (TTL expired) are pruned from the index set to keep it bounded.
+        """
+        r = self._client()
         results: list[TaskResult] = []
-        for tid in task_ids:
-            data = await r.hgetall(self._key(tid))  # type: ignore[misc]
-            if not data:
-                continue
-            result = self._parse_result(data)
-            if status is not None and result.status != status:
-                continue
-            results.append(result)
-            if len(results) >= limit:
+        stale_members: list[str] = []
+
+        scan_batch = 100
+        cursor: int | bytes = 0
+        while True:
+            cursor, members = await r.sscan(  # type: ignore[misc]
+                self._index_key, cursor=cursor, count=scan_batch
+            )
+            if members:
+                # Batch-fetch all hashes in this scan page via a pipeline.
+                pipe = r.pipeline(transaction=False)
+                for tid in members:
+                    pipe.hgetall(self._key(tid))  # type: ignore[misc]
+                batch_data: list[dict[str, str]] = await pipe.execute()  # type: ignore[misc]
+
+                for tid, data in zip(members, batch_data, strict=False):
+                    if not data:
+                        # Hash expired — queue for index pruning.
+                        stale_members.append(tid)
+                        continue
+                    result = self._parse_result(data)
+                    if status is not None and result.status != status:
+                        continue
+                    results.append(result)
+                    if len(results) >= limit:
+                        # Prune stale members collected so far before returning.
+                        if stale_members:
+                            await r.srem(self._index_key, *stale_members)  # type: ignore[misc]
+                        return results
+
+            if cursor == 0:
                 break
+
+        # Prune stale members found during this scan.
+        if stale_members:
+            await r.srem(self._index_key, *stale_members)  # type: ignore[misc]
+            logger.debug(
+                "TaskStore list_tasks pruned %d stale members from index", len(stale_members)
+            )
+
         return results
 
     @staticmethod

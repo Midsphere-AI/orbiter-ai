@@ -42,7 +42,10 @@ from exo.context.processor import (  # pyright: ignore[reportMissingImports]
 from exo.context.prompt_builder import (  # pyright: ignore[reportMissingImports]
     PromptBuilder,
 )
-from exo.context.state import ContextState  # pyright: ignore[reportMissingImports]
+from exo.context.state import (  # pyright: ignore[reportMissingImports]
+    ContextState,
+    ContextStateKeyError,
+)
 from exo.context.token_tracker import TokenTracker  # pyright: ignore[reportMissingImports]
 from exo.context.tools import (  # pyright: ignore[reportMissingImports]
     get_context_tools,
@@ -64,6 +67,7 @@ __all__: list[str] = [
     "ContextError",
     "ContextProcessor",
     "ContextState",
+    "ContextStateKeyError",
     "ContextWindowHook",
     "ContextWindowInfo",
     "DialogueCompressor",

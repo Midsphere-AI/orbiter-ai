@@ -378,8 +378,8 @@ class TestRalphRunnerPlan:
 
 
 class TestRalphRunnerScorerEdgeCases:
-    async def test_failing_scorer_ignored(self) -> None:
-        """A scorer that raises is silently skipped."""
+    async def test_failing_scorer_recorded(self) -> None:
+        """A scorer that raises is recorded as 0.0 with error metadata — not silently dropped."""
         cfg = RalphConfig(
             stop_condition=StopConditionConfig(max_iterations=1),
         )
@@ -389,9 +389,16 @@ class TestRalphRunnerScorerEdgeCases:
             config=cfg,
         )
         result = await runner.run("input")
-        # Only the successful scorer's result appears
+        # Both scorers appear: the failing one with score=0.0, the good one with 0.7.
         assert "fixed" in result.scores
-        assert len(result.scores) == 1
+        assert abs(result.scores["fixed"] - 0.7) < 1e-9
+        # The failing scorer uses its class name as scorer_name.
+        assert "_FailingScorer" in result.scores
+        assert result.scores["_FailingScorer"] == 0.0
+        # Error metadata is stored in the loop state.
+        failures = result.state.get("metadata", {}).get("scorer_failures", [])
+        assert len(failures) == 1
+        assert failures[0]["exc_type"] == "RuntimeError"
 
     async def test_validation_disabled(self) -> None:
         """Scores empty when validation.enabled=False."""
@@ -481,11 +488,13 @@ class TestRalphRunnerRepr:
 
 class TestRalphRunnerStream:
     async def test_stream_requires_stream_execute_fn(self) -> None:
-        """stream() raises ValueError when stream_execute_fn is not set."""
+        """stream() raises EvalError when stream_execute_fn is not set."""
         import pytest
 
+        from exo.eval.base import EvalError  # pyright: ignore[reportMissingImports]
+
         runner = RalphRunner(_make_execute(["hi"]), [])
-        with pytest.raises(ValueError, match="stream_execute_fn required"):
+        with pytest.raises(EvalError, match="stream_execute_fn"):
             async for _ in runner.stream("input"):
                 pass  # pragma: no cover
 

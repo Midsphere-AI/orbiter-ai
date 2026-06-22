@@ -35,6 +35,10 @@ from exo.eval.scorers import (  # pyright: ignore[reportMissingImports]
     OutputLengthScorer,
     SchemaValidationScorer,
 )
+from exo.eval.sync import (  # pyright: ignore[reportMissingImports]
+    EvalSyncError,
+    PlatformSync,
+)
 from exo.eval.trajectory import (  # pyright: ignore[reportMissingImports]
     DefaultStrategy,
     TrajectoryAction,
@@ -83,6 +87,7 @@ __all__: list[str] = [
     "EvalError",
     "EvalResult",
     "EvalStatus",
+    "EvalSyncError",
     "EvalTarget",
     "Evaluator",
     "FormatValidationScorer",
@@ -94,6 +99,7 @@ __all__: list[str] = [
     "OutputCorrectnessScorer",
     "OutputLengthScorer",
     "OutputQualityScorer",
+    "PlatformSync",
     "ReasoningValidityScorer",
     "ReflectionHistory",
     "ReflectionLevel",

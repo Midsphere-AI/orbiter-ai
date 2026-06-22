@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 from typing import Any
 
-from exo.eval.base import Scorer, ScorerResult  # pyright: ignore[reportMissingImports]
+from exo.eval.base import EvalError, Scorer, ScorerResult  # pyright: ignore[reportMissingImports]
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Judge protocol
@@ -20,20 +24,36 @@ def extract_json(text: str) -> dict[str, Any]:
     This is the canonical implementation shared by :mod:`exo.eval.llm_scorer`
     and :mod:`exo.eval.reflection`.  Both modules import from here rather than
     duplicating the brace-depth logic.
+
+    String literals are skipped so that ``}`` or ``{`` inside a JSON string
+    value does not confuse the brace-depth counter (e.g.
+    ``{"key": "a}b"}`` was previously broken by the unescaped ``}``).
     """
     start = text.find("{")
     while start != -1:
         depth = 0
-        for i in range(start, len(text)):
-            if text[i] == "{":
-                depth += 1
-            elif text[i] == "}":
-                depth -= 1
-                if depth == 0:
-                    try:
-                        return json.loads(text[start : i + 1])  # type: ignore[no-any-return]
-                    except (json.JSONDecodeError, ValueError):
-                        break
+        i = start
+        in_string = False
+        escape_next = False
+        while i < len(text):
+            ch = text[i]
+            if escape_next:
+                escape_next = False
+            elif ch == "\\" and in_string:
+                escape_next = True
+            elif ch == '"':
+                in_string = not in_string
+            elif not in_string:
+                if ch == "{":
+                    depth += 1
+                elif ch == "}":
+                    depth -= 1
+                    if depth == 0:
+                        try:
+                            return json.loads(text[start : i + 1])  # type: ignore[no-any-return]
+                        except (json.JSONDecodeError, ValueError):
+                            break
+            i += 1
         start = text.find("{", start + 1)
     return {}
 
@@ -55,7 +75,7 @@ class LLMAsJudgeScorer(Scorer):
     decoupled from a specific model provider.
     """
 
-    __slots__ = ("_judge", "_name", "_system_prompt")
+    __slots__ = ("_judge", "_name", "_system_prompt", "_timeout")
 
     def __init__(
         self,
@@ -63,10 +83,12 @@ class LLMAsJudgeScorer(Scorer):
         *,
         system_prompt: str | None = None,
         name: str = "llm_judge",
+        timeout: float = 0.0,
     ) -> None:
         self._judge = judge
         self._system_prompt = system_prompt or self._default_system_prompt()
         self._name = name
+        self._timeout = timeout
 
     # -- overridable hooks ---------------------------------------------------
 
@@ -90,13 +112,16 @@ class LLMAsJudgeScorer(Scorer):
 
     async def score(self, case_id: str, input: Any, output: Any) -> ScorerResult:
         if self._judge is None:
-            msg = (
-                f"{type(self).__name__}(name={self._name!r}) cannot score without a judge callable. "
-                "Pass a judge=(async callable) at construction time."
+            raise EvalError(
+                f"{type(self).__name__}(name={self._name!r}) cannot score without a judge callable.",
+                context={"scorer": self._name, "case_id": case_id},
+                hint="Pass judge=(async callable) at construction time.",
             )
-            raise ValueError(msg)
         prompt = self.build_prompt(case_id, input, output)
-        response = await self._judge(prompt)
+        if self._timeout > 0:
+            response = await asyncio.wait_for(self._judge(prompt), timeout=self._timeout)
+        else:
+            response = await self._judge(prompt)
         score, details = self.parse_response(str(response))
         return ScorerResult(scorer_name=self._name, score=score, details=details)
 
@@ -288,12 +313,30 @@ class ConstraintSatisfactionScorer(LLMAsJudgeScorer):
         # Try to compute score from individual constraints if available
         results = data.get("constraint_results", [])
         if results and isinstance(results, list):
+            n_configured = len(self._constraints)
+            n_returned = len(results)
+            if n_returned != n_configured:
+                # Log a note when the LLM returned a different number of results
+                # than the number of configured constraints.  We clamp to the
+                # configured count so extras are ignored and the denominator is
+                # stable; missing results count as FAILs.
+                logger.warning(
+                    "ConstraintSatisfactionScorer: LLM returned %d constraint_results "
+                    "but %d constraints were configured; clamping to %d.",
+                    n_returned,
+                    n_configured,
+                    n_configured,
+                )
+                data["constraint_count_mismatch"] = {
+                    "configured": n_configured,
+                    "returned": n_returned,
+                }
             passed = sum(
                 1
-                for r in results
+                for r in results[:n_configured]
                 if isinstance(r, dict) and str(r.get("status", "")).upper() == "PASS"
             )
-            total = len(self._constraints) or 1
+            total = n_configured or 1
             score = passed / total
         else:
             score = float(data.get("score", 0.0))

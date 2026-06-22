@@ -84,38 +84,64 @@ class TaskHandle:
     async def __aexit__(self, *exc_info: Any) -> None:
         await self.close()
 
-    async def result(self, *, poll_interval: float = 0.5) -> dict[str, Any]:
+    async def result(
+        self,
+        *,
+        poll_interval: float = 0.5,
+        timeout: float | None = None,
+    ) -> dict[str, Any]:
         """Block until the task completes and return the result dict.
 
         Polls :class:`TaskStore` at *poll_interval* seconds until the task
         reaches a terminal status (``COMPLETED``, ``FAILED``, or
         ``CANCELLED``).
 
+        Args:
+            poll_interval: Seconds between status polls (default 0.5).
+            timeout: Maximum seconds to wait before raising ``asyncio.TimeoutError``.
+                ``None`` (default) means wait indefinitely — use with care if the
+                worker might crash without updating the task status.
+
         Returns:
             The ``result`` dict from :class:`TaskResult` on success.
 
         Raises:
-            RuntimeError: If the task failed or was cancelled.
+            ExoError: If the task failed or was cancelled.
+            asyncio.TimeoutError: If *timeout* is set and the deadline is exceeded.
         """
         logger.debug("TaskHandle waiting for result of task %s", self._task_id)
-        terminal = {TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED}
-        while True:
-            task_result = await self._store.get_status(self._task_id)
-            if task_result is not None and task_result.status in terminal:
-                if task_result.status == TaskStatus.COMPLETED:
-                    logger.info("Task %s result received (status=completed)", self._task_id)
-                    return task_result.result or {}
-                if task_result.status == TaskStatus.CANCELLED:
-                    logger.info("Task %s was cancelled", self._task_id)
-                    msg = f"Task {self._task_id} was cancelled"
-                    raise ExoError(msg)
-                # FAILED
-                logger.error(
-                    "Task %s failed: %s", self._task_id, task_result.error or "unknown error"
-                )
-                msg = f"Task {self._task_id} failed: {task_result.error or 'unknown error'}"
-                raise ExoError(msg)
-            await asyncio.sleep(poll_interval)
+
+        async def _poll() -> dict[str, Any]:
+            terminal = {TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED}
+            while True:
+                task_result = await self._store.get_status(self._task_id)
+                if task_result is not None and task_result.status in terminal:
+                    if task_result.status == TaskStatus.COMPLETED:
+                        logger.info("Task %s result received (status=completed)", self._task_id)
+                        return task_result.result or {}
+                    if task_result.status == TaskStatus.CANCELLED:
+                        logger.info("Task %s was cancelled", self._task_id)
+                        msg = f"Task {self._task_id} was cancelled"
+                        raise ExoError(
+                            msg,
+                            context={"task_id": self._task_id},
+                            hint="Check worker logs or use task.status() for details.",
+                        )
+                    # FAILED
+                    logger.error(
+                        "Task %s failed: %s", self._task_id, task_result.error or "unknown error"
+                    )
+                    msg = f"Task {self._task_id} failed: {task_result.error or 'unknown error'}"
+                    raise ExoError(
+                        msg,
+                        context={"task_id": self._task_id},
+                        hint="Check worker logs for the root failure; use task.status() for details.",
+                    )
+                await asyncio.sleep(poll_interval)
+
+        if timeout is not None:
+            return await asyncio.wait_for(_poll(), timeout=timeout)
+        return await _poll()
 
     async def stream(self) -> AsyncIterator[StreamEvent]:
         """Subscribe to live streaming events for this task.
@@ -172,7 +198,10 @@ async def distributed(
     url = redis_url or os.environ.get(_DEFAULT_REDIS_ENV)
     if url is None:
         msg = "redis_url must be provided or EXO_REDIS_URL environment variable must be set"
-        raise ExoError(msg)
+        raise ExoError(
+            msg,
+            hint="Pass redis_url='redis://localhost:6379' or set the EXO_REDIS_URL environment variable.",
+        )
 
     agent_name = getattr(agent, "name", "")
     logger.debug("distributed() submitting task (agent=%s)", agent_name)
@@ -203,14 +232,28 @@ async def distributed(
         timeout_seconds=timeout,
     )
 
-    async with aspan(
-        "exo.distributed.submit",
-        attributes={
-            "dist.task_id": payload.task_id,
-            "dist.agent_name": agent_name,
-        },
-    ):
-        await broker.submit(payload)
+    try:
+        async with aspan(
+            "exo.distributed.submit",
+            attributes={
+                "dist.task_id": payload.task_id,
+                "dist.agent_name": agent_name,
+            },
+        ):
+            await broker.submit(payload)
+    except Exception:
+        # Clean up all three connections so callers can't leak Redis resources
+        # when the submit itself fails (e.g. Redis goes down between connect and submit).
+        for component in (broker, store, subscriber):
+            try:
+                await component.disconnect()
+            except Exception:
+                logger.warning(
+                    "distributed(): error disconnecting %s during submit failure cleanup",
+                    type(component).__name__,
+                    exc_info=True,
+                )
+        raise
 
     logger.info(
         "distributed() task %s submitted (agent=%s, timeout=%.0fs)",

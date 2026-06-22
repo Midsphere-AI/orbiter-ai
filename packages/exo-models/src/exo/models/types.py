@@ -26,13 +26,28 @@ class ModelError(ExoError):
         model: The model identifier that caused the error.
         code: Optional error code for classification (e.g. ``"context_length"``
             for context-window overflow, ``"rate_limit"`` for throttling).
+        context: Optional dict of developer-facing context (merged with ``model``).
+        hint: Optional actionable hint for the developer.
+        doc: Optional documentation URL.
     """
 
-    def __init__(self, message: str, *, model: str = "", code: str = "") -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        model: str = "",
+        code: str = "",
+        context: dict | None = None,
+        hint: str | None = None,
+        doc: str | None = None,
+    ) -> None:
         self.model = model
         self.code = code
         full = f"[{model}] {message}" if model else message
-        super().__init__(full)
+        merged_context = {"model": model} if model else {}
+        if context:
+            merged_context.update(context)
+        super().__init__(full, context=merged_context or None, hint=hint, doc=doc)
 
 
 # ---------------------------------------------------------------------------
@@ -112,6 +127,8 @@ class StreamChunk(BaseModel):
         tool_call_deltas: Incremental tool call fragments.
         finish_reason: Non-None only on the final chunk.
         usage: Token usage, typically only on the final chunk.
+        reasoning_content: Chain-of-thought content accumulated by the final
+            chunk (non-None only when extended thinking is active).
     """
 
     model_config = {"frozen": True}
@@ -120,3 +137,4 @@ class StreamChunk(BaseModel):
     tool_call_deltas: list[ToolCallDelta] = Field(default_factory=list)
     finish_reason: FinishReason | None = None
     usage: Usage = Field(default_factory=Usage)
+    reasoning_content: str | None = None

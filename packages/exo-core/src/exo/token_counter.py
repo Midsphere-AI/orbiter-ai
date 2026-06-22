@@ -222,13 +222,16 @@ class TokenCounter:
 # ---------------------------------------------------------------------------
 
 _counter_cache: dict[str, TokenCounter] = {}
+_COUNTER_CACHE_MAX = 64  # bound the cache to avoid unbounded growth
 
 
 def count_tokens(text: str, model: str = "openai:gpt-4o") -> int:
     """Count tokens in *text* for the given model.
 
     Caches :class:`TokenCounter` instances per model string so the
-    tiktoken encoding is loaded only once.
+    tiktoken encoding is loaded only once.  The cache is capped at
+    ``_COUNTER_CACHE_MAX`` entries; when full, the oldest entry is
+    evicted (FIFO).
 
     Parameters
     ----------
@@ -240,5 +243,8 @@ def count_tokens(text: str, model: str = "openai:gpt-4o") -> int:
     counter = _counter_cache.get(model)
     if counter is None:
         counter = TokenCounter(model)
+        if len(_counter_cache) >= _COUNTER_CACHE_MAX:
+            # Evict the oldest (first inserted) entry
+            _counter_cache.pop(next(iter(_counter_cache)))
         _counter_cache[model] = counter
     return counter.count(text)

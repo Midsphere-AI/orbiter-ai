@@ -9,12 +9,15 @@ Results are deduplicated across rounds by chunk identity.
 from __future__ import annotations
 
 import json
+import logging
 import re
 from typing import Any
 
 from exo.retrieval.query_rewriter import QueryRewriter  # pyright: ignore[reportMissingImports]
 from exo.retrieval.retriever import Retriever  # pyright: ignore[reportMissingImports]
 from exo.retrieval.types import RetrievalResult  # pyright: ignore[reportMissingImports]
+
+logger = logging.getLogger(__name__)
 
 _SUFFICIENCY_PROMPT = """You are a retrieval quality judge. Given a query and retrieved passages, assess whether the passages sufficiently answer the query.
 
@@ -68,6 +71,7 @@ class AgenticRetriever(Retriever):
         self.max_rounds = max_rounds
         self.sufficiency_threshold = sufficiency_threshold
         self._provider_kwargs = provider_kwargs
+        self._provider: Any = None  # lazily initialised on first judge call
 
     async def retrieve(
         self,
@@ -92,11 +96,12 @@ class AgenticRetriever(Retriever):
             Deduplicated ``RetrievalResult`` list, highest score first.
         """
         all_results: dict[tuple[str, int], RetrievalResult] = {}
-        current_query = query
 
         for _round in range(self.max_rounds):
-            # Rewrite the query (first round still benefits from expansion)
-            current_query = await self.rewriter.rewrite(current_query)
+            # Always rewrite from the original query so that each round
+            # independently expands/disambiguates rather than compounding
+            # rewrites of rewrites.
+            current_query = await self.rewriter.rewrite(query)
 
             # Retrieve using the base retriever
             round_results = await self.base_retriever.retrieve(current_query, top_k=top_k, **kwargs)
@@ -134,8 +139,18 @@ class AgenticRetriever(Retriever):
         passages_text = "\n".join(f"[{i}] {r.chunk.content}" for i, r in enumerate(results))
         prompt = _SUFFICIENCY_PROMPT.format(query=query, passages=passages_text)
 
-        provider = get_provider(self.model, **self._provider_kwargs)
-        response = await provider.complete([UserMessage(content=prompt)])
+        if self._provider is None:
+            self._provider = get_provider(self.model, **self._provider_kwargs)
+        provider = self._provider
+        try:
+            response = await provider.complete([UserMessage(content=prompt)])
+        except Exception as exc:
+            logger.debug(
+                "AgenticRetriever: sufficiency judge LLM call failed (%s); assuming score=0.0"
+                " and continuing.",
+                exc,
+            )
+            return 0.0
 
         return self._parse_sufficiency(response.content)
 
@@ -160,4 +175,9 @@ class AgenticRetriever(Retriever):
         if float_match:
             return float(float_match.group())
 
+        logger.debug(
+            "AgenticRetriever: could not parse sufficiency score from LLM response;"
+            " falling back to 0.0. Response: %r",
+            content[:200],
+        )
         return 0.0

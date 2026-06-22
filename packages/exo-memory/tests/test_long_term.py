@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from exo.memory.base import (  # pyright: ignore[reportMissingImports]
     AIMemory,
+    ExoMemoryError,
     HumanMemory,
     MemoryItem,
     MemoryMetadata,
@@ -392,7 +393,7 @@ class TestOrchestratorProcess:
         orch = MemoryOrchestrator(store)
         import pytest
 
-        with pytest.raises(KeyError, match="nonexistent"):
+        with pytest.raises(ExoMemoryError, match="No extraction task"):
             await orch.process("nonexistent", MockExtractor())
 
 

@@ -2,7 +2,7 @@
 name = "exo-workspace"
 version = "0.1.0"
 description = "Exo: A modern multi-agent framework"
-requires-python = ">=3.11"
+requires-python = ">=3.13"
 dependencies = [
     "graphifyy>=0.4.2",
 ]
@@ -29,6 +29,12 @@ members = [
     "packages/exo-mcp-cli",
     "packages/exo",
 ]
+
+[tool.uv]
+# Pin transitive deps that the resolver would otherwise float to undesirable
+# versions. tensordict is pulled in only via exo-train[verl]; without this it
+# resolves to the ancient 0.1.2 instead of the 0.6.x line verl expects.
+constraint-dependencies = ["tensordict>=0.6.2"]
 
 [dependency-groups]
 dev = [
@@ -90,7 +96,7 @@ exo-mcp-cli = { workspace = true }
 exo-ai = { workspace = true }
 
 [tool.ruff]
-target-version = "py311"
+target-version = "py313"
 line-length = 100
 
 [tool.ruff.lint]
@@ -101,7 +107,7 @@ ignore = ["E501"]
 known-first-party = ["exo", "exo_cli", "exo_mcp_cli", "exo_server", "exo_skills"]
 
 [tool.pyright]
-pythonVersion = "3.11"
+pythonVersion = "3.13"
 typeCheckingMode = "basic"
 reportMissingImports = true
 reportMissingTypeStubs = false

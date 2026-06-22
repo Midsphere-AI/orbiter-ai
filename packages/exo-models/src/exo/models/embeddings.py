@@ -37,6 +37,8 @@ from typing import Any
 
 import httpx
 
+from exo.types import ExoError
+
 logger = logging.getLogger(__name__)
 
 _DEFAULT_OPENAI_MODEL = "text-embedding-3-small"
@@ -53,7 +55,7 @@ _DEFAULT_VERTEX_LOCATION = "us-central1"
 # ---------------------------------------------------------------------------
 
 
-class EmbeddingError(Exception):
+class EmbeddingError(ExoError):
     """Raised when an embedding operation fails.
 
     Attributes:
@@ -67,10 +69,17 @@ class EmbeddingError(Exception):
         *,
         operation: str = "embed",
         details: dict[str, Any] | None = None,
+        hint: str | None = None,
+        doc: str | None = None,
     ) -> None:
-        super().__init__(message)
         self.operation = operation
         self.details = details or {}
+        super().__init__(
+            message,
+            context={"operation": operation} if operation else None,
+            hint=hint,
+            doc=doc,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -155,6 +164,10 @@ class OpenAIEmbeddings(Embeddings):
     Compatible with any API that implements the OpenAI embeddings endpoint
     (OpenAI, Azure OpenAI, vLLM, Ollama OpenAI-compat, etc.).
 
+    A persistent ``httpx.AsyncClient`` is created on first use and reused for
+    all subsequent calls.  Call ``await embedder.aclose()`` (or use the
+    instance as an async context manager) to release the connection pool.
+
     Args:
         api_key: OpenAI API key.
         model: Embedding model name. Defaults to ``"text-embedding-3-small"``.
@@ -174,6 +187,24 @@ class OpenAIEmbeddings(Embeddings):
         self._model = model
         self._dimension = dimension
         self._base_url = base_url.rstrip("/")
+        self._client: httpx.AsyncClient | None = None
+
+    def _get_client(self) -> httpx.AsyncClient:
+        """Return (lazily-creating) the persistent HTTP client."""
+        if self._client is None or self._client.is_closed:
+            self._client = httpx.AsyncClient()
+        return self._client
+
+    async def aclose(self) -> None:
+        """Close the underlying HTTP client and release connections."""
+        if self._client is not None and not self._client.is_closed:
+            await self._client.aclose()
+
+    async def __aenter__(self) -> OpenAIEmbeddings:
+        return self
+
+    async def __aexit__(self, *_: object) -> None:
+        await self.aclose()
 
     @property
     def dimension(self) -> int:
@@ -219,26 +250,35 @@ class OpenAIEmbeddings(Embeddings):
             "Content-Type": "application/json",
         }
 
-        async with httpx.AsyncClient() as client:
-            try:
-                resp = await client.post(
-                    f"{self._base_url}/embeddings",
-                    json=payload,
-                    headers=headers,
-                    timeout=60.0,
-                )
-                resp.raise_for_status()
-            except httpx.HTTPStatusError as exc:
-                raise EmbeddingError(
-                    f"OpenAI embeddings API error: {exc.response.status_code}",
-                    operation="embed",
-                    details={"status": exc.response.status_code, "body": exc.response.text},
-                ) from exc
-            except httpx.HTTPError as exc:
-                raise EmbeddingError(
-                    f"OpenAI embeddings request failed: {exc}",
-                    operation="embed",
-                ) from exc
+        client = self._get_client()
+        try:
+            resp = await client.post(
+                f"{self._base_url}/embeddings",
+                json=payload,
+                headers=headers,
+                timeout=60.0,
+            )
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code
+            if status == 401:
+                _hint: str | None = "Check that OPENAI_API_KEY is set correctly."
+            elif status == 429:
+                _hint = "Rate limited — reduce batch size or add a delay between requests."
+            else:
+                _hint = None
+            raise EmbeddingError(
+                f"OpenAI embeddings API error: {status}",
+                operation="embed",
+                details={"status": status, "body": exc.response.text},
+                hint=_hint,
+            ) from exc
+        except httpx.HTTPError as exc:
+            raise EmbeddingError(
+                f"OpenAI embeddings request failed: {exc}",
+                operation="embed",
+                details={"model": self._model, "url": self._base_url},
+            ) from exc
 
         body = resp.json()
         # Sort by index to guarantee order matches input order.
@@ -257,6 +297,10 @@ class VertexEmbeddings(Embeddings):
 
     Uses the Vertex AI Prediction REST API via ``httpx`` — the
     ``google-cloud-aiplatform`` SDK is **not** required.
+
+    A persistent ``httpx.AsyncClient`` is created on first use and reused for
+    all subsequent calls.  Call ``await embedder.aclose()`` (or use the
+    instance as an async context manager) to release the connection pool.
 
     Args:
         api_key: Bearer access token for Vertex AI authentication.
@@ -280,6 +324,24 @@ class VertexEmbeddings(Embeddings):
         self._model = model
         self._dimension = dimension
         self._location = location
+        self._client: httpx.AsyncClient | None = None
+
+    def _get_client(self) -> httpx.AsyncClient:
+        """Return (lazily-creating) the persistent HTTP client."""
+        if self._client is None or self._client.is_closed:
+            self._client = httpx.AsyncClient()
+        return self._client
+
+    async def aclose(self) -> None:
+        """Close the underlying HTTP client and release connections."""
+        if self._client is not None and not self._client.is_closed:
+            await self._client.aclose()
+
+    async def __aenter__(self) -> VertexEmbeddings:
+        return self
+
+    async def __aexit__(self, *_: object) -> None:
+        await self.aclose()
 
     @property
     def dimension(self) -> int:
@@ -331,26 +393,38 @@ class VertexEmbeddings(Embeddings):
             "Content-Type": "application/json",
         }
 
-        async with httpx.AsyncClient() as client:
-            try:
-                resp = await client.post(
-                    self._endpoint_url(),
-                    json=payload,
-                    headers=headers,
-                    timeout=60.0,
+        client = self._get_client()
+        try:
+            resp = await client.post(
+                self._endpoint_url(),
+                json=payload,
+                headers=headers,
+                timeout=60.0,
+            )
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code
+            if status in (401, 403):
+                _hint: str | None = (
+                    "Check the Vertex AI access token (api_key) is valid and has "
+                    "aiplatform.endpoints.predict permission."
                 )
-                resp.raise_for_status()
-            except httpx.HTTPStatusError as exc:
-                raise EmbeddingError(
-                    f"Vertex AI embeddings API error: {exc.response.status_code}",
-                    operation="embed",
-                    details={"status": exc.response.status_code, "body": exc.response.text},
-                ) from exc
-            except httpx.HTTPError as exc:
-                raise EmbeddingError(
-                    f"Vertex AI embeddings request failed: {exc}",
-                    operation="embed",
-                ) from exc
+            elif status == 429:
+                _hint = "Rate limited — reduce batch size or add a delay between requests."
+            else:
+                _hint = None
+            raise EmbeddingError(
+                f"Vertex AI embeddings API error: {status}",
+                operation="embed",
+                details={"status": status, "body": exc.response.text},
+                hint=_hint,
+            ) from exc
+        except httpx.HTTPError as exc:
+            raise EmbeddingError(
+                f"Vertex AI embeddings request failed: {exc}",
+                operation="embed",
+                details={"model": self._model, "url": self._endpoint_url()},
+            ) from exc
 
         body = resp.json()
         predictions = body["predictions"]
@@ -379,6 +453,10 @@ class HTTPEmbeddings(Embeddings):
     Sends a POST request to any embedding endpoint and extracts vectors from
     the response using configurable field paths.  Useful for self-hosted
     models (Ollama, TEI, vLLM) or custom embedding APIs.
+
+    A persistent ``httpx.AsyncClient`` is created on first use and reused for
+    all subsequent calls.  Call ``await embedder.aclose()`` (or use the
+    instance as an async context manager) to release the connection pool.
 
     Args:
         url: The embedding endpoint URL.
@@ -411,6 +489,24 @@ class HTTPEmbeddings(Embeddings):
         self._output_field = output_field
         self._vector_field = vector_field
         self._timeout = timeout
+        self._client: httpx.AsyncClient | None = None
+
+    def _get_client(self) -> httpx.AsyncClient:
+        """Return (lazily-creating) the persistent HTTP client."""
+        if self._client is None or self._client.is_closed:
+            self._client = httpx.AsyncClient()
+        return self._client
+
+    async def aclose(self) -> None:
+        """Close the underlying HTTP client and release connections."""
+        if self._client is not None and not self._client.is_closed:
+            await self._client.aclose()
+
+    async def __aenter__(self) -> HTTPEmbeddings:
+        return self
+
+    async def __aexit__(self, *_: object) -> None:
+        await self.aclose()
 
     @property
     def dimension(self) -> int:
@@ -447,26 +543,35 @@ class HTTPEmbeddings(Embeddings):
         payload: dict[str, Any] = {self._input_field: texts}
         req_headers = {"Content-Type": "application/json", **self._headers}
 
-        async with httpx.AsyncClient() as client:
-            try:
-                resp = await client.post(
-                    self._url,
-                    json=payload,
-                    headers=req_headers,
-                    timeout=self._timeout,
-                )
-                resp.raise_for_status()
-            except httpx.HTTPStatusError as exc:
-                raise EmbeddingError(
-                    f"HTTP embeddings API error: {exc.response.status_code}",
-                    operation="embed",
-                    details={"status": exc.response.status_code, "body": exc.response.text},
-                ) from exc
-            except httpx.HTTPError as exc:
-                raise EmbeddingError(
-                    f"HTTP embeddings request failed: {exc}",
-                    operation="embed",
-                ) from exc
+        client = self._get_client()
+        try:
+            resp = await client.post(
+                self._url,
+                json=payload,
+                headers=req_headers,
+                timeout=self._timeout,
+            )
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code
+            if status == 401:
+                _hint: str | None = "Check authentication credentials in headers."
+            elif status == 429:
+                _hint = "Rate limited — reduce batch size or add a delay between requests."
+            else:
+                _hint = None
+            raise EmbeddingError(
+                f"HTTP embeddings API error: {status}",
+                operation="embed",
+                details={"status": status, "body": exc.response.text},
+                hint=_hint,
+            ) from exc
+        except httpx.HTTPError as exc:
+            raise EmbeddingError(
+                f"HTTP embeddings request failed: {exc}",
+                operation="embed",
+                details={"url": self._url},
+            ) from exc
 
         body = resp.json()
         try:

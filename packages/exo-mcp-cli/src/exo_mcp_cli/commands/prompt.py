@@ -9,6 +9,7 @@ import typer
 
 from exo_mcp_cli.connection import MCPConnectionError, connect_to_server
 from exo_mcp_cli.output import (
+    _render_exc,
     console,
     print_error,
     print_json,
@@ -69,7 +70,7 @@ def prompt_list(
         print_error(str(exc))
         raise typer.Exit(code=1) from exc
     except Exception as exc:
-        print_error(f"Failed to list prompts: {exc}")
+        print_error(f"Failed to list prompts: {_render_exc(exc)}")
         if ctx.obj.get("verbose"):
             console.print_exception()
         raise typer.Exit(code=1) from exc
@@ -135,7 +136,7 @@ def prompt_get(
         print_error(str(exc))
         raise typer.Exit(code=1) from exc
     except Exception as exc:
-        print_error(f"Failed to get prompt: {exc}")
+        print_error(f"Failed to get prompt: {_render_exc(exc)}")
         if ctx.obj.get("verbose"):
             console.print_exception()
         raise typer.Exit(code=1) from exc

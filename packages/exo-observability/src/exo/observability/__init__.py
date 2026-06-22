@@ -54,6 +54,22 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     "is_user_code": ("exo.observability.tracing", "is_user_code"),
     "get_user_frame": ("exo.observability.tracing", "get_user_frame"),
     "extract_metadata": ("exo.observability.tracing", "extract_metadata"),
+    # tracer spine + backends
+    "Tracer": ("exo.observability.tracer", "Tracer"),
+    "install_tracing": ("exo.observability.tracer", "install_tracing"),
+    "resolve_backends": ("exo.observability.backends", "resolve_backends"),
+    "get_memory_backend": ("exo.observability.backends", "get_memory_backend"),
+    "TracingBackend": ("exo.observability.backends.base", "TracingBackend"),
+    "OTLPBackend": ("exo.observability.backends.base", "OTLPBackend"),
+    "MemoryBackend": ("exo.observability.backends.base", "MemoryBackend"),
+    # cost tracking
+    "CostResult": ("exo.observability.cost", "CostResult"),
+    "CostTracker": ("exo.observability.cost", "CostTracker"),
+    "estimate_cost": ("exo.observability.cost", "estimate_cost"),
+    "estimate_cost_from_usage": ("exo.observability.cost", "estimate_cost_from_usage"),
+    "stamp_cost_on_current_span": ("exo.observability.cost", "stamp_cost_on_current_span"),
+    "register_price": ("exo.observability.cost", "register_price"),
+    "PRICE_TABLE": ("exo.observability.cost", "PRICE_TABLE"),
     # metrics
     "MetricsCollector": ("exo.observability.metrics", "MetricsCollector"),
     "METRIC_AGENT_RUN_DURATION": (

@@ -369,7 +369,6 @@ class TestBackwardStepCycle:
         # Cycle 2
         await opt.backward(_make_cases())
         r2 = await opt.step()
-        prompt_after_2 = r2["summarizer"]
 
         # Both cycles produced results.
         assert prompt_after_1 != "V1"

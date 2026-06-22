@@ -444,3 +444,51 @@ class TestLocalExecutorDisplay:
 
         ex.print_error(ExecutorError("something broke"))
         assert console.file.write.called  # type: ignore[union-attr]
+
+
+# ---------------------------------------------------------------------------
+# LocalExecutor — default console goes to stdout (Finding #1)
+# ---------------------------------------------------------------------------
+
+
+class TestLocalExecutorDefaultConsole:
+    def test_default_console_is_stdout(self) -> None:
+        """LocalExecutor without explicit console defaults to stdout (not stderr)."""
+        import sys
+
+        from rich.console import Console as RichConsole
+
+        agent = _mock_agent()
+        ex = LocalExecutor(agent=agent)
+        # Access the private console — it should target stdout (file=None means stdout in Rich)
+        console_obj = ex._console  # type: ignore[attr-defined]
+        assert isinstance(console_obj, RichConsole)
+        # Rich Console defaults to stdout (sys.stdout) when stderr=False
+        assert console_obj.file is sys.stdout or console_obj._file is None  # type: ignore[attr-defined]
+
+
+# ---------------------------------------------------------------------------
+# LocalExecutor — streaming timeout via asyncio.timeout (Finding #2)
+# ---------------------------------------------------------------------------
+
+
+class TestLocalExecutorStreamTimeout:
+    async def test_stream_timeout_on_stall(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A stalled stream (no chunks) is cancelled by asyncio.timeout, not per-chunk polling."""
+        agent = _mock_agent()
+
+        async def stalled_stream(*args: Any, **kwargs: Any) -> AsyncIterator[Any]:
+            # Simulate a stall: wait forever without yielding
+            await asyncio.sleep(60)
+            yield MagicMock(text="never")  # pragma: no cover
+
+        mock_run = MagicMock()
+        mock_run.stream = stalled_stream
+        import exo.runner  # pyright: ignore[reportMissingImports]
+
+        monkeypatch.setattr(exo.runner, "run", mock_run)
+
+        ex = LocalExecutor(agent=agent, timeout=0.05, console=_silent_console())
+        with pytest.raises(ExecutorError, match="timed out"):
+            async for _ in ex.stream("test"):
+                pass  # pragma: no cover

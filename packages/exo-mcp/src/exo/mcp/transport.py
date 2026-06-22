@@ -104,4 +104,7 @@ def create_transport_streams(
 
         return websocket_client(url=url)
 
-    raise MCPTransportError(f"Unsupported transport: {transport!r}")
+    raise MCPTransportError(
+        f"Unsupported transport: {transport!r}",
+        hint=f"Valid transports are: stdio, sse, streamable_http. Got {transport!r}.",
+    )

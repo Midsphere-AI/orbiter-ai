@@ -8,6 +8,7 @@ context state using dot-separated paths like ``user.name`` or
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 from exo.types import ExoError  # pyright: ignore[reportMissingImports]
@@ -15,6 +16,9 @@ from exo.types import ExoError  # pyright: ignore[reportMissingImports]
 logger = logging.getLogger(__name__)
 
 from exo.context.state import ContextState  # pyright: ignore[reportMissingImports]
+
+# Pre-compiled template placeholder pattern for resolve_template hot path.
+_TEMPLATE_RE = re.compile(r"\$\{([^}]+)\}")
 
 
 class VariableResolveError(ExoError):
@@ -93,21 +97,36 @@ class DynamicVariableRegistry:
         for part in parts:
             if isinstance(current, ContextState):
                 if part not in current:
-                    msg = f"Variable path {path!r} not found at segment {part!r}"
-                    raise VariableResolveError(msg)
+                    raise VariableResolveError(
+                        f"Variable path {path!r} not found at segment {part!r}.",
+                        hint=(
+                            "Register a resolver via DynamicVariableRegistry.register() "
+                            "or ensure the state contains the key path."
+                        ),
+                    )
                 current = current.get(part)
             elif isinstance(current, dict):
                 if part not in current:
-                    msg = f"Variable path {path!r} not found at segment {part!r}"
-                    raise VariableResolveError(msg)
+                    raise VariableResolveError(
+                        f"Variable path {path!r} not found at segment {part!r}.",
+                        hint=(
+                            "Register a resolver via DynamicVariableRegistry.register() "
+                            "or ensure the state contains the key path."
+                        ),
+                    )
                 current = current[part]
             else:
                 # Try getattr for object access
                 if hasattr(current, part):
                     current = getattr(current, part)
                 else:
-                    msg = f"Variable path {path!r} not found at segment {part!r}"
-                    raise VariableResolveError(msg)
+                    raise VariableResolveError(
+                        f"Variable path {path!r} not found at segment {part!r}.",
+                        hint=(
+                            "Register a resolver via DynamicVariableRegistry.register() "
+                            "or ensure the state contains the key path."
+                        ),
+                    )
         return current
 
     def has(self, path: str) -> bool:
@@ -123,7 +142,6 @@ class DynamicVariableRegistry:
 
         Unresolvable variables are left as-is.
         """
-        import re
 
         def _replace(match: re.Match[str]) -> str:
             path = match.group(1)
@@ -133,7 +151,7 @@ class DynamicVariableRegistry:
             except VariableResolveError:
                 return match.group(0)
 
-        return re.sub(r"\$\{([^}]+)\}", _replace, template)
+        return _TEMPLATE_RE.sub(_replace, template)
 
     def __repr__(self) -> str:
         return f"DynamicVariableRegistry(variables={len(self._resolvers)})"

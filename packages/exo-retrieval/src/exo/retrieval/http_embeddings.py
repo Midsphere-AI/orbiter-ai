@@ -6,7 +6,6 @@ This module is a compatibility shim. The implementation now lives in
 
 from exo.models.embeddings import (  # pyright: ignore[reportMissingImports]
     HTTPEmbeddings,
-    _get_nested,
 )
 
-__all__ = ["HTTPEmbeddings", "_get_nested"]
+__all__ = ["HTTPEmbeddings"]

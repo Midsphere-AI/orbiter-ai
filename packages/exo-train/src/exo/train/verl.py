@@ -146,7 +146,9 @@ class VeRLTrainer(Trainer):
     @property
     def verl_config(self) -> VeRLConfig:
         """Typed access to the VeRL-specific config."""
-        assert isinstance(self._config, VeRLConfig)
+        if not isinstance(self._config, VeRLConfig):
+            msg = f"Expected VeRLConfig, got {type(self._config).__name__}"
+            raise TrainerError(msg)
         return self._config
 
     # --- Validation phase ---
@@ -220,21 +222,26 @@ class VeRLTrainer(Trainer):
         """Validate and optionally merge VeRL config overrides.
 
         If *config* is a dict, its values are merged into the existing
-        config's ``extra`` field.
+        config's ``extra`` field.  If *config* is a base ``TrainConfig``,
+        common fields (epochs, batch_size, learning_rate, output_dir) are
+        merged into the current ``VeRLConfig``.
         """
         if config is None:
             return
         if isinstance(config, dict):
-            # Merge dict overrides into extra
+            # Merge dict overrides into extra (VeRLConfig is mutable — no object.__setattr__ needed)
             current = self.verl_config
-            merged_extra = {**current.extra, **config}
-            # Store merged config — since VeRLConfig is frozen, store overrides in extra
-            object.__setattr__(current, "extra", merged_extra)
+            current.extra = {**current.extra, **config}
         elif isinstance(config, VeRLConfig):
             self._config = config
         elif isinstance(config, TrainConfig):
-            # Accept base TrainConfig — keep VeRL defaults for RL-specific fields
-            pass
+            # Accept base TrainConfig — merge common fields into existing VeRLConfig
+            current = self.verl_config
+            current.epochs = config.epochs
+            current.batch_size = config.batch_size
+            current.learning_rate = config.learning_rate
+            if config.output_dir:
+                current.output_dir = config.output_dir
         logger.info("Config validated")
 
     # --- Training phase ---
@@ -324,7 +331,7 @@ class VeRLTrainer(Trainer):
             trainer.fit()
             return trainer
 
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         trainer_instance = await loop.run_in_executor(None, _run_fit)
 
         # Extract real metrics from the completed trainer.
@@ -384,7 +391,7 @@ class VeRLTrainer(Trainer):
         def _run_eval() -> dict[str, Any]:
             return _verl_evaluate(verl, cfg, eval_data, reward_fn)
 
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         eval_result = await loop.run_in_executor(None, _run_eval)
 
         accuracy = eval_result.get("accuracy", 0.0)
@@ -690,7 +697,14 @@ def _verl_evaluate(
 
     except (ImportError, AttributeError):
         # VeRL generation utils not available at this version — fall back to
-        # scoring existing outputs from the dataset
+        # scoring existing outputs from the dataset.
+        # WARNING: This fallback does NOT run model inference; it scores
+        # pre-existing dataset outputs, which may produce misleading metrics.
+        logger.warning(
+            "verl.utils.model.LLMGenerationManager not available — "
+            "falling back to scoring existing dataset outputs. "
+            "Metrics from this path do NOT reflect live model inference."
+        )
         total_score = 0.0
         scoreable = 0
         for item in eval_data:

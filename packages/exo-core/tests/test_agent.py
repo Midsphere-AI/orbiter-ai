@@ -54,17 +54,19 @@ class TestAgentCreation:
         assert "retrieve_artifact" in agent.tools
         # spawn_self is auto-registered by default (allow_self_spawn=True)
         assert "spawn_self" in agent.tools
-        # 7 context tools are auto-loaded when context is active (default)
+        # background sub-agent tools are auto-registered by default too
+        assert "spawn_background" in agent.tools
+        # 3 planning context tools are auto-loaded when context is active (default).
+        # Knowledge/file tools are opt-in via workspace=WorkspaceConfig(...).
         auto_tool_names = {
             "retrieve_artifact",
             "spawn_self",
+            "spawn_background",
+            "check_subagent",
+            "list_subagents",
             "add_todo",
             "complete_todo",
             "get_todo",
-            "get_knowledge",
-            "grep_knowledge",
-            "search_knowledge",
-            "read_file",
         }
         non_auto = [k for k in agent.tools if k not in auto_tool_names]
         assert len(non_auto) == 0
@@ -113,8 +115,8 @@ class TestAgentCreation:
         assert agent.provider_name == "anthropic"
         assert agent.model_name == "claude-sonnet-4-20250514"
         assert agent.instructions == "Research things."
-        # 2 user tools + retrieve_artifact + spawn_self + 7 context tools (auto-loaded)
-        assert len(agent.tools) == 11
+        # 2 user tools + retrieve_artifact + spawn_self + 3 background + 3 planning tools
+        assert len(agent.tools) == 10
         assert agent.output_type is ReportOutput
         assert agent.max_steps == 20
         assert agent.temperature == 0.7
@@ -182,8 +184,8 @@ class TestToolRegistration:
     def test_get_tool_schemas(self) -> None:
         agent = Agent(name="bot", tools=[greet])
         schemas = agent.get_tool_schemas()
-        # greet + retrieve_artifact + spawn_self + 7 context tools (auto-loaded)
-        assert len(schemas) == 10
+        # greet + retrieve_artifact + spawn_self + 3 background + 3 planning tools
+        assert len(schemas) == 9
         names = {s["function"]["name"] for s in schemas}
         assert "greet" in names
         assert schemas[0]["type"] == "function"
@@ -617,8 +619,8 @@ class TestAgentRun:
 
         call_args = provider.complete.call_args
         assert call_args[1]["tools"] is not None
-        # greet + retrieve_artifact + spawn_self + 7 context tools (auto-loaded)
-        assert len(call_args[1]["tools"]) == 10
+        # greet + retrieve_artifact + spawn_self + 3 background + 3 planning tools
+        assert len(call_args[1]["tools"]) == 9
 
 
 # ---------------------------------------------------------------------------
@@ -1043,8 +1045,9 @@ class TestAgentEdgeCases:
 
         schemas = agent.get_tool_schemas()
 
-        # greet + retrieve_artifact + spawn_self + 7 context tools; handoff should not appear
-        assert len(schemas) == 10
+        # greet + retrieve_artifact + spawn_self + 3 background + 3 planning tools;
+        # handoff should not appear
+        assert len(schemas) == 9
         names = [s["function"]["name"] for s in schemas]
         assert "greet" in names
         assert "helper" not in names
@@ -1805,3 +1808,50 @@ class TestNamespaceConfigs:
 
         with pytest.raises(AgentError, match="Cannot combine guardrails"):
             Agent(name="bot", guardrails=GuardrailsConfig(), hitl_tools=[])
+
+    def test_workspace_tools_off_by_default(self) -> None:
+        """A bare agent must not advertise the workspace-backed knowledge/file tools."""
+        agent = Agent(name="bot")
+        for name in ("search_knowledge", "get_knowledge", "grep_knowledge", "read_file"):
+            assert name not in agent.tools
+        # Planning tools remain on by default.
+        assert "add_todo" in agent.tools
+        assert agent.workspace.enabled is False
+
+    async def test_workspace_config_enables_knowledge_tools(self) -> None:
+        """workspace=WorkspaceConfig(enabled=True) wires a functional knowledge store."""
+        from exo import WorkspaceConfig
+
+        agent = Agent(name="bot", workspace=WorkspaceConfig(enabled=True))
+        for name in ("search_knowledge", "get_knowledge", "grep_knowledge"):
+            assert name in agent.tools
+        # read_file stays off until a working_dir is configured.
+        assert "read_file" not in agent.tools
+
+        # Artifacts written to the workspace are auto-indexed and searchable.
+        await agent._workspace.write("notes.md", "The capital of France is Paris.")
+        out = await agent.tools["search_knowledge"].execute(query="capital France")
+        assert "notes.md" in str(out)
+        got = await agent.tools["get_knowledge"].execute(name="notes.md")
+        assert "Paris" in str(got)
+
+    async def test_workspace_config_working_dir_enables_read_file(self, tmp_path: Any) -> None:
+        """A configured working_dir registers read_file scoped to that directory."""
+        from exo import WorkspaceConfig
+
+        (tmp_path / "hi.txt").write_text("hello world", encoding="utf-8")
+        agent = Agent(
+            name="bot",
+            workspace=WorkspaceConfig(enabled=True, working_dir=str(tmp_path)),
+        )
+        assert "read_file" in agent.tools
+        out = await agent.tools["read_file"].execute(path="hi.txt")
+        assert out == "hello world"
+
+    def test_workspace_inspectable_attribute(self) -> None:
+        """The resolved WorkspaceConfig is exposed for introspection."""
+        from exo import WorkspaceConfig
+
+        agent = Agent(name="bot", workspace=WorkspaceConfig(enabled=True, chunk_size=256))
+        assert agent.workspace.enabled is True
+        assert agent.workspace.chunk_size == 256

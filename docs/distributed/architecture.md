@@ -315,7 +315,7 @@ Client                    Redis              Worker              Temporal
   |<-- result --------------|                  |                    |
 ```
 
-In Temporal mode, the worker submits a `AgentExecutionWorkflow` to Temporal instead of executing the agent directly. The Temporal activity (`execute_agent_activity`) reconstructs the agent, runs `run.stream()`, and heartbeats every 10 events. Temporal handles retries and state recovery on worker failure.
+In Temporal mode, the worker submits an `AgentExecutionWorkflow` to Temporal instead of executing the agent directly. The Temporal activity (`execute_agent_activity`) reconstructs the agent, runs `run.stream()`, and heartbeats progress every 10 events. On worker failure Temporal reassigns the activity to another worker (crash-resumable via heartbeating); retry is governed by a `RetryPolicy` that respects exo's error taxonomy. Because the whole run lives in one activity, a retry restarts it from the beginning — this is *not* per-step checkpoint-restore (which would require the agent loop to run as workflow code). See [Worker Execution Modes](workers.md#temporal-execution-durable) for connection, encryption, retry, and tuning configuration.
 
 ## Redis Data Structures Summary
 

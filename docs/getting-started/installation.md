@@ -2,17 +2,17 @@
 
 ## Requirements
 
-- **Python 3.11+** -- Exo uses modern Python features (`types.UnionType`, `asyncio.TaskGroup`, `ExceptionGroup`) that require Python 3.11 or later.
+- **Python 3.13+** -- Exo uses modern Python features (`types.UnionType`, `asyncio.TaskGroup`, `ExceptionGroup`); the project targets Python 3.13 or later.
 - **An LLM API key** -- At minimum, you need an API key from OpenAI or Anthropic.
 
 ## Install with pip
 
 ### Meta-package (recommended)
 
-The `exo` meta-package installs exo-core plus all standard extras:
+The `exo-ai` meta-package installs exo-core plus all standard extras:
 
 ```bash
-pip install exo
+pip install exo-ai
 ```
 
 ### Minimal install
@@ -41,7 +41,7 @@ pip install exo-models     # OpenAI + Anthropic providers
 pip install exo-context    # Context engine, neurons, prompt builder
 pip install exo-memory     # Short/long-term memory, vector search
 pip install exo-mcp        # Model Context Protocol client/server
-pip install exo-trace      # OpenTelemetry tracing
+pip install "exo-ai[tracing]"  # OpenTelemetry tracing (OTLP exporter)
 pip install exo-eval       # Evaluators, scorers, reflection
 pip install exo-sandbox    # Sandboxed execution environments
 pip install exo-a2a        # Agent-to-Agent protocol

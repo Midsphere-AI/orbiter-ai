@@ -148,7 +148,7 @@ build-backend = "hatchling.build"
 name = "exo-<name>"
 version = "0.1.0"
 description = "<description>"
-requires-python = ">=3.11"
+requires-python = ">=3.13"
 dependencies = [
     "exo-core>=0.1.0",
 ]
@@ -163,7 +163,7 @@ exo-core = { workspace = true }
 ### Key Points
 
 - **Build system:** hatchling (consistent across all packages)
-- **Python version:** 3.11+ (required for `asyncio.TaskGroup`, `StrEnum`)
+- **Python version:** 3.13+ (project floor; `asyncio.TaskGroup`, `StrEnum` need 3.11+)
 - **Workspace sources:** Use `{ workspace = true }` for workspace dependencies so UV resolves them locally
 - **Wheel packages:** Point to `src/exo` so the namespace package structure is preserved
 

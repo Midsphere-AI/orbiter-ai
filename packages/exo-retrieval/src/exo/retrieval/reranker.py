@@ -9,10 +9,13 @@ from __future__ import annotations
 
 import abc
 import json
+import logging
 import re
 from typing import Any
 
 from exo.retrieval.types import RetrievalResult  # pyright: ignore[reportMissingImports]
+
+logger = logging.getLogger(__name__)
 
 _DEFAULT_PROMPT = """You are a relevance judge. Given a query and a list of text passages, rank the passages by relevance to the query.
 
@@ -78,6 +81,7 @@ class LLMReranker(Reranker):
         self.model = model
         self.prompt_template = prompt_template or _DEFAULT_PROMPT
         self._provider_kwargs = provider_kwargs
+        self._provider: Any = None  # lazily initialised on first rerank call
 
     async def rerank(
         self,
@@ -100,14 +104,24 @@ class LLMReranker(Reranker):
             return []
 
         from exo.models import get_provider  # pyright: ignore[reportMissingImports]
+        from exo.retrieval.types import RetrievalError  # pyright: ignore[reportMissingImports]
         from exo.types import UserMessage
 
         # Build numbered passages text
         passages_text = "\n".join(f"[{i}] {r.chunk.content}" for i, r in enumerate(results))
         prompt = self.prompt_template.format(query=query, passages=passages_text)
 
-        provider = get_provider(self.model, **self._provider_kwargs)
-        response = await provider.complete([UserMessage(content=prompt)])
+        if self._provider is None:
+            self._provider = get_provider(self.model, **self._provider_kwargs)
+        provider = self._provider
+        try:
+            response = await provider.complete([UserMessage(content=prompt)])
+        except Exception as exc:
+            raise RetrievalError(
+                f"Reranking LLM call failed: {exc}",
+                context={"model": self.model, "operation": "rerank"},
+                hint="Check the model string and API key for the reranking LLM.",
+            ) from exc
 
         ranking = self._parse_ranking(response.content, len(results))
 
@@ -161,4 +175,9 @@ class LLMReranker(Reranker):
                 pass
 
         # Fallback: original order
+        logger.debug(
+            "LLMReranker could not parse ranking from LLM response; falling back to original order."
+            " Response: %r",
+            content[:200],
+        )
         return list(range(num_results))

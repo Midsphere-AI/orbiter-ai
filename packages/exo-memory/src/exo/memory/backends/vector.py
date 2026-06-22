@@ -53,12 +53,15 @@ class VectorMemoryStore:
     interface (async ``embed(text) -> list[float]``).
     """
 
-    __slots__ = ("_embeddings", "_items", "_vectors")
+    __slots__ = ("_content_hashes", "_embeddings", "_items", "_vectors")
 
     def __init__(self, embeddings: Embeddings) -> None:
         self._embeddings = embeddings
         self._items: dict[str, MemoryItem] = {}
         self._vectors: dict[str, list[float]] = {}
+        # item_id → content-hash cache used to skip re-embedding on upsert
+        # when content is unchanged.
+        self._content_hashes: dict[str, str] = {}
 
     @property
     def embeddings(self) -> Embeddings:
@@ -68,10 +71,21 @@ class VectorMemoryStore:
     # -- MemoryStore protocol -------------------------------------------------
 
     async def add(self, item: MemoryItem) -> None:
-        """Persist a memory item and compute its embedding."""
+        """Persist a memory item and compute its embedding.
+
+        If the item already exists and its content is unchanged, the cached
+        vector is reused instead of calling the embeddings provider again.
+        """
+        existing_hash = self._content_hashes.get(item.id)
+        if existing_hash is not None and existing_hash == item.content:
+            # Content unchanged — reuse the cached vector.
+            self._items[item.id] = item
+            logger.debug("upserted item id=%s (content unchanged, skipping re-embed)", item.id)
+            return
         vec = await self._embeddings.embed(item.content)
         self._items[item.id] = item
         self._vectors[item.id] = vec
+        self._content_hashes[item.id] = item.content
         logger.debug("added item id=%s dim=%d", item.id, len(vec))
 
     async def get(self, item_id: str) -> MemoryItem | None:
@@ -134,10 +148,16 @@ class VectorMemoryStore:
         metadata: MemoryMetadata | None = None,
     ) -> int:
         """Remove memory items matching the filter. Returns count."""
+        if metadata is not None and not any(
+            [metadata.user_id, metadata.session_id, metadata.task_id, metadata.agent_id]
+        ):
+            logger.debug("clear() called with all-None metadata fields — returning 0")
+            return 0
         if metadata is None:
             count = len(self._items)
             self._items.clear()
             self._vectors.clear()
+            self._content_hashes.clear()
             logger.debug("cleared all items count=%d", count)
             return count
 
@@ -147,6 +167,7 @@ class VectorMemoryStore:
         for item_id in to_remove:
             del self._items[item_id]
             self._vectors.pop(item_id, None)
+            self._content_hashes.pop(item_id, None)
         logger.debug("cleared filtered items count=%d", len(to_remove))
         return len(to_remove)
 
@@ -175,8 +196,6 @@ def _matches_metadata(item: MemoryItem, metadata: MemoryMetadata) -> bool:
     return not (metadata.agent_id and m.agent_id != metadata.agent_id)
 
 
-
-
 @runtime_checkable
 class EmbeddingProvider(Protocol):
     """Runtime-checkable protocol for embedding providers.
@@ -199,7 +218,7 @@ class OpenAIEmbeddingProvider:
     Requires the ``openai`` package to be installed.
     """
 
-    __slots__ = ("_api_key", "_model")
+    __slots__ = ("_api_key", "_client", "_model")
 
     def __init__(
         self,
@@ -211,6 +230,7 @@ class OpenAIEmbeddingProvider:
 
         self._model = model
         self._api_key = api_key or os.environ.get("OPENAI_API_KEY")
+        self._client: Any = None  # lazy-initialized in _embed_sync
 
     async def embed(self, text: str) -> list[float]:
         """Embed *text* asynchronously via the OpenAI API."""
@@ -219,8 +239,9 @@ class OpenAIEmbeddingProvider:
     def _embed_sync(self, text: str) -> list[float]:
         import openai  # lazy import
 
-        client = openai.OpenAI(api_key=self._api_key)
-        resp = client.embeddings.create(input=text, model=self._model)
+        if self._client is None:
+            self._client = openai.OpenAI(api_key=self._api_key)
+        resp = self._client.embeddings.create(input=text, model=self._model)
         return list(resp.data[0].embedding)
 
 
@@ -256,9 +277,6 @@ class SentenceTransformerEmbeddingProvider:
 # ---------------------------------------------------------------------------
 # Embeddings ABC
 # ---------------------------------------------------------------------------
-
-
-
 
 
 class ChromaVectorMemoryStore:
@@ -392,6 +410,12 @@ class ChromaVectorMemoryStore:
     ) -> int:
         """Remove memory items.  Returns the number of items removed."""
         collection = self._ensure_collection()
+
+        if metadata is not None and not any(
+            [metadata.user_id, metadata.session_id, metadata.task_id, metadata.agent_id]
+        ):
+            logger.debug("clear() called with all-None metadata fields — returning 0")
+            return 0
 
         if metadata is None:
             # Count all, then wipe by dropping + recreating the collection

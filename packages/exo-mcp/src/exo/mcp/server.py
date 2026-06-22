@@ -46,7 +46,12 @@ class MCPServerRegistry:
             MCPServerError: If the name is not registered.
         """
         if name not in self._classes:
-            raise MCPServerError(f"MCP server '{name}' not registered")
+            registered = sorted(self._classes)
+            raise MCPServerError(
+                f"MCP server '{name}' not registered",
+                context={"requested": name, "registered": registered},
+                hint=(f"Registered servers: {registered}. Use @mcp_server() to register a class."),
+            )
         return self._classes[name]
 
     def get_instance(self, name: str, *args: Any, **kwargs: Any) -> Any:
@@ -93,6 +98,8 @@ def _register_methods(instance: Any, mcp: FastMCP) -> list[str]:
     """
     tool_names: list[str] = []
 
+    # Methods excluded from auto-registration: private names (leading "_"), and the
+    # lifecycle methods "run", "run_async", and "stop" added by @mcp_server.
     for method_name, method in inspect.getmembers(instance, inspect.ismethod):
         if method_name.startswith("_") or method_name in ("run", "run_async", "stop"):
             continue
@@ -189,7 +196,13 @@ def mcp_server(
                 **kwargs: Passed to ``FastMCP.run()``.
             """
             if not hasattr(self, "_mcp") or self._mcp is None:
-                raise MCPServerError("MCP server not initialized")
+                raise MCPServerError(
+                    f"MCP server '{server_name}' not initialized",
+                    hint=(
+                        "The @mcp_server decorator must be applied and __init__ must call "
+                        "the decorated __init__ before run() is called."
+                    ),
+                )
             self._mcp.run(transport=transport, **kwargs)
 
         async def run_async(
@@ -205,7 +218,13 @@ def mcp_server(
                 **kwargs: Passed to the matching ``FastMCP.run_*_async()`` method.
             """
             if not hasattr(self, "_mcp") or self._mcp is None:
-                raise MCPServerError("MCP server not initialized")
+                raise MCPServerError(
+                    f"MCP server '{server_name}' not initialized",
+                    hint=(
+                        "The @mcp_server decorator must be applied and __init__ must call "
+                        "the decorated __init__ before run_async() is called."
+                    ),
+                )
             if getattr(self, "_mcp_stopped", False):
                 raise MCPServerError(f"MCP server {server_name!r} has already been stopped")
 
@@ -213,10 +232,16 @@ def mcp_server(
                 t = transport.replace("-", "_")
                 runner = getattr(self._mcp, f"run_{t}_async", None)
                 if runner is None:
-                    raise MCPServerError(f"No async runner for transport {transport!r}")
+                    raise MCPServerError(
+                        f"No async runner for transport {transport!r}",
+                        hint=(
+                            "Valid async transports for FastMCP are: stdio, sse. "
+                            "Check the transport argument passed to run_async()."
+                        ),
+                    )
                 await runner(**kwargs)
 
-            task = asyncio.ensure_future(_run())
+            task = asyncio.create_task(_run(), name=f"mcp-server-{server_name}")
             self._mcp_task: asyncio.Task[None] = task  # pyright: ignore[reportAttributeAccessIssue]
             try:
                 await task
@@ -246,7 +271,13 @@ def mcp_server(
                 task.cancel()
                 try:
                     await asyncio.wait_for(asyncio.shield(task), timeout=5.0)
-                except (asyncio.CancelledError, TimeoutError):
+                except TimeoutError:
+                    logger.warning(
+                        "MCP server %r task did not finish within 5 s after cancel — "
+                        "it may still be running in the background.",
+                        server_name,
+                    )
+                except asyncio.CancelledError:
                     pass
                 except Exception as exc:
                     logger.warning("MCP server %r task raised on cancel: %s", server_name, exc)

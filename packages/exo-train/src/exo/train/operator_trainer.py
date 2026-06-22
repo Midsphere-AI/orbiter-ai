@@ -259,7 +259,7 @@ class OperatorTrainer(Trainer):
         self,
         config: TrainConfig | dict[str, Any] | None = None,
     ) -> None:
-        """Validate configuration.
+        """Validate configuration and update self._config if a new config is provided.
 
         Raises:
             TrainerError: If epochs < 1.
@@ -267,8 +267,10 @@ class OperatorTrainer(Trainer):
         cfg: TrainConfig
         if isinstance(config, TrainConfig):
             cfg = config
+            self._config = cfg
         elif isinstance(config, dict):
             cfg = TrainConfig(**config)
+            self._config = cfg
         else:
             cfg = self._config
         if cfg.epochs < 1:

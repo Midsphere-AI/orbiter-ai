@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
 from exo.eval.base import (  # pyright: ignore[reportMissingImports]
+    EvalError,
     Scorer,
     ScorerResult,
 )
@@ -214,10 +216,17 @@ class RefinementLoop:
             and ``RefinementStopEvent``.
 
         Raises:
-            ValueError: If ``stream_execute_fn`` was not provided.
+            EvalError: If ``stream_execute_fn`` was not provided.
         """
         if self._stream_execute_fn is None:
-            raise ValueError("stream_execute_fn required for streaming")
+            raise EvalError(
+                "stream_execute_fn is required for streaming but was not provided.",
+                hint=(
+                    "Use RefinementLoop.from_agent(agent, scorers) to wire both "
+                    "execute_fn and stream_execute_fn automatically, or pass "
+                    "stream_execute_fn= to the constructor."
+                ),
+            )
 
         logger.info(
             "RefinementLoop.stream starting: input_len=%d scorers=%d",
@@ -246,7 +255,13 @@ class RefinementLoop:
                 output = "".join(output_parts)
                 state.record_success()
             except Exception as exc:
-                output = str(exc)
+                logger.warning(
+                    "RefinementLoop.stream execute_fn failed at iteration=%d: %s",
+                    state.iteration,
+                    exc,
+                    exc_info=True,
+                )
+                output = f"[execute error: {type(exc).__name__}: {exc}]"
                 state.record_failure()
                 success = False
 
@@ -288,8 +303,15 @@ class RefinementLoop:
             state.record_success()
             return (str(output), True)
         except Exception as exc:
+            logger.warning(
+                "RefinementLoop._execute failed at iteration=%d: %s",
+                state.iteration,
+                exc,
+                exc_info=True,
+            )
             state.record_failure()
-            return (str(exc), False)
+            # Preserve exc_type in the output string so reflectors can see it.
+            return (f"[execute error: {type(exc).__name__}: {exc}]", False)
 
     async def _analyze(
         self,
@@ -297,17 +319,51 @@ class RefinementLoop:
         input: str,
         state: LoopState,
     ) -> dict[str, float]:
-        """Phase 2: Score the output with all configured scorers."""
+        """Phase 2: Score the output with all configured scorers.
+
+        Scorers are fanned out concurrently, bounded by
+        ``ValidationConfig.parallel`` (default 4).
+        """
         if not self._config.validation.enabled or not self._scorers:
             return {}
-        scores: dict[str, float] = {}
         case_id = f"ralph-iter-{state.iteration}"
-        for scorer in self._scorers:
-            try:
-                result: ScorerResult = await scorer.score(case_id, input, output)
-                scores[result.scorer_name] = result.score
-            except Exception as exc:
-                logger.warning("Scorer failed case=%s: %s", case_id, exc, exc_info=True)
+        sem = asyncio.Semaphore(self._config.validation.parallel)
+
+        async def _run_scorer(scorer: Scorer) -> ScorerResult | tuple[str, Exception]:
+            scorer_name = getattr(scorer, "_name", type(scorer).__name__)
+            async with sem:
+                try:
+                    return await scorer.score(case_id, input, output)
+                except Exception as exc:
+                    return (scorer_name, exc)
+
+        raw_results = await asyncio.gather(*(_run_scorer(s) for s in self._scorers))
+
+        scores: dict[str, float] = {}
+        for item in raw_results:
+            if isinstance(item, ScorerResult):
+                scores[item.scorer_name] = item.score
+            else:
+                scorer_name, exc = item
+                logger.warning(
+                    "Scorer %r failed case=%s: %s",
+                    scorer_name,
+                    case_id,
+                    exc,
+                    exc_info=True,
+                )
+                # Record a zero-score sentinel so a scorer failure is
+                # distinguishable from a genuine 0.0 score in pass@k / threshold
+                # logic — callers can detect "error" in the details dict.
+                scores[scorer_name] = 0.0
+                state.metadata.setdefault("scorer_failures", []).append(
+                    {
+                        "scorer": scorer_name,
+                        "case_id": case_id,
+                        "error": str(exc),
+                        "exc_type": type(exc).__name__,
+                    }
+                )
         state.record_score(scores)
         return scores
 

@@ -7,6 +7,8 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
 
+from exo.eval.base import EvalError  # pyright: ignore[reportMissingImports]
+
 # ---------------------------------------------------------------------------
 # Enums
 # ---------------------------------------------------------------------------
@@ -54,8 +56,11 @@ class ValidationConfig:
 
     def __post_init__(self) -> None:
         if not 0.0 <= self.min_score_threshold <= 1.0:
-            msg = f"min_score_threshold must be in [0, 1], got {self.min_score_threshold}"
-            raise ValueError(msg)
+            raise EvalError(
+                f"min_score_threshold must be in [0, 1], got {self.min_score_threshold}",
+                context={"min_score_threshold": self.min_score_threshold},
+                hint="Set min_score_threshold to a value between 0.0 and 1.0 (e.g. 0.5).",
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,12 +81,19 @@ class StopConditionConfig:
     max_cost: float = 0.0
     max_consecutive_failures: int = 3
     score_threshold: float = 0.0
+    # NOTE: enable_user_interrupt is accepted for forward-compatibility but is
+    # not yet wired to a USER_INTERRUPTED detector.  Setting it to True has no
+    # effect in the current implementation.  A future release will add a
+    # signal/event-based detector that raises StopType.USER_INTERRUPTED.
     enable_user_interrupt: bool = False
 
     def __post_init__(self) -> None:
         if self.max_iterations < 1:
-            msg = f"max_iterations must be >= 1, got {self.max_iterations}"
-            raise ValueError(msg)
+            raise EvalError(
+                f"max_iterations must be >= 1, got {self.max_iterations}",
+                context={"max_iterations": self.max_iterations},
+                hint="Set max_iterations to at least 1 (e.g. max_iterations=10).",
+            )
 
 
 # ---------------------------------------------------------------------------

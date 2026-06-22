@@ -55,8 +55,10 @@ class ContextProcessor(ABC):
 
     def __init__(self, event: str, *, name: str | None = None) -> None:
         if not event:
-            msg = "event must be a non-empty string"
-            raise ProcessorError(msg)
+            raise ProcessorError(
+                "event must be a non-empty string.",
+                hint="Pass a non-empty event string, e.g. 'pre_llm_call' or 'post_tool_call'.",
+            )
         self._event = event
         self._name = name or type(self).__name__
 
@@ -132,9 +134,11 @@ class ProcessorPipeline:
             Optional event-specific data dict.  Defaults to ``{}``.
         """
         data = payload if payload is not None else {}
-        processors = self._processors.get(event, [])
+        # Snapshot the list so a processor that unregisters itself during
+        # iteration cannot corrupt the loop or skip a sibling processor.
+        processors = list(self._processors.get(event, []))
         if processors:
-            logger.debug("Processing context with %d neurons", len(processors))
+            logger.debug("Processing context with %d processors", len(processors))
         for proc in processors:
             logger.debug("running processor %r for event %r", proc.name, event)
             await proc.process(ctx, data)
@@ -295,6 +299,9 @@ class DialogueCompressor(ContextProcessor):
             summary_msg: dict[str, str] = {"role": "system", "content": summary}
             history[start:end] = [summary_msg]
 
+        # Explicit write-back so the state store always reflects the mutated list
+        # (in-place slice mutation of the alias is not sufficient for all state backends).
+        ctx.state.set("history", history)
         logger.debug("DialogueCompressor: compressed %d tool chains", len(chains))
 
     def _find_tool_chains(self, history: list[Any]) -> list[tuple[int, int]]:
@@ -372,5 +379,3 @@ class DialogueCompressor(ContextProcessor):
             f"[Tool chain compressed — called {tools_str} "
             f"({len(tool_names)} calls). Results: {results_str}]"
         )
-
-

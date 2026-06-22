@@ -635,3 +635,74 @@ class TestGetNested:
 
     def test_top_level_list(self) -> None:
         assert _get_nested([10, 20, 30], "1") == 20
+
+
+# ---------------------------------------------------------------------------
+# Persistent HTTP client / aclose / async context manager (finding #3)
+# ---------------------------------------------------------------------------
+
+
+class TestPersistentClientOpenAI:
+    def test_client_is_none_before_first_call(self) -> None:
+        e = OpenAIEmbeddings(api_key="test")
+        assert e._client is None
+
+    def test_get_client_creates_client(self) -> None:
+        e = OpenAIEmbeddings(api_key="test")
+        c = e._get_client()
+        assert c is not None
+        assert isinstance(c, httpx.AsyncClient)
+
+    def test_get_client_reuses_same_instance(self) -> None:
+        e = OpenAIEmbeddings(api_key="test")
+        c1 = e._get_client()
+        c2 = e._get_client()
+        assert c1 is c2
+
+    async def test_aclose_closes_client(self) -> None:
+        e = OpenAIEmbeddings(api_key="test")
+        _ = e._get_client()
+        assert not e._client.is_closed  # type: ignore[union-attr]
+        await e.aclose()
+        assert e._client.is_closed  # type: ignore[union-attr]
+
+    async def test_aclose_noop_when_no_client(self) -> None:
+        e = OpenAIEmbeddings(api_key="test")
+        # Should not raise
+        await e.aclose()
+
+    async def test_async_context_manager(self) -> None:
+        async with OpenAIEmbeddings(api_key="test") as e:
+            _ = e._get_client()
+            assert not e._client.is_closed  # type: ignore[union-attr]
+        assert e._client.is_closed  # type: ignore[union-attr]
+
+
+class TestPersistentClientVertex:
+    def test_client_is_none_before_first_call(self) -> None:
+        e = VertexEmbeddings(api_key="tok", project="proj")
+        assert e._client is None
+
+    async def test_aclose_noop_when_no_client(self) -> None:
+        e = VertexEmbeddings(api_key="tok", project="proj")
+        await e.aclose()  # should not raise
+
+    async def test_async_context_manager(self) -> None:
+        async with VertexEmbeddings(api_key="tok", project="proj") as e:
+            _ = e._get_client()
+        assert e._client.is_closed  # type: ignore[union-attr]
+
+
+class TestPersistentClientHTTP:
+    def test_client_is_none_before_first_call(self) -> None:
+        e = HTTPEmbeddings(url="http://example.com", dimension=128)
+        assert e._client is None
+
+    async def test_aclose_noop_when_no_client(self) -> None:
+        e = HTTPEmbeddings(url="http://example.com", dimension=128)
+        await e.aclose()  # should not raise
+
+    async def test_async_context_manager(self) -> None:
+        async with HTTPEmbeddings(url="http://example.com", dimension=128) as e:
+            _ = e._get_client()
+        assert e._client.is_closed  # type: ignore[union-attr]

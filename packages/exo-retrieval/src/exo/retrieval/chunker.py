@@ -12,9 +12,16 @@ Strategies:
 from __future__ import annotations
 
 import abc
+import logging
 import re
 
-from exo.retrieval.types import Chunk, Document  # pyright: ignore[reportMissingImports]
+from exo.retrieval.types import (  # pyright: ignore[reportMissingImports]
+    Chunk,
+    Document,
+    RetrievalError,
+)
+
+logger = logging.getLogger(__name__)
 
 
 class Chunker(abc.ABC):
@@ -45,11 +52,20 @@ class CharacterChunker(Chunker):
 
     def __init__(self, chunk_size: int = 500, chunk_overlap: int = 50) -> None:
         if chunk_size <= 0:
-            raise ValueError("chunk_size must be positive")
+            raise RetrievalError(
+                "chunk_size must be positive",
+                hint="chunk_size must be a positive integer; chunk_overlap must be less than chunk_size.",
+            )
         if chunk_overlap < 0:
-            raise ValueError("chunk_overlap must be non-negative")
+            raise RetrievalError(
+                "chunk_overlap must be non-negative",
+                hint="chunk_size must be a positive integer; chunk_overlap must be less than chunk_size.",
+            )
         if chunk_overlap >= chunk_size:
-            raise ValueError("chunk_overlap must be less than chunk_size")
+            raise RetrievalError(
+                "chunk_overlap must be less than chunk_size",
+                hint="chunk_size must be a positive integer; chunk_overlap must be less than chunk_size.",
+            )
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
 
@@ -106,7 +122,10 @@ class ParagraphChunker(Chunker):
 
     def __init__(self, chunk_size: int = 1000) -> None:
         if chunk_size <= 0:
-            raise ValueError("chunk_size must be positive")
+            raise RetrievalError(
+                "chunk_size must be positive",
+                hint="chunk_size must be a positive integer.",
+            )
         self.chunk_size = chunk_size
 
     def chunk(self, document: Document) -> list[Chunk]:
@@ -128,9 +147,8 @@ class ParagraphChunker(Chunker):
         chunks: list[Chunk] = []
         current_parts: list[str] = []
         current_start: int | None = None
+        current_end: int = 0
         current_len = 0
-        # Track position in original text
-        pos = 0
         para_positions: list[tuple[str, int]] = []
 
         # Find each paragraph's start position in the original text
@@ -142,11 +160,12 @@ class ParagraphChunker(Chunker):
 
         index = 0
         for para, para_start in para_positions:
+            para_end = para_start + len(para)
             sep = "\n\n" if current_parts else ""
             would_be = current_len + len(sep) + len(para)
 
             if current_parts and would_be > self.chunk_size:
-                # Flush current buffer
+                # Flush current buffer — use tracked end, not re-joined length
                 content = "\n\n".join(current_parts)
                 assert current_start is not None
                 chunks.append(
@@ -155,18 +174,20 @@ class ParagraphChunker(Chunker):
                         index=index,
                         content=content,
                         start=current_start,
-                        end=current_start + len(content),
+                        end=current_end,
                         metadata=dict(document.metadata),
                     )
                 )
                 index += 1
                 current_parts = [para]
                 current_start = para_start
+                current_end = para_end
                 current_len = len(para)
             else:
                 if not current_parts:
                     current_start = para_start
                 current_parts.append(para)
+                current_end = para_end
                 current_len = current_len + len(sep) + len(para)
 
         # Flush remaining
@@ -179,7 +200,7 @@ class ParagraphChunker(Chunker):
                     index=index,
                     content=content,
                     start=current_start,
-                    end=current_start + len(content),
+                    end=current_end,
                     metadata=dict(document.metadata),
                 )
             )
@@ -206,11 +227,20 @@ class TokenChunker(Chunker):
         encoding: str = "cl100k_base",
     ) -> None:
         if chunk_size <= 0:
-            raise ValueError("chunk_size must be positive")
+            raise RetrievalError(
+                "chunk_size must be positive",
+                hint="chunk_size must be a positive integer; chunk_overlap must be less than chunk_size.",
+            )
         if chunk_overlap < 0:
-            raise ValueError("chunk_overlap must be non-negative")
+            raise RetrievalError(
+                "chunk_overlap must be non-negative",
+                hint="chunk_size must be a positive integer; chunk_overlap must be less than chunk_size.",
+            )
         if chunk_overlap >= chunk_size:
-            raise ValueError("chunk_overlap must be less than chunk_size")
+            raise RetrievalError(
+                "chunk_overlap must be less than chunk_size",
+                hint="chunk_size must be a positive integer; chunk_overlap must be less than chunk_size.",
+            )
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
         self._encoding_name = encoding
@@ -225,6 +255,11 @@ class TokenChunker(Chunker):
                 enc = tiktoken.get_encoding(self._encoding_name)
                 self._encoder = _TiktokenEncoder(enc)
             except ModuleNotFoundError:
+                logger.warning(
+                    "tiktoken is not installed; TokenChunker is using a whitespace fallback"
+                    " tokenizer. Install tiktoken for accurate token-based chunking:"
+                    " pip install tiktoken"
+                )
                 self._encoder = _WhitespaceEncoder()
         return self._encoder
 
@@ -315,7 +350,16 @@ class _TiktokenEncoder(_TokenEncoder):
             # Find the decoded text in the original starting from offset
             idx = text.find(decoded, offset)
             if idx == -1:
-                # Fallback: use offset directly
+                # Token decode did not round-trip cleanly (e.g. byte-level BPE
+                # tokens that form invalid UTF-8 substrings in isolation).
+                # Fall back to current offset so the span is contiguous.
+                logger.warning(
+                    "_TiktokenEncoder: decoded token %r not found in text at offset %d;"
+                    " falling back to current offset. Chunk character offsets may be"
+                    " slightly inaccurate near this position.",
+                    decoded,
+                    offset,
+                )
                 idx = offset
             end = idx + len(decoded)
             spans.append((tok_id, idx, end))

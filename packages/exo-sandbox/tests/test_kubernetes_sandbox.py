@@ -149,8 +149,10 @@ class TestStart:
         assert sb.pod_name == "exo-s1"
         api.create_namespaced_pod.assert_called_once()
         # Service must NOT be created
-        assert not hasattr(api, "create_namespaced_service") or \
-            api.create_namespaced_service.call_count == 0
+        assert (
+            not hasattr(api, "create_namespaced_service")
+            or api.create_namespaced_service.call_count == 0
+        )
 
     async def test_start_waits_for_pod_ready(self) -> None:
         sb = KubernetesSandbox(sandbox_id="s2")
@@ -180,7 +182,9 @@ class TestStart:
         assert sb.status == SandboxStatus.ERROR
 
     async def test_start_pod_timeout(self) -> None:
-        sb = KubernetesSandbox(sandbox_id="s4")
+        # Use a short timeout AND small _MAX_POLL_ATTEMPTS so the test exits quickly
+        # regardless of which bound is hit first.
+        sb = KubernetesSandbox(sandbox_id="s4", timeout=0.1)
         api = _mock_k8s_api()
 
         # Pod never becomes Running
@@ -190,7 +194,7 @@ class TestStart:
 
         sb._k8s_client = api
 
-        # Patch _MAX_POLL_ATTEMPTS to avoid long test
+        # Patch _MAX_POLL_ATTEMPTS and _POLL_INTERVAL to bound the test duration
         with (
             patch("exo.sandbox.kubernetes._MAX_POLL_ATTEMPTS", 2),
             patch("exo.sandbox.kubernetes._POLL_INTERVAL", 0.01),
@@ -285,6 +289,20 @@ class TestRunTool:
 
         result = await sb.run_tool("echo", {"message": "via register"})
         assert result == {"echo": "via register"}
+
+    async def test_run_tool_register_name_handler_form(self) -> None:
+        """K8s also accepts the name+handler form: register_tool(name, handler)."""
+        sb = KubernetesSandbox(sandbox_id="s9c")
+        api = _mock_k8s_api()
+        sb._k8s_client = api
+        await sb.start()
+
+        async def handler(sandbox: KubernetesSandbox, args: dict) -> dict:
+            return {"via_handler": args.get("x")}
+
+        sb.register_tool("custom", handler)
+        result = await sb.run_tool("custom", {"x": 42})
+        assert result == {"via_handler": 42}
 
     async def test_run_tool_not_running(self) -> None:
         sb = KubernetesSandbox(sandbox_id="s10")

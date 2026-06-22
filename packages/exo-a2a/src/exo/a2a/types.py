@@ -15,11 +15,14 @@ from pydantic import BaseModel, Field, model_validator
 class TransportMode(StrEnum):
     """Supported A2A transport protocols.
 
-    Only ``JSONRPC`` is implemented; the enum exists to allow future transports
-    to be added without a breaking API change.
+    The current implementation uses plain HTTP POST (not JSON-RPC 2.0 framing),
+    so ``JSONRPC`` is a historical misnomer — the protocol is plain HTTP/REST.
+    ``HTTP`` is provided as the preferred name going forward; ``JSONRPC`` is a
+    deprecated alias (same wire value ``"jsonrpc"``) kept for back-compat.
     """
 
-    JSONRPC = "jsonrpc"
+    JSONRPC = "jsonrpc"  # deprecated — use HTTP
+    HTTP = "jsonrpc"  # preferred name — same wire value as JSONRPC
 
 
 class TaskState(StrEnum):
@@ -273,17 +276,34 @@ class ServingConfig(BaseModel):
 
 
 class ClientConfig(BaseModel):
-    """Client-side configuration for connecting to a remote A2A agent."""
+    """Client-side configuration for connecting to a remote A2A agent.
+
+    **Reserved / not yet wired:**
+    - ``streaming``: reserved for future use; ``send_task_collect()`` already
+      respects ``card.capabilities.streaming`` from the remote agent card.
+    - ``transports``: reserved for future transport negotiation; HTTP POST is
+      the only transport currently implemented.
+    - ``accepted_output_modes``: reserved for future content-negotiation; the
+      server always returns text today.
+    """
 
     model_config = {"frozen": True}
 
-    streaming: bool = Field(default=False, description="Request streaming")
+    streaming: bool = Field(
+        default=False,
+        description="Reserved — not yet consulted. Use card.capabilities.streaming.",
+    )
     timeout: float = Field(default=600.0, gt=0, description="Request timeout (sec)")
+    max_retries: int = Field(
+        default=1, ge=1, description="Max attempts per HTTP call (1 = no retry)"
+    )
+    retry_delay: float = Field(default=0.5, gt=0, description="Base delay between retries (sec)")
     transports: tuple[TransportMode, ...] = Field(
-        default=(TransportMode.JSONRPC,), description="Preferred transports"
+        default=(TransportMode.HTTP,),
+        description="Reserved — not yet consulted. HTTP POST is the only transport.",
     )
     accepted_output_modes: tuple[str, ...] = Field(
-        default=(), description="Accepted output formats (empty = any)"
+        default=(), description="Reserved — not yet consulted. Server always returns text."
     )
     extra: dict[str, Any] = Field(
         default_factory=dict, description="Extension point for custom config"

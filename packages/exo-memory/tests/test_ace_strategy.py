@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from exo.memory.base import MemoryItem  # pyright: ignore[reportMissingImports]
+from exo.memory.base import ExoMemoryError, MemoryItem  # pyright: ignore[reportMissingImports]
 from exo.memory.evolution.ace import (  # pyright: ignore[reportMissingImports]
     ACEStrategy,
     Counters,
@@ -122,7 +122,7 @@ class TestACEStrategy:
 
     def test_record_invalid_label(self) -> None:
         strategy = ACEStrategy()
-        with pytest.raises(ValueError, match="Invalid label"):
+        with pytest.raises(ExoMemoryError, match="Invalid feedback label"):
             strategy.record("x", "unknown")
 
     def test_get_counters_creates_default(self) -> None:

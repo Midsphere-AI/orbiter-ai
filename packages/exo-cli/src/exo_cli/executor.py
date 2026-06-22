@@ -24,6 +24,7 @@ from typing import Any
 from rich.console import Console as RichConsole
 from rich.panel import Panel
 
+from exo._internal.errors import unwrap_exception_group  # pyright: ignore[reportMissingImports]
 from exo.types import ExoError  # pyright: ignore[reportMissingImports]
 
 # ---------------------------------------------------------------------------
@@ -142,7 +143,9 @@ class LocalExecutor:
         self._provider = provider
         self._timeout = timeout
         self._max_retries = max_retries
-        self._console = console or RichConsole(stderr=True)
+        # Default to stdout so primary results go to stdout; callers can pass a
+        # stderr console explicitly for diagnostics/verbose output.
+        self._console = console or RichConsole()
         self._verbose = verbose
 
     # -- properties ----------------------------------------------------------
@@ -188,9 +191,18 @@ class LocalExecutor:
             else:
                 raw = await coro
         except TimeoutError as exc:
-            raise ExecutorError(f"Execution timed out after {self._timeout:.1f}s") from exc
+            raise ExecutorError(
+                f"Execution timed out after {self._timeout:.1f}s",
+                context={"agent": getattr(self._agent, "name", "?"), "timeout": self._timeout},
+                hint="Increase the --timeout flag or simplify the input.",
+            ) from exc
         except Exception as exc:
-            raise ExecutorError(f"Agent execution failed: {exc}") from exc
+            real = unwrap_exception_group(exc)
+            raise ExecutorError(
+                f"Agent execution failed: {real}",
+                context={"agent": getattr(self._agent, "name", "?")},
+                hint="Check the agent configuration and that your API key is set.",
+            ) from real
         elapsed = time.monotonic() - t0
 
         # Extract usage from RunResult
@@ -235,18 +247,41 @@ class LocalExecutor:
         if stream_fn is None:
             raise ExecutorError("Streaming not available (run.stream not found)")
 
+        agent_name = getattr(self._agent, "name", "?")
         try:
-            async for event in stream_fn(
+            stream_iter = stream_fn(
                 self._agent,
                 input,
                 messages=messages,
                 provider=self._provider,
-            ):
-                text = getattr(event, "text", None)
-                if text:
-                    yield text
+            )
+            if self._timeout > 0:
+                # asyncio.timeout (Python 3.11+) wraps the entire async-for so
+                # a stalled stream (no chunks arriving) is actually cancelled.
+                # Using get_running_loop() rather than the deprecated get_event_loop().
+                async with asyncio.timeout(self._timeout):
+                    async for event in stream_iter:
+                        text = getattr(event, "text", None)
+                        if text:
+                            yield text
+            else:
+                async for event in stream_iter:
+                    text = getattr(event, "text", None)
+                    if text:
+                        yield text
+        except TimeoutError as exc:
+            raise ExecutorError(
+                f"Streaming timed out after {self._timeout:.1f}s",
+                context={"agent": agent_name, "timeout": self._timeout},
+                hint="Increase the --timeout flag or check for a stalled LLM stream.",
+            ) from exc
         except Exception as exc:
-            raise ExecutorError(f"Streaming failed: {exc}") from exc
+            real = unwrap_exception_group(exc)
+            raise ExecutorError(
+                f"Streaming failed: {real}",
+                context={"agent": agent_name},
+                hint="Check that the model supports streaming and that your API key is set.",
+            ) from real
 
     # -- display helpers -----------------------------------------------------
 

@@ -8,10 +8,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+from pydantic import ValidationError
 
 from exo_server.app import (
     ChatRequest,
     ChatResponse,
+    InjectRequest,
     _get_agent,
     create_app,
     register_agent,
@@ -217,6 +219,10 @@ class TestChatEndpoint:
 
 
 class TestChatStreaming:
+    # The /chat streaming path delegates to _sse_iter in exo_server.streaming,
+    # so mock the _run_agent there (not in exo_server.app).
+    _STREAM_PATCH = "exo_server.streaming._run_agent"
+
     async def test_stream_text_events(self) -> None:
         app = create_app()
         register_agent(app, _mock_agent("bot"))
@@ -231,7 +237,7 @@ class TestChatStreaming:
         mock_run = MagicMock()
         mock_run.stream = _fake_stream
 
-        with patch("exo_server.app._run_agent", mock_run):
+        with patch(self._STREAM_PATCH, mock_run):
             async with _build_client(app) as client:
                 resp = await client.post("/chat", json={"message": "hi", "stream": True})
 
@@ -255,7 +261,7 @@ class TestChatStreaming:
         mock_run = MagicMock()
         mock_run.stream = _fake_stream
 
-        with patch("exo_server.app._run_agent", mock_run):
+        with patch(self._STREAM_PATCH, mock_run):
             async with _build_client(app) as client:
                 resp = await client.post("/chat", json={"message": "hi", "stream": True})
 
@@ -275,7 +281,7 @@ class TestChatStreaming:
         mock_run = MagicMock()
         mock_run.stream = _fake_stream
 
-        with patch("exo_server.app._run_agent", mock_run):
+        with patch(self._STREAM_PATCH, mock_run):
             async with _build_client(app) as client:
                 resp = await client.post("/chat", json={"message": "hi", "stream": True})
 
@@ -292,13 +298,107 @@ class TestChatStreaming:
         mock_run = MagicMock()
         mock_run.stream = _fake_stream
 
-        with patch("exo_server.app._run_agent", mock_run):
+        with patch(self._STREAM_PATCH, mock_run):
             async with _build_client(app) as client:
                 resp = await client.post("/chat", json={"message": "hi", "stream": True})
 
         lines = [line for line in resp.text.strip().split("\n") if line.startswith("data:")]
         error_line = json.loads(lines[0].removeprefix("data: "))
         assert "error" in error_line
+
+
+# ---------------------------------------------------------------------------
+# /inject endpoint
+# ---------------------------------------------------------------------------
+
+
+class TestInjectRequest:
+    def test_empty_message_raises(self) -> None:
+        with pytest.raises(ValidationError):
+            InjectRequest(message="")
+
+    def test_whitespace_only_message_raises(self) -> None:
+        with pytest.raises(ValidationError):
+            InjectRequest(message="   ")
+
+    def test_valid_message(self) -> None:
+        req = InjectRequest(message="hello")
+        assert req.message == "hello"
+
+    def test_with_agent_name(self) -> None:
+        req = InjectRequest(message="hi", agent_name="bot")
+        assert req.agent_name == "bot"
+
+
+class TestInjectEndpoint:
+    async def test_inject_success(self) -> None:
+        app = create_app()
+        agent = _mock_agent("bot")
+        agent.inject_message = MagicMock()
+        register_agent(app, agent)
+
+        async with _build_client(app) as client:
+            resp = await client.post("/inject", json={"message": "hello"})
+
+        assert resp.status_code == 200
+        assert resp.json() == {"status": "injected"}
+        agent.inject_message.assert_called_once_with("hello")
+
+    async def test_inject_empty_message_422(self) -> None:
+        """Empty message must be rejected at the model level (422)."""
+        app = create_app()
+        register_agent(app, _mock_agent("bot"))
+
+        async with _build_client(app) as client:
+            resp = await client.post("/inject", json={"message": ""})
+
+        assert resp.status_code == 422
+
+    async def test_inject_no_agents_503(self) -> None:
+        app = create_app()
+
+        async with _build_client(app) as client:
+            resp = await client.post("/inject", json={"message": "hello"})
+
+        assert resp.status_code == 503
+
+    async def test_inject_agent_not_found_404(self) -> None:
+        app = create_app()
+        register_agent(app, _mock_agent("bot"))
+
+        async with _build_client(app) as client:
+            resp = await client.post("/inject", json={"message": "hello", "agent_name": "nope"})
+
+        assert resp.status_code == 404
+
+    async def test_inject_value_error_422(self) -> None:
+        """If agent.inject_message raises ValueError it should become HTTP 422."""
+        app = create_app()
+        agent = _mock_agent("bot")
+        agent.inject_message = MagicMock(side_effect=ValueError("bad message"))
+        register_agent(app, agent)
+
+        async with _build_client(app) as client:
+            resp = await client.post("/inject", json={"message": "hello"})
+
+        assert resp.status_code == 422
+        assert "bad message" in resp.json()["detail"]
+
+    async def test_inject_with_agent_name(self) -> None:
+        app = create_app()
+        agent_a = _mock_agent("a")
+        agent_b = _mock_agent("b")
+        agent_a.inject_message = MagicMock()
+        agent_b.inject_message = MagicMock()
+        register_agent(app, agent_a)
+        register_agent(app, agent_b)
+
+        async with _build_client(app) as client:
+            resp = await client.post("/inject", json={"message": "hi", "agent_name": "b"})
+
+        assert resp.status_code == 200
+        agent_b.inject_message.assert_called_once_with("hi")
+        agent_a.inject_message.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

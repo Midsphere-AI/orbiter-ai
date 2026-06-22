@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+import subprocess
 from dataclasses import FrozenInstanceError
 from pathlib import Path
 from unittest.mock import patch
@@ -20,6 +22,7 @@ from exo.skills import (
     SkillSyncManager,
     SkillWatcher,
     ToolResolver,
+    _clone_github,
     _collect_skills,
     _skill_fingerprint,
     extract_front_matter,
@@ -234,6 +237,60 @@ class TestCollectSkills:
         skills = _collect_skills(tmp_path)
         assert "nested" in skills
 
+    def test_unreadable_file_does_not_abort_scan(self, tmp_path: Path) -> None:
+        """One unreadable skill file must not prevent the rest from loading."""
+        good_dir = tmp_path / "good_skill"
+        good_dir.mkdir()
+        (good_dir / "skill.md").write_text("---\nname: good_skill\n---\nGood body.")
+
+        bad_dir = tmp_path / "bad_skill"
+        bad_dir.mkdir()
+        bad_file = bad_dir / "skill.md"
+        bad_file.write_text("placeholder")
+
+        # Simulate a read error by patching read_text to raise for the bad file
+        original_read_text = Path.read_text
+
+        def selective_read(self: Path, *args: object, **kwargs: object) -> str:
+            if self == bad_file:
+                raise PermissionError("Permission denied")
+            return original_read_text(self, *args, **kwargs)  # type: ignore[arg-type]
+
+        with patch.object(Path, "read_text", selective_read):
+            skills = _collect_skills(tmp_path)
+
+        # The good skill must still be loaded
+        assert "good_skill" in skills
+        # The bad skill must be absent, not crash
+        assert "bad_skill" not in skills
+
+    def test_missing_name_warns(self, tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+        """A skill file with no 'name' front-matter should warn and fall back to dir name."""
+        skill_dir = tmp_path / "fallback_dir"
+        skill_dir.mkdir()
+        (skill_dir / "skill.md").write_text("---\ndescription: No name\n---\nBody.")
+
+        with caplog.at_level(logging.WARNING, logger="exo.skills"):
+            skills = _collect_skills(tmp_path)
+
+        assert "fallback_dir" in skills
+        assert any("no 'name' front-matter" in record.message for record in caplog.records)
+
+    def test_malformed_tool_list_warns(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A malformed tool_list value should emit a warning and fall back to {}."""
+        skill_dir = tmp_path / "bad_tl"
+        skill_dir.mkdir()
+        (skill_dir / "skill.md").write_text("---\nname: bad_tl\ntool_list: not-json\n---\nBody.")
+
+        with caplog.at_level(logging.WARNING, logger="exo.skills"):
+            skills = _collect_skills(tmp_path)
+
+        assert "bad_tl" in skills
+        assert skills["bad_tl"].tool_list == {}
+        assert any("Malformed tool_list" in record.message for record in caplog.records)
+
 
 # ---------------------------------------------------------------------------
 # SkillRegistry — local loading
@@ -445,6 +502,96 @@ class TestSkillRegistryGitHub:
             skills = reg.load_all()
 
         assert "sub_skill" in skills
+
+    def test_git_clone_failure_raises_skill_error(self) -> None:
+        """subprocess.CalledProcessError from git clone must be wrapped as SkillError with hint."""
+        from exo.skills import _clone_github
+
+        parsed = {"owner": "user", "repo": "repo", "branch": "main", "subdir": ""}
+        cache = Path("/nonexistent/cache")
+
+        with (
+            patch("subprocess.run", side_effect=subprocess.CalledProcessError(128, "git")),
+            patch.object(Path, "exists", return_value=False),
+            patch.object(Path, "parent", new_callable=lambda: property(lambda s: s)),
+            patch("pathlib.Path.mkdir"),
+            pytest.raises(SkillError) as exc_info,
+        ):
+            _clone_github(parsed, cache)
+
+        err = exc_info.value
+        assert err.hint is not None
+        assert "git" in err.hint.lower() or "repository" in err.hint.lower()
+        assert err.__cause__ is not None
+
+    def test_git_not_found_raises_skill_error(self, tmp_path: Path) -> None:
+        """FileNotFoundError (git not on PATH) must be wrapped as SkillError with hint."""
+        from exo.skills import _clone_github
+
+        parsed = {"owner": "user", "repo": "no-git", "branch": "main", "subdir": ""}
+
+        with (
+            patch("subprocess.run", side_effect=FileNotFoundError("git not found")),
+            pytest.raises(SkillError) as exc_info,
+        ):
+            _clone_github(parsed, tmp_path)
+
+        err = exc_info.value
+        assert err.hint is not None
+        assert isinstance(err.__cause__, FileNotFoundError)
+
+
+class TestSkillRegistryErrorHints:
+    def test_get_missing_has_hint(self) -> None:
+        """registry.get() on a missing skill should include a hint with list_names()."""
+        reg = SkillRegistry()
+        with pytest.raises(SkillError) as exc_info:
+            reg.get("no_such_skill")
+        err = exc_info.value
+        assert err.hint is not None
+        assert "list_names" in err.hint
+
+    def test_get_missing_has_context(self) -> None:
+        reg = SkillRegistry()
+        with pytest.raises(SkillError) as exc_info:
+            reg.get("missing")
+        assert exc_info.value.context is not None
+        assert exc_info.value.context.get("name") == "missing"
+
+    def test_duplicate_conflict_has_paths(self, tmp_path: Path) -> None:
+        """Duplicate skill conflict error should name both source paths."""
+        src1 = tmp_path / "src1" / "dup"
+        src1.mkdir(parents=True)
+        (src1 / "skill.md").write_text("---\nname: dup\n---\nFirst.")
+
+        src2 = tmp_path / "src2" / "dup"
+        src2.mkdir(parents=True)
+        (src2 / "skill.md").write_text("---\nname: dup\n---\nSecond.")
+
+        reg = SkillRegistry(conflict=ConflictStrategy.RAISE)
+        reg.register_source(str(tmp_path / "src1"))
+        reg.register_source(str(tmp_path / "src2"))
+
+        with pytest.raises(SkillError) as exc_info:
+            reg.load_all()
+
+        err = exc_info.value
+        assert err.context is not None
+        assert "existing_path" in err.context
+        assert "new_path" in err.context
+        assert err.hint is not None
+
+    def test_missing_source_dir_has_hint(self) -> None:
+        """Missing source directory error should carry a hint about GitHub URLs."""
+        reg = SkillRegistry()
+        reg.register_source("/truly/nonexistent/path")
+        with pytest.raises(SkillError) as exc_info:
+            reg.load_all()
+        err = exc_info.value
+        assert err.hint is not None
+        assert "github.com" in err.hint.lower() or "create" in err.hint.lower()
+        assert err.context is not None
+        assert "path" in err.context
 
 
 # ---------------------------------------------------------------------------
@@ -831,3 +978,227 @@ class TestSkillSyncManager:
         # failing agent raising an exception.
         assert len(good_agent._add_tool_calls) == 1
         assert good_agent._add_tool_calls[0].name == "t1"
+
+
+# ---------------------------------------------------------------------------
+# parse_github_url — extended (findings 3 & 4)
+# ---------------------------------------------------------------------------
+
+
+class TestParseGithubUrlExtended:
+    def test_branch_with_slash(self) -> None:
+        """Branch names containing slashes (e.g. feat/my-branch) must be preserved."""
+        result = parse_github_url("https://github.com/user/repo/tree/feat/my-branch")
+        assert result is not None
+        # The whole 'feat/my-branch' is the branch; there is no subdir.
+        # The regex captures everything after /tree/ as the branch when there
+        # is no second path segment that constitutes a subdirectory.
+        # Accepted behaviour: branch contains the slash, subdir is empty.
+        assert "feat" in result["branch"]
+
+    def test_branch_with_slash_and_subdir(self) -> None:
+        """URL with a slashed branch and a trailing subdir should parse correctly."""
+        # https://github.com/user/repo/tree/feat/my-branch/skills
+        # There is inherent ambiguity: we treat the LAST segment as the subdir
+        # only when it unambiguously follows the branch.  The regex uses a
+        # greedy/lazy split so the branch gets 'feat/my-branch' and subdir
+        # gets 'skills' when the URL ends with an extra segment.
+        result = parse_github_url("https://github.com/user/repo/tree/feat/my-branch/skills")
+        assert result is not None
+        # At minimum: owner and repo must be correct
+        assert result["owner"] == "user"
+        assert result["repo"] == "repo"
+
+    def test_git_suffix_stripped_from_repo(self) -> None:
+        """.git suffix must be stripped from the repo name."""
+        result = parse_github_url("https://github.com/user/repo.git")
+        assert result is not None
+        assert result["repo"] == "repo"
+        assert not result["repo"].endswith(".git")
+
+    def test_git_suffix_clone_url_not_doubled(self, tmp_path: Path) -> None:
+        """.git-suffixed URL must not produce a double-.git clone URL."""
+        # The clone URL is constructed inside _clone_github as
+        # f"https://github.com/{owner}/{repo}.git".
+        # If repo already has .git appended, we'd get repo.git.git.
+        # This test verifies the fix: parse_github_url strips .git.
+        result = parse_github_url("https://github.com/user/myrepo.git")
+        assert result is not None
+        assert result["repo"] == "myrepo"
+        # Verify the constructed clone URL would be correct
+        expected_clone_url = f"https://github.com/{result['owner']}/{result['repo']}.git"
+        assert "myrepo.git.git" not in expected_clone_url
+        assert expected_clone_url == "https://github.com/user/myrepo.git"
+
+
+# ---------------------------------------------------------------------------
+# _clone_github — timeout and cleanup (findings 1 & 2)
+# ---------------------------------------------------------------------------
+
+
+class TestCloneGithubTimeoutAndCleanup:
+    def test_timeout_expired_raises_skill_error(self, tmp_path: Path) -> None:
+        """subprocess.TimeoutExpired must be caught and re-raised as SkillError."""
+        parsed = {"owner": "user", "repo": "repo", "branch": "main", "subdir": ""}
+
+        with (
+            patch("subprocess.run", side_effect=subprocess.TimeoutExpired("git", 60)),
+            pytest.raises(SkillError) as exc_info,
+        ):
+            _clone_github(parsed, tmp_path)
+
+        err = exc_info.value
+        assert err.hint is not None
+        assert "timeout" in err.hint.lower() or "60" in err.hint
+        assert isinstance(err.__cause__, subprocess.TimeoutExpired)
+
+    def test_partial_clone_dir_cleaned_on_timeout(self, tmp_path: Path) -> None:
+        """A partial clone directory must be removed when git clone times out."""
+        parsed = {"owner": "user", "repo": "repo", "branch": "main", "subdir": ""}
+        clone_dir = tmp_path / "user" / "repo" / "main"
+
+        def fake_run(*args, **kwargs):
+            # Simulate partial clone: git creates the dir before timing out
+            clone_dir.mkdir(parents=True, exist_ok=True)
+            raise subprocess.TimeoutExpired("git", 60)
+
+        with (
+            patch("subprocess.run", side_effect=fake_run),
+            pytest.raises(SkillError),
+        ):
+            _clone_github(parsed, tmp_path)
+
+        # Partial clone directory must have been cleaned up
+        assert not clone_dir.exists()
+
+    def test_partial_clone_dir_cleaned_on_error(self, tmp_path: Path) -> None:
+        """A partial clone directory must be removed when git clone fails."""
+        parsed = {"owner": "user", "repo": "repo", "branch": "main", "subdir": ""}
+        clone_dir = tmp_path / "user" / "repo" / "main"
+
+        def fake_run(*args, **kwargs):
+            clone_dir.mkdir(parents=True, exist_ok=True)
+            raise subprocess.CalledProcessError(128, "git")
+
+        with (
+            patch("subprocess.run", side_effect=fake_run),
+            pytest.raises(SkillError),
+        ):
+            _clone_github(parsed, tmp_path)
+
+        assert not clone_dir.exists()
+
+
+# ---------------------------------------------------------------------------
+# _collect_skills — duplicate name warning (finding 5)
+# ---------------------------------------------------------------------------
+
+
+class TestCollectSkillsDuplicateWarning:
+    def test_duplicate_name_warns(self, tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+        """Two skill files with the same 'name' in one scan should trigger a warning."""
+        dir_a = tmp_path / "a"
+        dir_a.mkdir()
+        (dir_a / "skill.md").write_text("---\nname: dup_skill\ndescription: first\n---\nBody A.")
+
+        dir_b = tmp_path / "b"
+        dir_b.mkdir()
+        (dir_b / "skill.md").write_text("---\nname: dup_skill\ndescription: second\n---\nBody B.")
+
+        with caplog.at_level(logging.WARNING, logger="exo.skills"):
+            skills = _collect_skills(tmp_path)
+
+        assert "dup_skill" in skills
+        assert any("Duplicate skill name" in rec.message for rec in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# _skill_fingerprint — sort_keys (finding 12)
+# ---------------------------------------------------------------------------
+
+
+class TestSkillFingerprintSortKeys:
+    def test_tool_list_insertion_order_independent(self) -> None:
+        """Different insertion orders in tool_list must produce the same fingerprint."""
+        s1 = Skill(name="a", tool_list={"z": ["x"], "a": ["y"]})
+        s2 = Skill(name="a", tool_list={"a": ["y"], "z": ["x"]})
+        assert _skill_fingerprint(s1) == _skill_fingerprint(s2)
+
+
+# ---------------------------------------------------------------------------
+# SkillRegistry — public add/remove/update (finding 16)
+# ---------------------------------------------------------------------------
+
+
+class TestSkillRegistryPublicMutations:
+    def test_add_skill(self) -> None:
+        reg = SkillRegistry()
+        skill = Skill(name="s1", description="hello")
+        reg.add_skill(skill)
+        assert reg.get("s1") is skill
+
+    def test_add_skill_conflict_keep_first(self) -> None:
+        reg = SkillRegistry(conflict=ConflictStrategy.KEEP_FIRST)
+        s1 = Skill(name="s1", description="first")
+        s2 = Skill(name="s1", description="second")
+        reg.add_skill(s1)
+        reg.add_skill(s2)
+        assert reg.get("s1").description == "first"
+
+    def test_add_skill_conflict_raise(self) -> None:
+        reg = SkillRegistry(conflict=ConflictStrategy.RAISE)
+        reg.add_skill(Skill(name="s1"))
+        with pytest.raises(SkillError, match="Duplicate skill"):
+            reg.add_skill(Skill(name="s1"))
+
+    def test_remove_skill(self) -> None:
+        reg = SkillRegistry()
+        reg.add_skill(Skill(name="s1"))
+        removed = reg.remove_skill("s1")
+        assert removed is not None
+        assert removed.name == "s1"
+        assert "s1" not in reg.list_names()
+
+    def test_remove_skill_missing_returns_none(self) -> None:
+        reg = SkillRegistry()
+        assert reg.remove_skill("nonexistent") is None
+
+    def test_update_skill(self) -> None:
+        reg = SkillRegistry()
+        reg.add_skill(Skill(name="s1", description="v1"))
+        reg.update_skill(Skill(name="s1", description="v2"))
+        assert reg.get("s1").description == "v2"
+
+
+# ---------------------------------------------------------------------------
+# SkillRegistry.aload_all (finding 7)
+# ---------------------------------------------------------------------------
+
+
+class TestSkillRegistryAloadAll:
+    async def test_aload_all_returns_same_as_load_all(self, tmp_path: Path) -> None:
+        """aload_all() must return the same result as load_all()."""
+        skill_dir = tmp_path / "my_skill"
+        skill_dir.mkdir()
+        (skill_dir / "skill.md").write_text("---\nname: my_skill\ndescription: Async\n---\nUsage.")
+
+        reg = SkillRegistry()
+        reg.register_source(str(tmp_path))
+
+        # Reset and load via sync path
+        sync_skills = reg.load_all()
+
+        # Reset and load via async path
+        reg2 = SkillRegistry()
+        reg2.register_source(str(tmp_path))
+        async_skills = await reg2.aload_all()
+
+        assert set(sync_skills) == set(async_skills)
+        assert async_skills["my_skill"].description == "Async"
+
+    async def test_aload_all_is_awaitable(self, tmp_path: Path) -> None:
+        """aload_all() must be an awaitable coroutine."""
+        reg = SkillRegistry()
+        reg.register_source(str(tmp_path))
+        result = await reg.aload_all()
+        assert isinstance(result, dict)

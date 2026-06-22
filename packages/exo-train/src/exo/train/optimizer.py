@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
 from collections.abc import Sequence
 from typing import Any
@@ -95,26 +96,29 @@ class InstructionOptimizer(EvolutionStrategy):
             # No clear failures — use all cases for analysis.
             weak = list(evaluated_cases)
 
-        gradients: list[str] = []
-        for op in self._operators:
-            state = op.get_state()
-            prompt_text = self._build_backward_prompt(state, weak)
+        if self._llm_fn is not None:
+            system_prompt = (
+                "You are an expert prompt engineer. Analyse the "
+                "following evaluation failures and describe concisely "
+                "how the system prompt should be improved."
+            )
 
-            if self._llm_fn is not None:
+            async def _gen_gradient(op: Any) -> str:
+                state = op.get_state()
+                prompt_text = self._build_backward_prompt(state, weak)
                 raw = await self._llm_fn(
-                    system_prompt=(
-                        "You are an expert prompt engineer. Analyse the "
-                        "following evaluation failures and describe concisely "
-                        "how the system prompt should be improved."
-                    ),
+                    system_prompt=system_prompt,
                     user_prompt=prompt_text,
                     model=self._model,
                 )
-                gradients.append(str(raw))
-            else:
-                gradients.append(
-                    f"Improve prompt for '{op.name}': {len(weak)} weak case(s) detected"
-                )
+                return str(raw)
+
+            gradients = list(await asyncio.gather(*[_gen_gradient(op) for op in self._operators]))
+        else:
+            gradients = [
+                f"Improve prompt for '{op.name}': {len(weak)} weak case(s) detected"
+                for op in self._operators
+            ]
 
         self._gradients = gradients
         return list(gradients)
@@ -133,7 +137,7 @@ class InstructionOptimizer(EvolutionStrategy):
             return {}
 
         improved: dict[str, str] = {}
-        for op, gradient in zip(self._operators, self._gradients):
+        for op, gradient in zip(self._operators, self._gradients, strict=False):
             state = op.get_state()
             current = state.get("system_prompt", "")
 
@@ -167,13 +171,13 @@ class InstructionOptimizer(EvolutionStrategy):
     # EvolutionStrategy interface
     # ------------------------------------------------------------------
 
-    async def synthesise(
+    async def synthesize(
         self,
         agent: Any,
         data: Sequence[dict[str, Any]],
         epoch: int,
     ) -> list[dict[str, Any]]:
-        """Pass-through — InstructionOptimizer does not synthesise data."""
+        """Pass-through — InstructionOptimizer does not synthesize data."""
         return list(data)
 
     async def train(
@@ -194,7 +198,13 @@ class InstructionOptimizer(EvolutionStrategy):
         data: Sequence[dict[str, Any]],
         epoch: int,
     ) -> float:
-        """No-op — evaluation is handled externally."""
+        """Stub — always returns 0.0.
+
+        InstructionOptimizer does not perform its own evaluation.
+        Wire up a real eval function in the EvolutionPipeline caller, or
+        use ``OperatorTrainer`` which accepts an explicit ``eval_fn``.
+        Do not rely on this method for the EVALUATION phase of a pipeline.
+        """
         return 0.0
 
     # ------------------------------------------------------------------
@@ -351,18 +361,18 @@ class ToolOptimizer:
         eval_cases: Sequence[dict[str, Any]],
         beam_width: int,
     ) -> list[str]:
-        """Stage 1: Generate *beam_width* candidate descriptions."""
+        """Stage 1: Generate *beam_width* candidate descriptions in parallel."""
         assert self._llm_fn is not None
-        candidates: list[str] = []
         case_summary = self._summarise_cases(eval_cases)
+        system_prompt = (
+            "You are an expert at writing tool descriptions for AI "
+            "agents. Generate a single improved tool description. "
+            "Be concise and specific."
+        )
 
-        for i in range(beam_width):
+        async def _gen(i: int) -> str:
             raw = await self._llm_fn(
-                system_prompt=(
-                    "You are an expert at writing tool descriptions for AI "
-                    "agents. Generate a single improved tool description. "
-                    "Be concise and specific."
-                ),
+                system_prompt=system_prompt,
                 user_prompt=(
                     f"Tool name: {tool_name}\n"
                     f"Current description: {current_desc}\n"
@@ -372,9 +382,9 @@ class ToolOptimizer:
                 ),
                 model=self._model,
             )
-            candidates.append(str(raw))
+            return str(raw)
 
-        return candidates
+        return list(await asyncio.gather(*[_gen(i) for i in range(beam_width)]))
 
     async def _evaluate_candidates(
         self,

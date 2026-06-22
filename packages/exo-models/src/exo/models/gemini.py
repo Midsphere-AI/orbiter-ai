@@ -44,6 +44,27 @@ __all__ = [
 _VERTEX_SCOPES = ["https://www.googleapis.com/auth/cloud-platform"]
 
 
+# ---------------------------------------------------------------------------
+# Error helper
+# ---------------------------------------------------------------------------
+
+
+def _google_error_hint(exc: Any) -> tuple[str, str | None]:
+    """Return (message, hint) for a Google genai API error."""
+    msg = str(exc)
+    code = getattr(exc, "code", None)
+    status = str(code) if code else ""
+    if "PERMISSION_DENIED" in status or "403" in msg:
+        return msg, "Check GOOGLE_API_KEY or Vertex AI service account permissions."
+    if "RESOURCE_EXHAUSTED" in status or "429" in msg or "quota" in msg.lower():
+        return msg, "API quota exceeded — reduce request rate or check your quota limits."
+    if "UNAUTHENTICATED" in status or "401" in msg:
+        return msg, "Authentication failed — check GOOGLE_API_KEY or service account credentials."
+    if "UNAVAILABLE" in status or "503" in msg:
+        return msg, "Google API is temporarily unavailable — retry after a short delay."
+    return msg, None
+
+
 def _credentials_from_base64(encoded: str) -> Any:
     """Decode a base64 service-account JSON and return scoped credentials.
 
@@ -110,6 +131,19 @@ class GoogleProvider(ModelProvider):
 
         if project or getattr(config, "google_location", None):
             # --- Vertex AI mode ---
+            # Require a non-empty project; an empty string causes a cryptic auth error
+            # deep in the Google SDK rather than a clear user-facing message.
+            if not project:
+                raise ModelError(
+                    "Vertex AI mode requires a Google Cloud project ID. "
+                    "Set GOOGLE_CLOUD_PROJECT or pass google_project= to get_provider().",
+                    model=f"vertex:{config.model_name}",
+                    hint=(
+                        "Set the GOOGLE_CLOUD_PROJECT environment variable or pass "
+                        "google_project='my-project' to get_provider()."
+                    ),
+                    context={"model": f"vertex:{config.model_name}"},
+                )
             location = getattr(config, "google_location", None) or os.environ.get(
                 "GOOGLE_CLOUD_LOCATION", "us-central1"
             )
@@ -136,6 +170,8 @@ class GoogleProvider(ModelProvider):
                     "No API key found for Google provider. "
                     "Set GOOGLE_API_KEY (or GEMINI_API_KEY) or pass api_key= to get_provider().",
                     model=f"gemini:{config.model_name}",
+                    hint="Set GOOGLE_API_KEY (or GEMINI_API_KEY) env var or pass api_key= to get_provider().",
+                    context={"model": f"gemini:{config.model_name}"},
                 )
             self._client = genai.Client(api_key=api_key)
             self._prefix = "gemini"
@@ -185,8 +221,15 @@ class GoogleProvider(ModelProvider):
                 exc,
                 exc_info=True,
             )
+            msg, hint = _google_error_hint(exc)
             raise ModelError(
-                str(exc), model=f"{self._prefix}:{self.config.model_name}"
+                msg,
+                model=f"{self._prefix}:{self.config.model_name}",
+                hint=hint,
+                context={
+                    "status_code": getattr(exc, "code", None),
+                    "status": str(getattr(exc, "code", "")) or None,
+                },
             ) from exc
         return _parse_response(response, self.config.model_name)
 
@@ -238,8 +281,15 @@ class GoogleProvider(ModelProvider):
                 exc,
                 exc_info=True,
             )
+            msg, hint = _google_error_hint(exc)
             raise ModelError(
-                str(exc), model=f"{self._prefix}:{self.config.model_name}"
+                msg,
+                model=f"{self._prefix}:{self.config.model_name}",
+                hint=hint,
+                context={
+                    "status_code": getattr(exc, "code", None),
+                    "status": str(getattr(exc, "code", "")) or None,
+                },
             ) from exc
 
 

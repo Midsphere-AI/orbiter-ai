@@ -14,6 +14,7 @@ from exo.models.embeddings import (
 )
 from exo.retrieval.types import (  # pyright: ignore[reportMissingImports]
     Chunk,
+    RetrievalError,
     RetrievalResult,
 )
 
@@ -71,6 +72,15 @@ class VectorStore(abc.ABC):
     async def clear(self) -> None:
         """Remove all stored chunks and embeddings."""
 
+    async def close(self) -> None:
+        """Release any resources held by this store.
+
+        The default implementation is a no-op.  Backends that manage
+        connection pools or file handles (e.g. ``PgVectorStore``) override
+        this method.
+        """
+        return  # default no-op; override in backends that hold resources.
+
 
 class InMemoryVectorStore(VectorStore):
     """In-memory vector store using cosine similarity.
@@ -92,7 +102,10 @@ class InMemoryVectorStore(VectorStore):
         """Add chunks with their embedding vectors."""
         if len(chunks) != len(embeddings):
             msg = f"Number of chunks ({len(chunks)}) and embeddings ({len(embeddings)}) must match"
-            raise ValueError(msg)
+            raise RetrievalError(
+                msg,
+                hint="Ensure embed_batch() is called on the same chunk list before calling add().",
+            )
 
         for chunk, embedding in zip(chunks, embeddings):
             self._chunks[self._next_id] = chunk
