@@ -45,6 +45,13 @@ def load_python_agent(path: Path) -> dict[str, Any]:
     The module must define a ``create_agent()`` callable that returns
     an ``Agent`` (or dict of name → Agent for multi-agent files).
 
+    .. warning::
+        This function **executes arbitrary Python code** from *path* via
+        ``importlib`` (``exec_module``).  Only load files you trust.
+        When using ``--config`` or scanning a directory, ensure the path
+        comes from a trusted source — never point it at untrusted or
+        user-supplied directories.
+
     Returns:
         Dict mapping agent name → agent instance.
     """

@@ -507,6 +507,7 @@ class AnthropicProvider(ModelProvider):
             len(messages),
             len(tools or []),
         )
+        response = None
         try:
             response = await self._client.messages.create(**kwargs)
             async for event in response:
@@ -574,6 +575,9 @@ class AnthropicProvider(ModelProvider):
                 context={"status_code": getattr(exc, "status_code", None)},
                 hint=hint,
             ) from exc
+        finally:
+            if response is not None and hasattr(response, "close"):
+                await response.close()
 
     def _build_kwargs(
         self,

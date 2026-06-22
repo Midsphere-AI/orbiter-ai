@@ -56,23 +56,24 @@ async def dalle_generate_image(
     except ImportError as exc:
         raise ToolError("openai package is required for dalle_generate_image") from exc
 
-    client = AsyncOpenAI(timeout=30.0, max_retries=2)
-    try:
-        response = await client.images.generate(
-            model="dall-e-3",
-            prompt=prompt,
-            size=size,  # type: ignore[arg-type]
-            quality=quality,  # type: ignore[arg-type]
-            style=style,  # type: ignore[arg-type]
-            n=1,
-        )
-    except Exception as exc:
-        raise ToolError(f"DALL-E 3 generation failed: {exc}") from exc
+    # Use async-CM to ensure the underlying httpx client is closed on exit.
+    async with AsyncOpenAI(timeout=30.0, max_retries=2) as client:
+        try:
+            response = await client.images.generate(
+                model="dall-e-3",
+                prompt=prompt,
+                size=size,  # type: ignore[arg-type]
+                quality=quality,  # type: ignore[arg-type]
+                style=style,  # type: ignore[arg-type]
+                n=1,
+            )
+        except Exception as exc:
+            raise ToolError(f"DALL-E 3 generation failed: {exc}") from exc
 
-    blocks: list[ImageURLBlock] = []
-    for img in response.data:
-        if img.url:
-            blocks.append(ImageURLBlock(url=img.url))
+        blocks: list[ImageURLBlock] = []
+        for img in response.data:
+            if img.url:
+                blocks.append(ImageURLBlock(url=img.url))
     return blocks
 
 
@@ -108,32 +109,36 @@ async def imagen_generate_image(
     if not api_key:
         raise ToolError("GOOGLE_API_KEY environment variable is required for imagen_generate_image")
 
+    # genai.Client has a sync close() but no async CM; use try/finally to avoid fd leaks.
     client = genai.Client(api_key=api_key)
     try:
-        response = await asyncio.wait_for(
-            client.aio.models.generate_images(
-                model="imagen-3.0-generate-002",
-                prompt=prompt,
-                config={
-                    "number_of_images": number_of_images,
-                    "aspect_ratio": aspect_ratio,
-                },
-            ),
-            timeout=60.0,
-        )
-    except TimeoutError as exc:
-        raise ToolError(
-            "Imagen 3 generation timed out after 60s — check Vertex AI quota and try again."
-        ) from exc
-    except Exception as exc:
-        raise ToolError(f"Imagen 3 generation failed: {exc}") from exc
+        try:
+            response = await asyncio.wait_for(
+                client.aio.models.generate_images(
+                    model="imagen-3.0-generate-002",
+                    prompt=prompt,
+                    config={
+                        "number_of_images": number_of_images,
+                        "aspect_ratio": aspect_ratio,
+                    },
+                ),
+                timeout=60.0,
+            )
+        except TimeoutError as exc:
+            raise ToolError(
+                "Imagen 3 generation timed out after 60s — check Vertex AI quota and try again."
+            ) from exc
+        except Exception as exc:
+            raise ToolError(f"Imagen 3 generation failed: {exc}") from exc
 
-    blocks: list[ImageDataBlock] = []
-    for img in response.generated_images:
-        image_bytes = getattr(img.image, "image_bytes", None)
-        if image_bytes:
-            data = base64.b64encode(image_bytes).decode("utf-8")
-            blocks.append(ImageDataBlock(data=data, media_type="image/png"))
+        blocks: list[ImageDataBlock] = []
+        for img in response.generated_images:
+            image_bytes = getattr(img.image, "image_bytes", None)
+            if image_bytes:
+                data = base64.b64encode(image_bytes).decode("utf-8")
+                blocks.append(ImageDataBlock(data=data, media_type="image/png"))
+    finally:
+        client.close()
     return blocks
 
 
@@ -173,48 +178,52 @@ async def veo_generate_video(
             "GOOGLE_CLOUD_PROJECT environment variable is required for veo_generate_video"
         )
 
+    # genai.Client has a sync close() but no async CM; use try/finally to avoid fd leaks.
     client = genai.Client(vertexai=True, project=project, location=location)
     try:
-        operation = await asyncio.wait_for(
-            client.aio.models.generate_videos(
-                model="veo-2.0-generate-001",
-                prompt=prompt,
-                config={
-                    "duration_seconds": duration_seconds,
-                    "aspect_ratio": aspect_ratio,
-                    "number_of_videos": 1,
-                },
-            ),
-            timeout=30.0,
-        )
-    except TimeoutError as exc:
-        raise ToolError(
-            "Veo 2 video generation request timed out after 30s — check network connectivity."
-        ) from exc
-    except Exception as exc:
-        raise ToolError(f"Veo 2 generation failed: {exc}") from exc
+        try:
+            operation = await asyncio.wait_for(
+                client.aio.models.generate_videos(
+                    model="veo-2.0-generate-001",
+                    prompt=prompt,
+                    config={
+                        "duration_seconds": duration_seconds,
+                        "aspect_ratio": aspect_ratio,
+                        "number_of_videos": 1,
+                    },
+                ),
+                timeout=30.0,
+            )
+        except TimeoutError as exc:
+            raise ToolError(
+                "Veo 2 video generation request timed out after 30s — check network connectivity."
+            ) from exc
+        except Exception as exc:
+            raise ToolError(f"Veo 2 generation failed: {exc}") from exc
 
-    # Poll until operation is complete — guard against indefinite hangs.
-    _poll_timeout = 300.0  # 5 minutes total
-    _poll_interval = 5.0
-    _deadline = time.monotonic() + _poll_timeout
-    try:
-        while not operation.done:
-            if time.monotonic() >= _deadline:
-                raise ToolError(
-                    f"Veo 2 operation timed out after {int(_poll_timeout)}s — "
-                    "check the Vertex AI console for job status.",
-                )
-            await asyncio.sleep(_poll_interval)
-            operation = await client.aio.operations.get(operation)
-    except ToolError:
-        raise
-    except Exception as exc:
-        raise ToolError(f"Veo 2 polling failed: {exc}") from exc
+        # Poll until operation is complete — guard against indefinite hangs.
+        _poll_timeout = 300.0  # 5 minutes total
+        _poll_interval = 5.0
+        _deadline = time.monotonic() + _poll_timeout
+        try:
+            while not operation.done:
+                if time.monotonic() >= _deadline:
+                    raise ToolError(
+                        f"Veo 2 operation timed out after {int(_poll_timeout)}s — "
+                        "check the Vertex AI console for job status.",
+                    )
+                await asyncio.sleep(_poll_interval)
+                operation = await client.aio.operations.get(operation)
+        except ToolError:
+            raise
+        except Exception as exc:
+            raise ToolError(f"Veo 2 polling failed: {exc}") from exc
 
-    blocks: list[VideoBlock] = []
-    for video in operation.result.generated_videos:
-        video_uri = getattr(video.video, "uri", None)
-        if video_uri:
-            blocks.append(VideoBlock(url=video_uri, media_type="video/mp4"))
+        blocks: list[VideoBlock] = []
+        for video in operation.result.generated_videos:
+            video_uri = getattr(video.video, "uri", None)
+            if video_uri:
+                blocks.append(VideoBlock(url=video_uri, media_type="video/mp4"))
+    finally:
+        client.close()
     return blocks

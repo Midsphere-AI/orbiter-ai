@@ -87,7 +87,29 @@ async def ws_chat(websocket: WebSocket) -> None:
 
     Expects a JSON message: ``{"message": "...", "agent_name": "..."}``
     Sends back streaming events and a final ``{"type": "done"}`` message.
+
+    Origin allowlist (opt-in):
+        Set ``app.state.exo_ws_allowed_origins`` to a list of allowed Origin
+        header values (e.g. ``["https://app.example.com"]``).  When the list
+        is empty or absent the check is skipped — default-permissive for local
+        development.  Example::
+
+            app.state.exo_ws_allowed_origins = ["https://prod.example.com"]
+
+    # SECURITY: WebSocket connections inherit cookies/credentials from the
+    # browser, making them vulnerable to cross-site WebSocket hijacking when
+    # the Origin header is not validated. Enable the allowlist in production.
     """
+    # SECURITY: Origin check — permissive by default; activate via app state.
+    allowed_origins: list[str] | None = getattr(
+        websocket.app.state, "exo_ws_allowed_origins", None  # type: ignore[union-attr]
+    )
+    if allowed_origins:
+        origin = websocket.headers.get("origin", "")
+        if origin not in allowed_origins:
+            await websocket.close(code=1008, reason="Origin not allowed")
+            return
+
     await websocket.accept()
 
     try:

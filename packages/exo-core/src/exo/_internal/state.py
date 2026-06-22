@@ -104,15 +104,24 @@ class RunState:
 
     Args:
         agent_name: Name of the initial agent.
+        max_nodes: Maximum number of ``RunNode`` entries to retain in
+            ``self.nodes``.  When the list exceeds this cap the oldest
+            entries are dropped to bound memory.  Loop-detection only
+            needs the most-recent history, so a generous cap (default
+            500) has no practical effect on correctness.
     """
 
-    def __init__(self, agent_name: str) -> None:
+    #: Default cap for the retained node history.
+    DEFAULT_MAX_NODES: int = 500
+
+    def __init__(self, agent_name: str, *, max_nodes: int = DEFAULT_MAX_NODES) -> None:
         self.agent_name: str = agent_name
         self.status: RunNodeStatus = RunNodeStatus.INIT
         self.messages: list[Message] = []
         self.nodes: list[RunNode] = []
         self.iterations: int = 0
         self.total_usage: Usage = Usage()
+        self._max_nodes = max_nodes
 
     def start(self) -> None:
         """Mark the run as started."""
@@ -139,11 +148,26 @@ class RunState:
         """
         node = RunNode(
             agent_name=agent_name or self.agent_name,
-            step_index=len(self.nodes),
+            # Use the global iteration counter for step_index so it stays
+            # monotonically increasing even after the rolling window evicts
+            # old entries from self.nodes.
+            step_index=self.iterations,
             group_id=group_id,
         )
         self.nodes.append(node)
         self.iterations += 1
+        # Evict the oldest nodes when the retained history exceeds the cap.
+        # Loop-detection only needs recent history; a 500-node window is
+        # more than sufficient for any realistic agent run.
+        if len(self.nodes) > self._max_nodes:
+            excess = len(self.nodes) - self._max_nodes
+            del self.nodes[:excess]
+            _log.debug(
+                "RunState for '%s': evicted %d old nodes (retained=%d)",
+                self.agent_name,
+                excess,
+                len(self.nodes),
+            )
         return node
 
     def record_usage(self, usage: Usage) -> None:

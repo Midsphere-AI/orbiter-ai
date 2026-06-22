@@ -267,6 +267,45 @@ class TestJSONParser:
         with pytest.raises(json.JSONDecodeError):
             parser.parse("not json")
 
+    def test_max_depth_exceeded_raises(self) -> None:
+        """Nesting deeper than max_depth must raise RetrievalError, not RecursionError."""
+        from exo.retrieval.types import RetrievalError
+
+        parser = JSONParser(max_depth=3)
+        # Build JSON nested 4 levels deep: {"a": {"b": {"c": {"d": 1}}}}
+        data = json.dumps({"a": {"b": {"c": {"d": 1}}}})
+        with pytest.raises(RetrievalError, match="nesting depth exceeds"):
+            parser.parse(data)
+
+    def test_max_depth_at_limit_succeeds(self) -> None:
+        """JSON nested exactly at max_depth must succeed."""
+        parser = JSONParser(max_depth=3)
+        # {"a": {"b": {"c": 1}}} — 3 levels deep (a.b.c is at depth 3 when counting from 0)
+        data = json.dumps({"a": {"b": {"c": 1}}})
+        doc = parser.parse(data)
+        assert "a.b.c: 1" in doc.content
+
+    def test_default_max_depth_handles_moderately_deep(self) -> None:
+        """Default max_depth=64 must handle up to 64 nesting levels without error."""
+        parser = JSONParser()  # default max_depth=64
+        # Build a chain 10 levels deep — well within limit
+        obj: dict = {}
+        inner = obj
+        for i in range(10):
+            inner[f"k{i}"] = {}
+            inner = inner[f"k{i}"]  # type: ignore[assignment]
+        inner["leaf"] = "value"  # type: ignore[index]
+        doc = parser.parse(json.dumps(obj))
+        assert "value" in doc.content
+
+    def test_custom_max_depth_default_is_backward_compatible(self) -> None:
+        """JSONParser() with no args must behave identically to old code on normal inputs."""
+        parser = JSONParser()
+        data = json.dumps({"user": {"name": "Alice", "tags": ["a", "b"]}})
+        doc = parser.parse(data)
+        assert "user.name: Alice" in doc.content
+        assert "user.tags[0]: a" in doc.content
+
 
 # ---------------------------------------------------------------------------
 # PDFParser

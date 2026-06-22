@@ -427,6 +427,7 @@ class OpenAIProvider(ModelProvider):
             len(messages),
             len(tools or []),
         )
+        response = None
         try:
             response = await self._client.chat.completions.create(**kwargs)
             async for chunk in response:
@@ -445,6 +446,9 @@ class OpenAIProvider(ModelProvider):
                 context={"status_code": getattr(exc, "status_code", None)},
                 hint=hint,
             ) from exc
+        finally:
+            if response is not None and hasattr(response, "close"):
+                await response.close()
 
     def _build_kwargs(
         self,

@@ -93,6 +93,39 @@ class TestPgVectorStoreInit:
             assert store._table == "custom_vectors"
             assert store._dimensions == 768
 
+    def test_invalid_table_name_raises(self) -> None:
+        """SQL injection: table names with special characters must be rejected at construction."""
+        with patch.dict("sys.modules", {"asyncpg": MagicMock()}):
+            from exo.retrieval.backends.pgvector import PgVectorStore
+
+            bad_names = [
+                "'; DROP TABLE exo_vectors; --",
+                "table name with spaces",
+                "my-table",
+                "table.dot.dot",
+                "123starts_with_digit",
+                "",
+            ]
+            for bad in bad_names:
+                with pytest.raises(RetrievalError, match="Invalid table name"):
+                    PgVectorStore(dsn="postgresql://localhost/test", table=bad)
+
+    def test_valid_table_names_accepted(self) -> None:
+        """Valid plain identifiers and schema-qualified names must be accepted."""
+        with patch.dict("sys.modules", {"asyncpg": MagicMock()}):
+            from exo.retrieval.backends.pgvector import PgVectorStore
+
+            valid_names = [
+                "exo_vectors",
+                "public.exo_vectors",
+                "MyTable",
+                "_private",
+                "schema1.table_name",
+            ]
+            for name in valid_names:
+                store = PgVectorStore(dsn="postgresql://localhost/test", table=name)
+                assert store._table == name
+
 
 # ---------------------------------------------------------------------------
 # PgVectorStore — initialize (create table)

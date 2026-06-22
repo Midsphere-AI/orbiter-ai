@@ -25,6 +25,9 @@ logger = logging.getLogger(__name__)
 # Only [A-Za-z0-9_] is allowed in metadata filter key names to prevent SQL injection.
 _SAFE_KEY_RE = re.compile(r"^[A-Za-z0-9_]+$")
 
+# Table names must be safe SQL identifiers, optionally schema-qualified (e.g. "public.exo_vectors").
+_SAFE_TABLE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)?$")
+
 try:
     import asyncpg  # type: ignore[import-untyped]
 except ImportError as exc:
@@ -60,6 +63,17 @@ class PgVectorStore(VectorStore):
         dimensions: int = 1536,
         pool: asyncpg.Pool | None = None,  # type: ignore[type-arg]
     ) -> None:
+        if not _SAFE_TABLE_RE.match(table):
+            raise RetrievalError(
+                f"Invalid table name {table!r}: only plain SQL identifiers are allowed"
+                " (optionally schema-qualified, e.g. 'public.exo_vectors').",
+                context={"table": table},
+                hint=(
+                    "Use a name matching [A-Za-z_][A-Za-z0-9_]*, such as 'exo_vectors'"
+                    " or 'public.exo_vectors'. Do not include quotes, semicolons,"
+                    " or other special characters."
+                ),
+            )
         self._dsn = dsn
         self._table = table
         self._dimensions = dimensions

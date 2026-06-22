@@ -638,14 +638,18 @@ async def _stream(
                         tc_acc[idx] = {
                             "id": "",
                             "name": "",
-                            "arguments": "",
+                            # Accumulate argument fragments in a list and join
+                            # once at the end — repeated ``str +=`` is O(n^2)
+                            # over the total argument size.
+                            "arguments": [],
                             "thought_signature": None,
                         }
                     if tcd.id is not None:
                         tc_acc[idx]["id"] = tcd.id
                     if tcd.name is not None:
                         tc_acc[idx]["name"] = tcd.name
-                    tc_acc[idx]["arguments"] += tcd.arguments
+                    if tcd.arguments:
+                        tc_acc[idx]["arguments"].append(tcd.arguments)
                     if getattr(tcd, "thought_signature", None) is not None:
                         tc_acc[idx]["thought_signature"] = tcd.thought_signature
 
@@ -690,7 +694,7 @@ async def _stream(
                 ToolCall(
                     id=data["id"],
                     name=data["name"],
-                    arguments=data["arguments"],
+                    arguments="".join(data["arguments"]),
                     thought_signature=data.get("thought_signature"),
                 )
                 for data in tc_acc.values()

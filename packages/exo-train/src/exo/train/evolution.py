@@ -52,6 +52,11 @@ class EvolutionConfig:
         max_epochs: Number of evolution cycles to run.
         phases: Which phases to execute each epoch.
         early_stop_threshold: Stop if evaluation accuracy >= this value.
+        max_dataset_size: Maximum number of items kept in ``current_data``
+            after each synthesis phase.  Prevents unbounded O(N·2^E) growth
+            when strategies accumulate copies across epochs.  Defaults to
+            100 000 items — generous enough for most workloads.  Set to 0
+            to disable the cap.
         extra: Backend-specific settings.
     """
 
@@ -62,6 +67,7 @@ class EvolutionConfig:
         EvolutionPhase.EVALUATION,
     )
     early_stop_threshold: float | None = None
+    max_dataset_size: int = 100_000
     extra: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -70,6 +76,9 @@ class EvolutionConfig:
             raise ValueError(msg)
         if self.early_stop_threshold is not None and not 0.0 <= self.early_stop_threshold <= 1.0:
             msg = f"early_stop_threshold must be in [0, 1], got {self.early_stop_threshold}"
+            raise ValueError(msg)
+        if self.max_dataset_size < 0:
+            msg = f"max_dataset_size must be >= 0, got {self.max_dataset_size}"
             raise ValueError(msg)
 
 
@@ -395,6 +404,16 @@ class EvolutionPipeline:
                     synthesised = await self._strategy.synthesize(agent, current_data, epoch_idx)
                     epoch.synthesis_count = len(synthesised)
                     current_data = synthesised if synthesised else current_data
+                    # Cap dataset size to avoid O(N·2^E) RAM growth.
+                    if cfg.max_dataset_size > 0 and len(current_data) > cfg.max_dataset_size:
+                        logger.warning(
+                            "Evolution epoch %d: dataset grew to %d items; "
+                            "clamping to max_dataset_size=%d (keeping newest items)",
+                            epoch_idx,
+                            len(current_data),
+                            cfg.max_dataset_size,
+                        )
+                        current_data = current_data[-cfg.max_dataset_size :]
 
                 # Phase 2: Training
                 if EvolutionPhase.TRAINING in cfg.phases:

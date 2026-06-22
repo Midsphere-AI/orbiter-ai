@@ -23,6 +23,9 @@ class TestDalleGenerateImage:
 
         mock_client = AsyncMock()
         mock_client.images.generate = AsyncMock(return_value=mock_response)
+        # Support async-CM: __aenter__ returns mock_client, __aexit__ is a no-op
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
 
         # Patch openai.AsyncOpenAI since it's imported lazily inside the function
         mock_openai_module = MagicMock()
@@ -44,6 +47,9 @@ class TestDalleGenerateImage:
 
         mock_client = AsyncMock()
         mock_client.images.generate = AsyncMock(side_effect=Exception("API error"))
+        # Support async-CM: __aenter__ returns mock_client, __aexit__ is a no-op
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
 
         mock_openai_module = MagicMock()
         mock_openai_module.AsyncOpenAI.return_value = mock_client
@@ -64,6 +70,9 @@ class TestDalleGenerateImage:
 
         mock_client = AsyncMock()
         mock_client.images.generate = AsyncMock(return_value=mock_response)
+        # Support async-CM: __aenter__ returns mock_client, __aexit__ is a no-op
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
 
         mock_openai_module = MagicMock()
         mock_openai_module.AsyncOpenAI.return_value = mock_client

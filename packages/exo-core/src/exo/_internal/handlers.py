@@ -19,7 +19,7 @@ from typing import Any, Generic, TypeVar
 from exo._internal.call_runner import call_runner
 from exo._internal.state import RunState
 from exo.observability.logging import get_logger  # pyright: ignore[reportMissingImports]
-from exo.tool import Tool, ToolError
+from exo.tool import Tool
 from exo.types import ExoError, Message, RunResult, ToolResult
 
 _log = get_logger(__name__)
@@ -91,7 +91,7 @@ class AgentHandler(Handler[str, RunResult]):
         self.provider = provider
         self.max_handoffs = max_handoffs
 
-    async def handle(self, input: str, **kwargs: Any) -> AsyncGenerator[RunResult, None]:
+    async def handle(self, input: str, **kwargs: Any) -> AsyncGenerator[RunResult]:
         """Execute agents according to the swarm topology.
 
         For workflow mode, runs agents in flow_order sequentially.
@@ -121,7 +121,7 @@ class AgentHandler(Handler[str, RunResult]):
 
     async def _run_workflow(
         self, input: str, messages: list[Message], state: RunState
-    ) -> AsyncGenerator[RunResult, None]:
+    ) -> AsyncGenerator[RunResult]:
         """Execute agents sequentially in flow order.
 
         Output of each agent becomes input for the next.
@@ -140,7 +140,7 @@ class AgentHandler(Handler[str, RunResult]):
 
     async def _run_handoff(
         self, input: str, messages: list[Message], state: RunState
-    ) -> AsyncGenerator[RunResult, None]:
+    ) -> AsyncGenerator[RunResult]:
         """Execute agents following handoff chains.
 
         Starts with the first agent; if the agent's output references
@@ -175,7 +175,7 @@ class AgentHandler(Handler[str, RunResult]):
 
     async def _run_team(
         self, input: str, messages: list[Message], state: RunState
-    ) -> AsyncGenerator[RunResult, None]:
+    ) -> AsyncGenerator[RunResult]:
         """Execute team mode: lead agent delegates to workers.
 
         The first agent in flow_order is the lead.  Workers are
@@ -387,7 +387,7 @@ class GroupHandler(Handler[str, RunResult]):
         self.parallel = parallel
         self.dependencies = dependencies or {}
 
-    async def handle(self, input: str, **kwargs: Any) -> AsyncGenerator[RunResult, None]:
+    async def handle(self, input: str, **kwargs: Any) -> AsyncGenerator[RunResult]:
         """Execute agent group in parallel or serial mode.
 
         Args:
@@ -408,7 +408,7 @@ class GroupHandler(Handler[str, RunResult]):
 
     async def _run_parallel(
         self, input: str, messages: list[Message]
-    ) -> AsyncGenerator[RunResult, None]:
+    ) -> AsyncGenerator[RunResult]:
         """Run all agents concurrently via asyncio.TaskGroup.
 
         All agents receive the same input.  Results are yielded
@@ -442,7 +442,7 @@ class GroupHandler(Handler[str, RunResult]):
 
     async def _run_serial(
         self, input: str, messages: list[Message]
-    ) -> AsyncGenerator[RunResult, None]:
+    ) -> AsyncGenerator[RunResult]:
         """Run agents in dependency-resolved order with output chaining.
 
         Uses topological sort on the dependency graph to determine

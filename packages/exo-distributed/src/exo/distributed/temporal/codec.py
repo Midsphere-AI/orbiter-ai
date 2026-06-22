@@ -167,6 +167,10 @@ class BlobStore(Protocol):
         """Retrieve data previously stored under *key*."""
         ...
 
+    async def delete(self, key: str) -> None:
+        """Remove *key* from the store (no-op if not present)."""
+        ...
+
 
 class InMemoryBlobStore:
     """Dict-backed :class:`BlobStore` for testing or single-process use.
@@ -182,6 +186,10 @@ class InMemoryBlobStore:
 
     async def get(self, key: str) -> bytes:
         return self._store[key]
+
+    async def delete(self, key: str) -> None:
+        """Remove *key* from the store (no-op if not present)."""
+        self._store.pop(key, None)
 
 
 class RedisBlobStore:
@@ -231,6 +239,17 @@ class RedisBlobStore:
             raise KeyError(f"Blob not found in Redis: {full_key!r}")
         return value
 
+    async def delete(self, key: str) -> None:
+        """Remove *key* from the store (no-op if not present)."""
+        client = self._get_client()
+        await client.delete(self._key_prefix + key)  # type: ignore[union-attr]
+
+    async def close(self) -> None:
+        """Close the underlying Redis connection."""
+        if self._client is not None:
+            await self._client.aclose()  # type: ignore[union-attr]
+            self._client = None
+
 
 class ClaimCheckCodec(PayloadCodec):
     """Offload oversized payloads to a :class:`BlobStore`.
@@ -270,12 +289,17 @@ class ClaimCheckCodec(PayloadCodec):
         return result
 
     async def decode(self, payloads: Sequence[Payload]) -> list[Payload]:
-        """Fetch offloaded payloads from the blob store; pass others through."""
+        """Fetch offloaded payloads from the blob store; pass others through.
+
+        After fetching a blob, deletes it from the store to avoid unbounded
+        accumulation (claim-check semantics: fetch once, then discard).
+        """
         result: list[Payload] = []
         for payload in payloads:
             if payload.metadata.get("encoding") == _ENC_CLAIM_CHECK:
                 key = payload.data.decode()
                 blob = await self._store.get(key)
+                await self._store.delete(key)
                 p = Payload()
                 p.ParseFromString(blob)
                 result.append(p)

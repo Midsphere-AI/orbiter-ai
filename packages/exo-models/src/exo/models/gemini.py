@@ -79,6 +79,11 @@ def _credentials_from_base64(encoded: str) -> Any:
 
     raw_json = base64.b64decode(encoded)
     info = json.loads(raw_json)
+    if not isinstance(info, dict) or "type" not in info or "project_id" not in info:
+        raise ValueError(
+            "GOOGLE_SERVICE_ACCOUNT_JSON_B64 does not look like a valid service-account JSON — "
+            'expected a dict with at least "type" and "project_id" keys.'
+        )
     return service_account.Credentials.from_service_account_info(info, scopes=_VERTEX_SCOPES)
 
 

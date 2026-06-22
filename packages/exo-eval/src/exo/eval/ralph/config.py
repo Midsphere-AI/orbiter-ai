@@ -141,6 +141,11 @@ class LoopState:
     score_history: list[dict[str, float]] = field(default_factory=list)
     reflection_history: list[dict[str, Any]] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
+    # Accumulated per-iteration feedback blocks for the Plan phase.
+    # Stored separately from the prompt so each block is appended exactly once
+    # (O(k) total) and the full prompt is reconstructed by joining — avoiding
+    # the O(k²) string growth of naively re-appending current_input each round.
+    feedback_blocks: list[str] = field(default_factory=list)
 
     # ---- queries ----------------------------------------------------------
 
@@ -166,13 +171,25 @@ class LoopState:
 
     # ---- mutations --------------------------------------------------------
 
-    def record_score(self, scores: dict[str, float]) -> None:
-        """Append a score snapshot for the current iteration."""
-        self.score_history.append(dict(scores))
+    def record_score(self, scores: dict[str, float], *, max_history: int = 50) -> None:
+        """Append a score snapshot for the current iteration.
 
-    def record_reflection(self, reflection: dict[str, Any]) -> None:
-        """Append a reflection summary for the current iteration."""
+        ``max_history`` bounds the list length so long-running loops do not
+        accumulate unbounded memory.  Older snapshots are dropped from the front.
+        """
+        self.score_history.append(dict(scores))
+        if len(self.score_history) > max_history:
+            self.score_history = self.score_history[-max_history:]
+
+    def record_reflection(self, reflection: dict[str, Any], *, max_history: int = 50) -> None:
+        """Append a reflection summary for the current iteration.
+
+        ``max_history`` bounds the list length so long-running loops do not
+        accumulate unbounded memory.  Older summaries are dropped from the front.
+        """
         self.reflection_history.append(dict(reflection))
+        if len(self.reflection_history) > max_history:
+            self.reflection_history = self.reflection_history[-max_history:]
 
     def record_success(self, *, tokens: int = 0, cost: float = 0.0) -> None:
         """Mark the current step as successful."""

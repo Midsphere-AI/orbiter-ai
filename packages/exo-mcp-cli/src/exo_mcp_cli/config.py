@@ -272,8 +272,10 @@ def find_config(explicit_path: str | Path | None = None) -> Path | None:
 def load_config(path: Path) -> dict[str, ServerEntry]:
     """Load MCP server configs from an mcp.json file.
 
-    Environment variable substitution is applied to all string values.
-    Vault references (``${vault:...}``) are preserved for later resolution.
+    ``${vault:...}`` references and ``${ENV_VAR}`` references are **not**
+    substituted here — they are deferred to connection time (via
+    ``_resolve_entry`` in ``connection.py``) so that the display layer
+    (``server list``) never renders resolved secret values in plaintext.
 
     Returns:
         Dict mapping server name to ``ServerEntry``.
@@ -293,10 +295,6 @@ def load_config(path: Path) -> dict[str, ServerEntry]:
 
     servers: dict[str, ServerEntry] = {}
     for name, cfg in servers_raw.items():
-        # Substitute env vars for all fields; warn on missing vars in the
-        # critical command/url fields where an empty substitution causes
-        # hard-to-diagnose failures at connection time.
-        cfg = _substitute_recursive(cfg, warn_missing_keys={"command", "url"})
         servers[name] = ServerEntry(
             name=name,
             transport=cfg.get("transport", "stdio"),

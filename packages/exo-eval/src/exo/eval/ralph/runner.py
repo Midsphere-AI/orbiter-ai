@@ -157,13 +157,16 @@ class RefinementLoop:
             "RefinementLoop starting: input_len=%d scorers=%d", len(input), len(self._scorers)
         )
         state = LoopState()
-        current_input = input
+        original_input = input
         last_output = ""
         last_scores: dict[str, float] = {}
         reflections: list[dict[str, Any]] = []
 
         while True:
             state.iteration += 1
+            # Rebuild current_input from the original prompt + accumulated feedback
+            # blocks (O(k) per iteration vs the previous O(k²) string-growth).
+            current_input = self._plan(original_input, state, None)
 
             # --- Phase 1: Run ---
             output, success = await self._execute(current_input, state)
@@ -185,8 +188,9 @@ class RefinementLoop:
                 reflections.append({"iteration": state.iteration, "summary": reflection.summary})
 
             # --- Phase 4: Plan (re-prompt) ---
-            # Pass current_input (not the original) so chained feedback accumulates.
-            current_input = self._plan(current_input, reflection)
+            # Append new feedback block into state; next iteration rebuilds the
+            # full prompt from original_input + all accumulated blocks.
+            self._plan(original_input, state, reflection)
 
             # --- Phase 5: Halt ---
             decision = await self._halt(state)
@@ -234,10 +238,13 @@ class RefinementLoop:
             len(self._scorers),
         )
         state = LoopState()
-        current_input = input
+        original_input = input
 
         while True:
             state.iteration += 1
+            # Rebuild current_input from the original prompt + accumulated feedback
+            # blocks (O(k) per iteration vs the previous O(k²) string-growth).
+            current_input = self._plan(original_input, state, None)
             yield RefinementIterationEvent(
                 iteration=state.iteration,
                 status="started",
@@ -279,8 +286,9 @@ class RefinementLoop:
             reflection = await self._learn(current_input, output, scores, success, state)
 
             # --- Phase 4: Plan ---
-            # Pass current_input (not the original) so chained feedback accumulates.
-            current_input = self._plan(current_input, reflection)
+            # Append new feedback block into state; next iteration rebuilds the
+            # full prompt from original_input + all accumulated blocks.
+            self._plan(original_input, state, reflection)
 
             # --- Phase 5: Halt ---
             decision = await self._halt(state)
@@ -356,7 +364,10 @@ class RefinementLoop:
                 # distinguishable from a genuine 0.0 score in pass@k / threshold
                 # logic — callers can detect "error" in the details dict.
                 scores[scorer_name] = 0.0
-                state.metadata.setdefault("scorer_failures", []).append(
+                failures: list[dict[str, Any]] = state.metadata.setdefault(
+                    "scorer_failures", []
+                )
+                failures.append(
                     {
                         "scorer": scorer_name,
                         "case_id": case_id,
@@ -364,7 +375,11 @@ class RefinementLoop:
                         "exc_type": type(exc).__name__,
                     }
                 )
-        state.record_score(scores)
+                # Cap to the 100 most recent entries so metadata stays bounded
+                # in long-running loops with repeated scorer errors.
+                if len(failures) > 100:
+                    state.metadata["scorer_failures"] = failures[-100:]
+        state.record_score(scores, max_history=self._config.reflection.max_history)
         return scores
 
     async def _learn(
@@ -396,21 +411,31 @@ class RefinementLoop:
             "iteration": state.iteration,
         }
         result = await self._reflector.reflect(context)
-        state.record_reflection({"summary": result.summary, "suggestions": result.suggestions})
+        state.record_reflection(
+            {"summary": result.summary, "suggestions": result.suggestions},
+            max_history=self._config.reflection.max_history,
+        )
         return result
 
-    def _plan(self, current_input: str, reflection: ReflectionResult | None) -> str:
+    def _plan(
+        self,
+        original_input: str,
+        state: LoopState,
+        reflection: ReflectionResult | None,
+    ) -> str:
         """Phase 4: Re-prompt by appending reflection suggestions.
 
-        *current_input* is the input from the **previous** iteration (which may
-        already contain chained feedback from earlier iterations).  New
-        suggestions are appended to it so that feedback accumulates across
-        iterations rather than resetting to the original prompt each time.
+        Feedback blocks are accumulated on *state.feedback_blocks* (one entry per
+        iteration) so each block is written exactly once — O(k) total rather than
+        the O(k²) growth caused by re-appending the entire growing *current_input*
+        on each round.  The full prompt is reconstructed by joining at call time.
         """
-        if reflection is None or not reflection.suggestions:
-            return current_input
-        suggestions = "\n".join(f"- {s}" for s in reflection.suggestions)
-        return f"{current_input}\n\n[Previous feedback]\n{suggestions}"
+        if reflection is not None and reflection.suggestions:
+            suggestions = "\n".join(f"- {s}" for s in reflection.suggestions)
+            state.feedback_blocks.append(f"[Previous feedback]\n{suggestions}")
+        if not state.feedback_blocks:
+            return original_input
+        return original_input + "\n\n" + "\n\n".join(state.feedback_blocks)
 
     async def _halt(self, state: LoopState) -> StopDecision:
         """Phase 5: Check all stop conditions."""

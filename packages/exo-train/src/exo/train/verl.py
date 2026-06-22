@@ -15,6 +15,7 @@ Key classes:
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
@@ -29,6 +30,8 @@ from exo.train.trainer import (  # pyright: ignore[reportMissingImports]
 )
 
 logger = logging.getLogger(__name__)
+
+_MODULE_PATH_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$")
 
 
 # ---------------------------------------------------------------------------
@@ -68,6 +71,12 @@ class RewardSpec:
             return self.callable
         import importlib
 
+        if not _MODULE_PATH_RE.fullmatch(self.module_path):
+            msg = (
+                f"module_path {self.module_path!r} is not a valid dotted Python identifier. "
+                "Expected format: 'package.module' (letters, digits, underscores, dots only)."
+            )
+            raise TrainerError(msg)
         mod = importlib.import_module(self.module_path)
         fn = getattr(mod, self.func_name, None)
         if fn is None:
@@ -299,7 +308,10 @@ class VeRLTrainer(Trainer):
         )
 
         verl_params = _build_verl_params(cfg, self._reward_spec)
-        logger.info("VeRL params: %s", verl_params)
+        # Log at DEBUG only; omit the freeform `extra` dict which may contain credentials.
+        if logger.isEnabledFor(logging.DEBUG):
+            safe_params = {k: v for k, v in verl_params.items() if k != "extra"}
+            logger.debug("VeRL params (extra omitted): %s", safe_params)
 
         # Build an OmegaConf / dataclass config accepted by VeRL trainers.
         # VeRL>=0.2 exposes verl.utils.config.get_default_config() plus

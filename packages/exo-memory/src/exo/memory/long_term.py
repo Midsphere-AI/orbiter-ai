@@ -444,6 +444,11 @@ class MemoryOrchestrator:
         except Exception as exc:
             task.fail(str(exc))
             logger.error("extraction failed task=%s: %s", task.task_id, exc, exc_info=True)
+        finally:
+            # Evict the terminal task entry to prevent unbounded growth of
+            # _tasks.  Callers that need the result already received the
+            # returned ExtractionTask object.
+            self._tasks.pop(task.task_id, None)
 
         return task
 

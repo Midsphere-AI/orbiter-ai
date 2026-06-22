@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from collections import deque
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
@@ -65,7 +66,7 @@ class MemoryCallOperator(Operator):
         self._enabled = enabled
         self._max_retries = max_retries
         self._max_traces = max_traces
-        self._traces: list[MemoryCallTrace] = []
+        self._traces: deque[MemoryCallTrace] = deque(maxlen=max_traces)
 
     @property
     def name(self) -> str:
@@ -73,7 +74,7 @@ class MemoryCallOperator(Operator):
 
     @property
     def traces(self) -> list[MemoryCallTrace]:
-        """Return recorded execution traces."""
+        """Return recorded execution traces (newest last)."""
         return list(self._traces)
 
     async def execute(self, **kwargs: Any) -> Any:
@@ -145,10 +146,8 @@ class MemoryCallOperator(Operator):
         return result
 
     def _append_trace(self, trace: MemoryCallTrace) -> None:
-        """Append *trace* to the ring buffer, evicting oldest if over cap."""
+        """Append *trace* to the ring buffer; deque(maxlen=...) evicts oldest O(1)."""
         self._traces.append(trace)
-        if len(self._traces) > self._max_traces:
-            self._traces = self._traces[-self._max_traces :]
 
     def get_tunables(self) -> list[TunableSpec]:
         return [

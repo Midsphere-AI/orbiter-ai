@@ -70,7 +70,16 @@ class TokenTracker:
         assert usage.total_tokens == 610
     """
 
-    __slots__ = ("_agent_step_counts", "_agent_totals", "_global_total", "_steps")
+    __slots__ = (
+        "_agent_indices",
+        "_agent_prompt_totals",
+        "_agent_step_counts",
+        "_agent_totals",
+        "_global_output_total",
+        "_global_prompt_total",
+        "_global_total",
+        "_steps",
+    )
 
     def __init__(self) -> None:
         self._steps: list[TokenStep] = []
@@ -78,6 +87,12 @@ class TokenTracker:
         self._agent_totals: defaultdict[str, int] = defaultdict(int)
         self._agent_step_counts: defaultdict[str, int] = defaultdict(int)
         self._global_total: int = 0
+        # Per-agent index lists for O(1) trajectory lookup.
+        self._agent_indices: defaultdict[str, list[int]] = defaultdict(list)
+        # Separate prompt/output running totals for O(1) total_usage().
+        self._global_prompt_total: int = 0
+        self._global_output_total: int = 0
+        self._agent_prompt_totals: defaultdict[str, int] = defaultdict(int)
 
     def add_step(
         self,
@@ -110,10 +125,17 @@ class TokenTracker:
             output_tokens=output_tokens,
         )
         total = prompt_tokens + output_tokens
+        # Record the index before appending so we can build the per-agent index.
+        step_list_index = len(self._steps)
         self._steps.append(token_step)
         self._agent_step_counts[agent_id] += 1
         self._agent_totals[agent_id] += total
         self._global_total += total
+        # Maintain O(1) per-agent index and split prompt/output running totals.
+        self._agent_indices[agent_id].append(step_list_index)
+        self._global_prompt_total += prompt_tokens
+        self._global_output_total += output_tokens
+        self._agent_prompt_totals[agent_id] += prompt_tokens
         logger.debug(
             "token step recorded: agent=%r step=%d prompt=%d output=%d",
             agent_id,
@@ -132,30 +154,38 @@ class TokenTracker:
         return token_step
 
     def get_trajectory(self, agent_id: str) -> list[TokenStep]:
-        """Get the ordered list of token steps for a specific agent."""
-        return [s for s in self._steps if s.agent_id == agent_id]
+        """Get the ordered list of token steps for a specific agent.
+
+        O(k) where k = number of steps for this agent (uses per-agent index).
+        """
+        return [self._steps[i] for i in self._agent_indices[agent_id]]
 
     def total_usage(self) -> TokenUsageSummary:
-        """Aggregate token usage across all agents and steps."""
-        prompt = sum(s.prompt_tokens for s in self._steps)
-        output = sum(s.output_tokens for s in self._steps)
+        """Aggregate token usage across all agents and steps.
+
+        O(1) — uses running counters maintained by :meth:`add_step`.
+        """
         return TokenUsageSummary(
-            prompt_tokens=prompt,
-            output_tokens=output,
-            total_tokens=prompt + output,
+            prompt_tokens=self._global_prompt_total,
+            output_tokens=self._global_output_total,
+            total_tokens=self._global_total,
             step_count=len(self._steps),
         )
 
     def agent_usage(self, agent_id: str) -> TokenUsageSummary:
-        """Aggregate token usage for a specific agent."""
-        trajectory = self.get_trajectory(agent_id)
-        prompt = sum(s.prompt_tokens for s in trajectory)
-        output = sum(s.output_tokens for s in trajectory)
+        """Aggregate token usage for a specific agent.
+
+        O(1) — uses running counters maintained by :meth:`add_step`.
+        """
+        prompt = self._agent_prompt_totals[agent_id]
+        total = self._agent_totals[agent_id]
+        output = total - prompt
+        step_count = self._agent_step_counts[agent_id]
         return TokenUsageSummary(
             prompt_tokens=prompt,
             output_tokens=output,
-            total_tokens=prompt + output,
-            step_count=len(trajectory),
+            total_tokens=total,
+            step_count=step_count,
         )
 
     def add_usage(self, agent_id: str, usage: Any) -> TokenStep:

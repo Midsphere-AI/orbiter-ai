@@ -279,26 +279,34 @@ class TestLoadConfig:
         assert servers["alpha"].command == "cmd1"
         assert servers["beta"].url == "http://localhost:3000"
 
-    def test_env_var_substitution(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_env_var_substitution_deferred(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Env-var refs are preserved verbatim at load time; resolved at connect time."""
         monkeypatch.setenv("MCP_CMD", "my-tool")
         cfg = tmp_path / "mcp.json"
         data = {"mcpServers": {"s": {"command": "${MCP_CMD}"}}}
         cfg.write_text(json.dumps(data), encoding="utf-8")
         servers = load_config(cfg)
-        assert servers["s"].command == "my-tool"
+        # Raw ref is preserved — substitution is deferred to _resolve_entry.
+        assert servers["s"].command == "${MCP_CMD}"
 
     def test_empty_mcp_servers_returns_empty(self, tmp_path: Path) -> None:
         cfg = _write_mcp_json(tmp_path / "mcp.json", {})
         servers = load_config(cfg)
         assert servers == {}
 
-    def test_missing_command_env_var_emits_warning(
+    def test_missing_command_env_var_preserved_at_load(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        """A missing env var in 'command' should emit a warning, not silently become ''."""
+        """A missing env var in 'command' is preserved verbatim at load time.
+
+        The warn-on-missing check is deferred to _resolve_entry (connection time)
+        so the display layer never sees substituted secret values.
+        """
         import logging
 
         monkeypatch.delenv("MISSING_MCP_CMD", raising=False)
@@ -309,16 +317,17 @@ class TestLoadConfig:
         )
         with caplog.at_level(logging.WARNING, logger="exo_mcp_cli.config"):
             servers = load_config(cfg)
-        assert servers["s"].command == ""
-        assert "MISSING_MCP_CMD" in caplog.text
+        # Raw ref preserved — no substitution or warning at load time.
+        assert servers["s"].command == "${MISSING_MCP_CMD}"
+        assert "MISSING_MCP_CMD" not in caplog.text
 
-    def test_missing_url_env_var_emits_warning(
+    def test_missing_url_env_var_preserved_at_load(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        """A missing env var in 'url' should emit a warning."""
+        """A missing env var in 'url' is preserved verbatim at load time."""
         import logging
 
         monkeypatch.delenv("MISSING_MCP_URL", raising=False)
@@ -329,8 +338,9 @@ class TestLoadConfig:
         )
         with caplog.at_level(logging.WARNING, logger="exo_mcp_cli.config"):
             servers = load_config(cfg)
-        assert servers["s"].url == ""
-        assert "MISSING_MCP_URL" in caplog.text
+        # Raw ref preserved — no substitution or warning at load time.
+        assert servers["s"].url == "${MISSING_MCP_URL}"
+        assert "MISSING_MCP_URL" not in caplog.text
 
 
 # ---------------------------------------------------------------------------

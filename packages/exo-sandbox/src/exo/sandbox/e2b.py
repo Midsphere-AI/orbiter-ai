@@ -30,6 +30,17 @@ _BUILTIN_TOOL_NAMES: frozenset[str] = frozenset(
     {"shell", "command", "code", "file_read", "file_write", "file_list"}
 )
 
+#: Maximum characters retained from stdout/stderr per tool call.  Matches the
+#: cap used by the local ShellTool so both backends behave consistently.
+_MAX_OUTPUT_CHARS = 10_000
+
+
+def _truncate(text: str) -> str:
+    """Truncate *text* to ``_MAX_OUTPUT_CHARS`` characters."""
+    if len(text) <= _MAX_OUTPUT_CHARS:
+        return text
+    return text[:_MAX_OUTPUT_CHARS] + f"\n... (truncated at {_MAX_OUTPUT_CHARS} chars)"
+
 
 class E2BSandbox(Sandbox):
     """Sandbox backed by `E2B <https://e2b.dev>`_ cloud sandboxes.
@@ -205,13 +216,20 @@ class E2BSandbox(Sandbox):
         Use the async context manager (``async with E2BSandbox(...) as sb``)
         or ``cleanup()`` for the same effect with cleaner intent.
         """
-        self._transition(SandboxStatus.CLOSED)
-        await self._kill_sandbox()
+        try:
+            self._transition(SandboxStatus.CLOSED)
+        finally:
+            # Kill the remote sandbox even if _transition raises (e.g. the
+            # sandbox was already in a terminal state), so we never leak a
+            # running remote process.
+            await self._kill_sandbox()
 
     async def cleanup(self) -> None:
         """Release all E2B resources permanently."""
-        self._transition(SandboxStatus.CLOSED)
-        await self._kill_sandbox()
+        try:
+            self._transition(SandboxStatus.CLOSED)
+        finally:
+            await self._kill_sandbox()
 
     async def _kill_sandbox(self) -> None:
         """Kill the remote E2B sandbox if it exists."""
@@ -272,8 +290,8 @@ class E2BSandbox(Sandbox):
                 command = arguments.get("command", "")
                 result = await asyncio.to_thread(sb.commands.run, command)
                 return {
-                    "stdout": result.stdout,
-                    "stderr": result.stderr,
+                    "stdout": _truncate(result.stdout or ""),
+                    "stderr": _truncate(result.stderr or ""),
                     "exit_code": result.exit_code,
                     "sandbox_id": self._sandbox_id,
                     "e2b_sandbox_id": self._e2b_sandbox_id,
@@ -316,8 +334,8 @@ class E2BSandbox(Sandbox):
                     sb.commands.run, f"echo {encoded} | base64 -d | python3"
                 )
                 return {
-                    "stdout": result.stdout,
-                    "stderr": result.stderr,
+                    "stdout": _truncate(result.stdout or ""),
+                    "stderr": _truncate(result.stderr or ""),
                     "exit_code": result.exit_code,
                     "sandbox_id": self._sandbox_id,
                     "e2b_sandbox_id": self._e2b_sandbox_id,

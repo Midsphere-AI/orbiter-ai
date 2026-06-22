@@ -54,6 +54,12 @@ class GraphRetriever(Retriever):
         self.triples = triples
         self.beam_width = beam_width
         self.max_hops = max_hops
+        # Index: entity (lowercased) → list of triples where it appears as subject or object.
+        # Built once here so _find_triples() is O(1) per lookup instead of O(n).
+        self._entity_index: dict[str, list[Triple]] = {}
+        for triple in triples:
+            for entity in (triple.subject.lower(), triple.object.lower()):
+                self._entity_index.setdefault(entity, []).append(triple)
 
     async def retrieve(
         self,
@@ -157,13 +163,12 @@ class GraphRetriever(Retriever):
         return entities
 
     def _find_triples(self, entity: str) -> list[Triple]:
-        """Find triples where entity appears as subject or object."""
-        entity_lower = entity.lower()
-        return [
-            t
-            for t in self.triples
-            if t.subject.lower() == entity_lower or t.object.lower() == entity_lower
-        ]
+        """Find triples where entity appears as subject or object.
+
+        Uses the pre-built ``_entity_index`` for O(1) lookup rather than
+        scanning the full triple list on every call.
+        """
+        return list(self._entity_index.get(entity.lower(), []))
 
     @staticmethod
     def _parse_source_chunk_id(

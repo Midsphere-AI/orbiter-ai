@@ -95,6 +95,23 @@ class A2AClient:
             self._agent_card = await self._resolve_from_file(self._source)
         return self._agent_card
 
+    @staticmethod
+    def _same_origin(discovery_url: str, card_url: str) -> bool:
+        """Return True if *card_url* shares the same scheme+host+port as *discovery_url*.
+
+        Used to guard against SSRF: a remote agent card could advertise an
+        arbitrary ``url`` that redirects task POSTs to an internal endpoint.
+        Same-origin validation ensures the card's task URL stays on the same
+        server we resolved the card from.
+        """
+        d = urlparse(discovery_url)
+        c = urlparse(card_url)
+        # Normalise default ports: http→80, https→443.
+        _defaults = {"http": 80, "https": 443}
+        d_port = d.port or _defaults.get(d.scheme)
+        c_port = c.port or _defaults.get(c.scheme)
+        return d.scheme == c.scheme and d.hostname == c.hostname and d_port == c_port
+
     async def _resolve_from_url(self, url: str) -> AgentCard:
         """Fetch agent card JSON from a remote URL."""
         parsed = urlparse(url)
@@ -139,7 +156,7 @@ class A2AClient:
 
         try:
             data = resp.json()
-            return AgentCard.model_validate(data)
+            card = AgentCard.model_validate(data)
         except json.JSONDecodeError as exc:
             raise A2AClientError(
                 f"Invalid agent card JSON at {url}: {exc}",
@@ -152,6 +169,22 @@ class A2AClient:
                 context={"url": url},
                 hint="The /.well-known/agent-card endpoint must return valid AgentCard JSON.",
             ) from exc
+
+        # SSRF guard: card.url must share the same origin as the discovery URL
+        # so that task POSTs cannot be redirected to arbitrary internal hosts.
+        if card.url and not self._same_origin(url, card.url):
+            raise A2AClientError(
+                f"Agent card url {card.url!r} does not share the same origin as "
+                f"discovery URL {url!r} — rejecting to prevent SSRF.",
+                context={"discovery_url": url, "card_url": card.url},
+                hint=(
+                    "The remote agent's card.url must resolve to the same scheme, host, and port "
+                    "as the /.well-known/agent-card endpoint. "
+                    "If you trust this peer, construct A2AClient with an explicit AgentCard."
+                ),
+            )
+
+        return card
 
     @staticmethod
     async def _resolve_from_file(path_str: str) -> AgentCard:
@@ -330,8 +363,8 @@ class A2AClient:
             ) from exc
 
         events: list[dict[str, Any]] = []
-        for line in resp.text.strip().split("\n"):
-            line = line.strip()
+        async for raw_line in resp.aiter_lines():
+            line = raw_line.strip()
             if line:
                 try:
                     events.append(json.loads(line))

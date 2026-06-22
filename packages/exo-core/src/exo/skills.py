@@ -187,13 +187,23 @@ def _clone_github(parsed: dict[str, str], cache_dir: Path) -> Path:
     branch = parsed["branch"]
     subdir = parsed["subdir"]
 
+    # Validate the branch name before it reaches ``git clone``: a value
+    # starting with ``-`` would be parsed by git as a flag, and only plain
+    # ref characters are ever legitimate here.
+    if branch.startswith("-") or not re.fullmatch(r"[A-Za-z0-9._/-]+", branch):
+        raise SkillError(
+            f"Invalid branch name {branch!r}",
+            context={"owner": owner, "repo": repo, "branch": branch},
+            hint="Branch names may only contain letters, digits, '.', '_', '/', '-'.",
+        )
+
     clone_dir = cache_dir / owner / repo / branch
     if not clone_dir.exists():
         clone_dir.parent.mkdir(parents=True, exist_ok=True)
         clone_url = f"https://github.com/{owner}/{repo}.git"
         try:
             subprocess.run(
-                ["git", "clone", "--depth", "1", "--branch", branch, clone_url, str(clone_dir)],
+                ["git", "clone", "--depth", "1", f"--branch={branch}", clone_url, str(clone_dir)],
                 check=True,
                 capture_output=True,
                 timeout=60,
@@ -218,6 +228,14 @@ def _clone_github(parsed: dict[str, str], cache_dir: Path) -> Path:
 
     if subdir:
         target = clone_dir / subdir
+        # Guard against path traversal: a crafted ``subdir`` (e.g. with ``..``)
+        # must not resolve outside the clone root.
+        if not target.resolve().is_relative_to(clone_dir.resolve()):
+            raise SkillError(
+                f"Subdirectory '{subdir}' escapes the repository clone",
+                context={"owner": owner, "repo": repo, "branch": branch, "subdir": subdir},
+                hint="Use a subdirectory path inside the repository.",
+            )
         if not target.is_dir():
             raise SkillError(
                 f"Subdirectory '{subdir}' not found in {owner}/{repo}@{branch}",
@@ -234,8 +252,11 @@ def _collect_skills(root: Path) -> dict[str, Skill]:
     if not root.is_dir():
         return skills
 
-    for skill_file in root.rglob("*"):
-        if skill_file.name not in SKILL_FILENAMES or not skill_file.is_file():
+    skill_files = sorted(
+        {f for name in SKILL_FILENAMES for f in root.rglob(name)}
+    )
+    for skill_file in skill_files:
+        if not skill_file.is_file():
             continue
         try:
             text = skill_file.read_text(encoding="utf-8")
@@ -567,6 +588,10 @@ class SkillSyncManager:
 
     async def start(self) -> None:
         """Start all watchers as background ``asyncio.Task`` instances."""
+        if self._tasks:
+            raise RuntimeError(
+                "SkillSyncManager is already running; call stop() before start()."
+            )
         for watcher in self._watchers:
             task = asyncio.create_task(self._run_watcher(watcher))
             self._tasks.append(task)

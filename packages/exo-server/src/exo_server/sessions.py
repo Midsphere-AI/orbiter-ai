@@ -99,6 +99,16 @@ class SessionSummary(BaseModel):
 
 _SESSIONS_KEY = "exo_sessions"
 
+#: Maximum number of sessions retained in the in-memory store. When the cap
+#: is reached the oldest session (by ``created_at``) is evicted before the
+#: new one is inserted. Override via ``app.state.exo_max_sessions``.
+_DEFAULT_MAX_SESSIONS: int = 1_000
+
+#: Maximum number of messages retained per session. When the cap is reached
+#: the oldest message is dropped before the new one is appended. Override via
+#: ``app.state.exo_max_messages``.
+_DEFAULT_MAX_MESSAGES: int = 500
+
 #: Monotonically incrementing counter used to give distinct ``created_at``
 #: / ``updated_at`` values even on fast CI where ``time.time()`` resolution
 #: is coarse.  Only used internally by ``_now()``.
@@ -127,6 +137,16 @@ def _set_store(state: Any, store: dict[str, Session]) -> None:
     setattr(state, _SESSIONS_KEY, store)
 
 
+def _max_sessions(state: Any) -> int:
+    """Return the configured session cap (default ``_DEFAULT_MAX_SESSIONS``)."""
+    return int(getattr(state, "exo_max_sessions", _DEFAULT_MAX_SESSIONS))
+
+
+def _max_messages(state: Any) -> int:
+    """Return the configured per-session message cap (default ``_DEFAULT_MAX_MESSAGES``)."""
+    return int(getattr(state, "exo_max_messages", _DEFAULT_MAX_MESSAGES))
+
+
 # ---------------------------------------------------------------------------
 # Router
 # ---------------------------------------------------------------------------
@@ -141,6 +161,12 @@ async def create_session(req: Request, body: CreateSessionRequest) -> Any:
     now = _now()
     session = Session(agent_name=body.agent_name, title=body.title, created_at=now, updated_at=now)
     store[session.id] = session
+    # Evict the oldest session (lowest created_at) when the cap is exceeded so
+    # the in-memory store does not grow unboundedly.
+    cap = _max_sessions(req.app.state)
+    if len(store) > cap:
+        oldest_id = min(store, key=lambda sid: store[sid].created_at)
+        del store[oldest_id]
     _set_store(req.app.state, store)
     return session
 
@@ -206,6 +232,11 @@ async def append_message(req: Request, session_id: str, body: AppendMessageReque
         raise HTTPException(status_code=404, detail=f"Session '{session_id}' not found")
     msg = SessionMessage(role=body.role, content=body.content)
     session.messages.append(msg)
+    # Trim the oldest messages when the per-session cap is exceeded so the list
+    # does not grow unboundedly for long-running conversations.
+    cap = _max_messages(req.app.state)
+    if len(session.messages) > cap:
+        session.messages = session.messages[-cap:]
     session.updated_at = _now()
     return msg
 

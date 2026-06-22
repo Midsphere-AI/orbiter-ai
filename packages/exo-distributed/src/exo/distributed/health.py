@@ -6,6 +6,7 @@ health of all active workers.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from dataclasses import dataclass
@@ -74,7 +75,21 @@ class WorkerHealthCheck:
             This method is **synchronous** and performs a blocking network call.
             Do **not** call it from an async context (e.g. inside an
             ``asyncio`` event loop) — use :meth:`acheck` instead.
+
+        Raises:
+            RuntimeError: If called from within a running ``asyncio`` event loop.
+                Use :meth:`acheck` instead.
         """
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            pass  # No running loop — safe to proceed with blocking call.
+        else:
+            raise RuntimeError(
+                "WorkerHealthCheck.check() was called from inside a running asyncio event loop, "
+                "which would block the loop. Use 'await health_check.acheck()' instead."
+            )
+
         import redis
 
         logger.debug("WorkerHealthCheck checking worker %s", self._worker_id)
@@ -174,6 +189,9 @@ async def get_worker_fleet_status(redis_url: str) -> list[WorkerHealth]:
     :class:`WorkerHealth` instance.  Workers whose heartbeat TTL has expired
     are automatically cleaned up by Redis and will not appear.
 
+    Uses a Redis pipeline to batch ``HGETALL`` calls across all keys found
+    in a scan page, reducing round-trips from O(n) to O(scan_pages).
+
     Args:
         redis_url: Redis connection URL.
 
@@ -188,15 +206,19 @@ async def get_worker_fleet_status(redis_url: str) -> list[WorkerHealth]:
         workers: list[WorkerHealth] = []
         prefix = "exo:workers:"
 
-        # SCAN for all worker keys
+        # SCAN for all worker keys, then batch HGETALL via pipeline per page.
         cursor: int | bytes = 0
         while True:
             cursor, keys = await r.scan(cursor=cursor, match=f"{prefix}*", count=100)  # type: ignore[misc]
-            for key in keys:
-                worker_id = str(key).removeprefix(prefix)
-                data: dict[str, str] = await r.hgetall(key)  # type: ignore[misc,assignment]
-                if data:
-                    workers.append(_parse_worker_health(worker_id, data))
+            if keys:
+                pipe = r.pipeline(transaction=False)
+                for key in keys:
+                    pipe.hgetall(key)  # type: ignore[misc]
+                results: list[dict[str, str]] = await pipe.execute()  # type: ignore[misc]
+                for key, data in zip(keys, results, strict=False):
+                    if data:
+                        worker_id = str(key).removeprefix(prefix)
+                        workers.append(_parse_worker_health(worker_id, data))
             if cursor == 0:
                 break
 

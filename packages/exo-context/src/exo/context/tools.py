@@ -11,6 +11,7 @@ JSON schema so that LLMs only see the user-facing parameters.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from pathlib import Path
@@ -211,6 +212,13 @@ async def _grep_knowledge(ctx: Any, name: str, pattern: str) -> str:
                 f"Artifact '{name}' not found",
                 hint="Use search_knowledge to find available artifacts.",
             )
+        # SECURITY: overly long patterns can cause catastrophic backtracking in
+        # some regex engines.  Cap pattern length as a cheap guard.
+        if len(pattern) > 500:
+            return tool_error(
+                "Pattern too long (max 500 characters)",
+                hint="Use a shorter, more targeted regex pattern.",
+            )
         try:
             compiled = re.compile(pattern, re.IGNORECASE)
         except re.error as e:
@@ -328,7 +336,7 @@ async def _read_file(ctx: Any, path: str) -> str:
                 hint=("Check the file path. Use a relative path from the working directory root."),
             )
         try:
-            return target.read_text(encoding="utf-8")
+            return await asyncio.to_thread(target.read_text, encoding="utf-8")
         except UnicodeDecodeError:
             return tool_error(
                 f"Cannot read '{path}' as text",

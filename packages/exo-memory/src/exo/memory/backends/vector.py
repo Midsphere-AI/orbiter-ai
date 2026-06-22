@@ -10,6 +10,7 @@ memory* — distinct from ``exo-retrieval``'s document-chunk vector store).
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 from typing import Any, Protocol, runtime_checkable
@@ -70,14 +71,20 @@ class VectorMemoryStore:
 
     # -- MemoryStore protocol -------------------------------------------------
 
+    @staticmethod
+    def _hash_content(content: str) -> str:
+        """Return a SHA-256 hex digest of *content*."""
+        return hashlib.sha256(content.encode()).hexdigest()
+
     async def add(self, item: MemoryItem) -> None:
         """Persist a memory item and compute its embedding.
 
         If the item already exists and its content is unchanged, the cached
         vector is reused instead of calling the embeddings provider again.
         """
+        new_hash = self._hash_content(item.content)
         existing_hash = self._content_hashes.get(item.id)
-        if existing_hash is not None and existing_hash == item.content:
+        if existing_hash is not None and existing_hash == new_hash:
             # Content unchanged — reuse the cached vector.
             self._items[item.id] = item
             logger.debug("upserted item id=%s (content unchanged, skipping re-embed)", item.id)
@@ -85,7 +92,7 @@ class VectorMemoryStore:
         vec = await self._embeddings.embed(item.content)
         self._items[item.id] = item
         self._vectors[item.id] = vec
-        self._content_hashes[item.id] = item.content
+        self._content_hashes[item.id] = new_hash
         logger.debug("added item id=%s dim=%d", item.id, len(vec))
 
     async def get(self, item_id: str) -> MemoryItem | None:
@@ -385,8 +392,11 @@ class ChromaVectorMemoryStore:
             logger.debug("ChromaVectorMemoryStore: vector search returned %d items", len(items))
             return items
 
-        # No query — return newest first
-        kwargs = {"include": ["documents", "metadatas"]}
+        # No query — return newest first.
+        # Over-fetch by a small multiplier so that the client-side sort
+        # produces an accurate top-N result without loading the whole collection.
+        _overfetch = 4
+        kwargs = {"include": ["documents", "metadatas"], "limit": limit * _overfetch}
         if where:
             kwargs["where"] = where
         results = await asyncio.to_thread(collection.get, **kwargs)
@@ -451,7 +461,10 @@ class ChromaVectorMemoryStore:
         """Return the *n* most recently added items, newest first."""
         collection = self._ensure_collection()
         where = _build_where_filter(metadata, None, None)
-        kwargs: dict[str, Any] = {"include": ["documents", "metadatas"]}
+        # Over-fetch so the client-side sort yields an accurate top-N result
+        # without loading the entire collection.
+        _overfetch = 4
+        kwargs: dict[str, Any] = {"include": ["documents", "metadatas"], "limit": n * _overfetch}
         if where:
             kwargs["where"] = where
         results = await asyncio.to_thread(collection.get, **kwargs)

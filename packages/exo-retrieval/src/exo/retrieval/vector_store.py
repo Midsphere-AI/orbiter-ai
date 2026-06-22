@@ -87,19 +87,30 @@ class InMemoryVectorStore(VectorStore):
 
     Stores chunks and embeddings in plain Python dicts.  Suitable for
     development, testing, and small datasets.
+
+    Args:
+        max_size: Optional upper bound on the number of stored chunks.  When
+            set, the oldest entries (by insertion order) are evicted to keep
+            the store within the limit.  Defaults to ``None`` (unlimited),
+            preserving backward-compatible behaviour.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, max_size: int | None = None) -> None:
         self._chunks: dict[int, Chunk] = {}
         self._embeddings: dict[int, list[float]] = {}
         self._next_id: int = 0
+        self._max_size = max_size
 
     async def add(
         self,
         chunks: list[Chunk],
         embeddings: list[list[float]],
     ) -> None:
-        """Add chunks with their embedding vectors."""
+        """Add chunks with their embedding vectors.
+
+        When *max_size* is set and adding the new chunks would exceed it, the
+        oldest stored entries are evicted first (insertion-order FIFO).
+        """
         if len(chunks) != len(embeddings):
             msg = f"Number of chunks ({len(chunks)}) and embeddings ({len(embeddings)}) must match"
             raise RetrievalError(
@@ -107,10 +118,17 @@ class InMemoryVectorStore(VectorStore):
                 hint="Ensure embed_batch() is called on the same chunk list before calling add().",
             )
 
-        for chunk, embedding in zip(chunks, embeddings):
+        for chunk, embedding in zip(chunks, embeddings, strict=True):
             self._chunks[self._next_id] = chunk
             self._embeddings[self._next_id] = embedding
             self._next_id += 1
+
+        # Evict oldest entries when max_size is set and the store exceeds it.
+        if self._max_size is not None:
+            while len(self._chunks) > self._max_size:
+                oldest_key = next(iter(self._chunks))
+                del self._chunks[oldest_key]
+                del self._embeddings[oldest_key]
 
     async def search(
         self,

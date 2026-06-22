@@ -112,10 +112,18 @@ def build_context_window_info(
         logger.debug("exo.types unavailable in build_context_window_info; message counts will be 0")
         _msg_types = (type(None), type(None), type(None), type(None))
 
-    system_count = sum(1 for m in msg_list if isinstance(m, _msg_types[0]))
-    user_count = sum(1 for m in msg_list if isinstance(m, _msg_types[1]))
-    assistant_count = sum(1 for m in msg_list if isinstance(m, _msg_types[2]))
-    tool_result_count = sum(1 for m in msg_list if isinstance(m, _msg_types[3]))
+    # Single pass — accumulate all four counts together to avoid 4x iteration.
+    system_count = user_count = assistant_count = tool_result_count = 0
+    sys_t, usr_t, asst_t, tool_t = _msg_types
+    for m in msg_list:
+        if isinstance(m, sys_t):
+            system_count += 1
+        elif isinstance(m, usr_t):
+            user_count += 1
+        elif isinstance(m, asst_t):
+            assistant_count += 1
+        elif isinstance(m, tool_t):
+            tool_result_count += 1
 
     # Token usage from last LLM call (duck-typed)
     input_tokens = getattr(last_usage, "input_tokens", 0) or 0

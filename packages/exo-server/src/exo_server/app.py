@@ -184,7 +184,8 @@ def create_app() -> FastAPI:
         try:
             result = await _run_agent(agent, request.message)
         except Exception as exc:
-            raise HTTPException(status_code=500, detail=str(exc)) from exc
+            logger.exception("Unhandled error in /chat: %s", exc)
+            raise HTTPException(status_code=500, detail="internal error") from exc
 
         usage_obj = getattr(result, "usage", None)
         usage_dict: dict[str, int] = {}

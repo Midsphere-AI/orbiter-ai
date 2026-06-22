@@ -36,6 +36,10 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Maximum number of concurrent thread-pool calls when pushing scores to a
+# vendor platform.  Keeps the fan-out bounded even for very large result sets.
+_PUSH_CONCURRENCY: int = 32
+
 __all__ = ["EvalSyncError", "PlatformSync"]
 
 
@@ -192,13 +196,16 @@ class PlatformSync:
         # _push_one_score calls a synchronous vendor client; offload each call to
         # the default thread-pool executor so the event loop stays unblocked and
         # all scores are pushed concurrently rather than serially.
-        loop = asyncio.get_event_loop()
-        await asyncio.gather(
-            *(
-                loop.run_in_executor(None, self._push_one_score, tid, name, val)
-                for tid, name, val in pushes
-            )
-        )
+        # A semaphore caps the fan-out to avoid spawning an unbounded number of
+        # threads when the result set is large.
+        loop = asyncio.get_running_loop()
+        sem = asyncio.Semaphore(_PUSH_CONCURRENCY)
+
+        async def _bounded(tid: str, n: str, v: float) -> None:
+            async with sem:
+                await loop.run_in_executor(None, self._push_one_score, tid, n, v)
+
+        await asyncio.gather(*(_bounded(tid, name, val) for tid, name, val in pushes))
 
         pushed = len(pushes)
         logger.debug("Pushed %d scores to platform.", pushed)

@@ -181,7 +181,10 @@ class ModelConfig(BaseModel):
     Args:
         provider: Provider name, e.g. ``"openai"`` or ``"anthropic"``.
         model_name: Model identifier within the provider.
-        api_key: API key for authentication.
+        api_key: API key for authentication.  The raw string value is
+            accessible as ``config.api_key`` for provider SDKs; the value
+            is redacted in ``repr()`` / ``str()`` to prevent leaking into
+            logs and tracebacks.
         base_url: Custom API base URL.
         max_retries: Maximum number of retries on transient failures.
         timeout: Request timeout in seconds.
@@ -191,11 +194,33 @@ class ModelConfig(BaseModel):
 
     provider: str = "openai"
     model_name: str = "gpt-4o"
-    api_key: str | None = None
+    api_key: str | None = Field(default=None, repr=False)
     base_url: str | None = None
     max_retries: int = Field(default=3, ge=0)
     timeout: float = Field(default=30.0, gt=0)
     context_window_tokens: int | None = None
+
+    def __repr__(self) -> str:
+        # Manually build repr so api_key is always redacted regardless of
+        # how Pydantic's repr is configured (frozen + extra="allow" complicates it).
+        masked_key = "**redacted**" if self.api_key is not None else None
+        extra_fields = self.__pydantic_extra__ or {}
+        parts = [
+            f"provider={self.provider!r}",
+            f"model_name={self.model_name!r}",
+            f"api_key={masked_key!r}",
+        ]
+        if self.base_url is not None:
+            parts.append(f"base_url={self.base_url!r}")
+        parts += [
+            f"max_retries={self.max_retries!r}",
+            f"timeout={self.timeout!r}",
+        ]
+        if self.context_window_tokens is not None:
+            parts.append(f"context_window_tokens={self.context_window_tokens!r}")
+        for k, v in extra_fields.items():
+            parts.append(f"{k}={v!r}")
+        return f"ModelConfig({', '.join(parts)})"
 
 
 class TaskConfig(BaseModel):

@@ -19,7 +19,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from exo.retrieval.types import Document  # pyright: ignore[reportMissingImports]
+from exo.retrieval.types import Document, RetrievalError  # pyright: ignore[reportMissingImports]
 
 
 class Parser(abc.ABC):
@@ -153,6 +153,9 @@ class MarkdownParser(Parser):
         return Document(id=str(uuid.uuid4()), content=text, metadata=metadata)
 
 
+_JSON_MAX_DEPTH = 64  # default recursion cap for JSONParser._flatten
+
+
 class JSONParser(Parser):
     """Parser that flattens JSON into readable text with key paths.
 
@@ -166,7 +169,15 @@ class JSONParser(Parser):
         user.name: Alice
         user.tags[0]: a
         user.tags[1]: b
+
+    Args:
+        max_depth: Maximum nesting depth before a ``RetrievalError`` is raised
+            (default 64).  Protects against ``RecursionError`` on pathological
+            inputs.
     """
+
+    def __init__(self, max_depth: int = _JSON_MAX_DEPTH) -> None:
+        self._max_depth = max_depth
 
     def parse(self, source: str | bytes | Path) -> Document:
         """Parse JSON into a Document with flattened key paths.
@@ -176,27 +187,48 @@ class JSONParser(Parser):
 
         Returns:
             A ``Document`` with flattened key-value text.
+
+        Raises:
+            RetrievalError: If the JSON is nested deeper than *max_depth*.
         """
         text, metadata = _read_source(source)
         metadata["format"] = "json"
 
         data = json.loads(text)
-        lines = list(self._flatten(data, ""))
+        lines = list(self._flatten(data, "", 0))
         content = "\n".join(lines)
 
         return Document(id=str(uuid.uuid4()), content=content, metadata=metadata)
 
-    def _flatten(self, obj: Any, prefix: str) -> list[str]:
-        """Recursively flatten a JSON object into key-path: value lines."""
+    def _flatten(self, obj: Any, prefix: str, depth: int) -> list[str]:
+        """Recursively flatten a JSON object into key-path: value lines.
+
+        Args:
+            obj: Current JSON value.
+            prefix: Dot-path prefix accumulated so far.
+            depth: Current recursion depth (0-based).
+
+        Raises:
+            RetrievalError: If *depth* exceeds ``self._max_depth``.
+        """
+        if depth > self._max_depth:
+            raise RetrievalError(
+                f"JSON nesting depth exceeds maximum of {self._max_depth}.",
+                context={"max_depth": self._max_depth, "prefix": prefix},
+                hint=(
+                    f"Reduce nesting in the input JSON or increase max_depth"
+                    f" (current limit: {self._max_depth})."
+                ),
+            )
         lines: list[str] = []
         if isinstance(obj, dict):
             for key, value in obj.items():
                 path = f"{prefix}.{key}" if prefix else key
-                lines.extend(self._flatten(value, path))
+                lines.extend(self._flatten(value, path, depth + 1))
         elif isinstance(obj, list):
             for i, value in enumerate(obj):
                 path = f"{prefix}[{i}]"
-                lines.extend(self._flatten(value, path))
+                lines.extend(self._flatten(value, path, depth + 1))
         else:
             display = str(obj) if obj is not None else "null"
             lines.append(f"{prefix}: {display}")

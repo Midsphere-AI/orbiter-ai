@@ -40,6 +40,12 @@ _FS_SCHEMA: dict[str, Any] = {
 }
 
 
+#: Default maximum number of bytes FilesystemTool will read in a single call.
+#: Set to a generous 10 MiB to guard against accidentally reading huge files
+#: into the LLM context.  Override via ``FilesystemTool(max_read_bytes=...)``.
+_DEFAULT_MAX_READ_BYTES = 10 * 1024 * 1024  # 10 MiB
+
+
 class FilesystemTool(Tool):
     """Sandboxed filesystem tool with allowed-directory restrictions.
 
@@ -60,9 +66,11 @@ class FilesystemTool(Tool):
         allowed_directories: list[str] | None = None,
         *,
         sandbox: Any | None = None,
+        max_read_bytes: int = _DEFAULT_MAX_READ_BYTES,
     ) -> None:
         self._allowed: list[Path] = [Path(d).resolve() for d in (allowed_directories or [])]
         self._sandbox = sandbox
+        self._max_read_bytes = max_read_bytes
 
     # -- path validation ----------------------------------------------------
 
@@ -130,6 +138,19 @@ class FilesystemTool(Tool):
 
     async def _read(self, path: Path) -> str:
         try:
+            size = await asyncio.to_thread(lambda: path.stat().st_size)
+        except FileNotFoundError as exc:
+            raise ToolError(f"File not found: {path}") from exc
+        except Exception as exc:
+            raise ToolError(f"Read failed: {exc}") from exc
+        if size > self._max_read_bytes:
+            raise ToolError(
+                f"File {path} is too large to read ({size:,} bytes > "
+                f"{self._max_read_bytes:,} byte limit). "
+                "Use a streaming approach or increase max_read_bytes.",
+                context={"path": str(path), "size": size, "limit": self._max_read_bytes},
+            )
+        try:
             return await asyncio.to_thread(path.read_text, encoding="utf-8")
         except FileNotFoundError as exc:
             raise ToolError(f"File not found: {path}") from exc
@@ -164,19 +185,50 @@ class FilesystemTool(Tool):
 # ShellTool — unified command execution (allowlist or blacklist mode)
 # ---------------------------------------------------------------------------
 
+# SECURITY NOTE: blacklist mode is NOT a security boundary.  An LLM or
+# adversarial user can find creative bypasses (aliases, env-var tricks,
+# language-level exec, etc.) not caught by a static command list.  For
+# production workloads use allowlist mode or a real isolated sandbox
+# (E2BSandbox / KubernetesSandbox).  The list below is best-effort
+# defence-in-depth only.
 _DANGEROUS_COMMANDS: frozenset[str] = frozenset(
     {
+        # Destructive file operations
         "rm",
         "rmdir",
         "mkfs",
         "dd",
+        # System control
         "shutdown",
         "reboot",
         "halt",
         "poweroff",
+        # Process control
         "kill",
         "killall",
         "pkill",
+        # Privilege escalation
+        "sudo",
+        "su",
+        "chmod",
+        "chown",
+        # Network exfiltration / reverse shells
+        "curl",
+        "wget",
+        "nc",
+        "netcat",
+        "ncat",
+        # Shells / arbitrary code execution
+        "bash",
+        "sh",
+        "zsh",
+        "fish",
+        "python",
+        "python3",
+        "perl",
+        "ruby",
+        "node",
+        # Disk formatting
         "format",
         # Windows equivalents
         "del",
@@ -312,8 +364,15 @@ class ShellTool(Tool):
         """Split *command* on shell control operators to get individual command segments.
 
         First splits on literal newlines, then tokenizes each line with
-        ``shlex`` and collects segments between control tokens
-        (``|``, ``||``, ``&&``, ``;``, ``&``).
+        ``shlex`` (default word-splitting, **not** ``whitespace_split=True``).
+        Without ``whitespace_split``, shlex treats punctuation characters as
+        word-breakers, so an operator glued to a token without spaces (e.g.
+        ``ls;rm``) is emitted as separate tokens (``ls``, ``;``, ``rm``) rather
+        than one ``ls;rm`` token that would bypass the blacklist check.
+
+        Control operator tokens (``|``, ``||``, ``&&``, ``;``, ``&``) are used
+        as segment boundaries; the words between them form one segment whose
+        first word is the executable to check against the blacklist.
         """
         _control = frozenset({"|", "||", "&&", ";", "&"})
         segments: list[str] = []
@@ -322,10 +381,21 @@ class ShellTool(Tool):
             if not line:
                 continue
             try:
+                # Use default shlex mode (not whitespace_split=True) so that
+                # operators attached to words without spaces are still split out.
+                # E.g. "ls;rm" yields tokens ["ls", ";", "rm"] not ["ls;rm"].
                 lex = shlex.shlex(line, posix=True)
-                lex.whitespace_split = True
+                lex.whitespace_split = False
+                # Keep path/argument characters as part of a word so that an
+                # executable like ``/usr/bin/rm`` or an arg like ``-rf`` is one
+                # token (otherwise its basename can't be checked), while shell
+                # operators (``; | &``) — deliberately NOT added here — remain
+                # separate tokens and still act as segment boundaries.
+                lex.wordchars += "/.-=+~@:,%"
                 tokens = list(lex)
             except ValueError:
+                # If shlex cannot tokenize (e.g. unmatched quotes), fall back
+                # to treating the whole line as one segment — conservative but safe.
                 segments.append(line)
                 continue
             current: list[str] = []

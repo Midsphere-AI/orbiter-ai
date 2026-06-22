@@ -24,6 +24,14 @@ _DEFAULT_IMAGE = "python:3.11-slim"
 _POLL_INTERVAL = 2.0
 _MAX_POLL_ATTEMPTS = 30
 
+# Default resource limits applied to every sandbox pod.  Override via the
+# ``resource_limits`` constructor parameter (a full Kubernetes ``resources``
+# dict with ``limits`` and/or ``requests`` sub-keys).
+_DEFAULT_CPU_LIMIT = "1"
+_DEFAULT_MEMORY_LIMIT = "512Mi"
+_DEFAULT_CPU_REQUEST = "100m"
+_DEFAULT_MEMORY_REQUEST = "128Mi"
+
 
 # ---------------------------------------------------------------------------
 # KubernetesSandbox
@@ -43,6 +51,7 @@ class KubernetesSandbox(Sandbox):
         "_k8s_client",
         "_namespace",
         "_pod_name",
+        "_resource_limits",
     )
 
     def __init__(
@@ -56,6 +65,7 @@ class KubernetesSandbox(Sandbox):
         namespace: str | None = None,
         image: str | None = None,
         tools: dict[str, Any] | None = None,
+        resource_limits: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(
             sandbox_id=sandbox_id,
@@ -68,6 +78,19 @@ class KubernetesSandbox(Sandbox):
         self._image = image or os.environ.get("EXO_K8S_IMAGE", _DEFAULT_IMAGE)
         self._pod_name: str | None = None
         self._k8s_client: Any = None
+        # Resource limits/requests for the sandbox container.  Callers may pass a
+        # fully-formed Kubernetes ``resources`` dict (with ``limits``/``requests``
+        # sub-keys) to override the defaults.
+        self._resource_limits: dict[str, Any] = resource_limits or {
+            "limits": {
+                "cpu": _DEFAULT_CPU_LIMIT,
+                "memory": _DEFAULT_MEMORY_LIMIT,
+            },
+            "requests": {
+                "cpu": _DEFAULT_CPU_REQUEST,
+                "memory": _DEFAULT_MEMORY_REQUEST,
+            },
+        }
         # Seed the shared registry from the constructor `tools` mapping.  Use
         # register_tool() so the duplicate-key guard fires for callers who pass
         # the same name twice (e.g. via both positional and keyword args).
@@ -130,7 +153,13 @@ class KubernetesSandbox(Sandbox):
         return self._k8s_client
 
     def _pod_manifest(self) -> dict[str, Any]:
-        """Build a minimal pod manifest."""
+        """Build a hardened pod manifest with resource limits and securityContext.
+
+        The container runs as a non-root user with privilege escalation disabled
+        and a read-only root filesystem.  Resource limits prevent a runaway agent
+        from starving other pods on the node.  Both can be overridden via the
+        ``resource_limits`` constructor parameter.
+        """
         return {
             "apiVersion": "v1",
             "kind": "Pod",
@@ -145,6 +174,12 @@ class KubernetesSandbox(Sandbox):
                         "name": "sandbox",
                         "image": self._image,
                         "command": ["sleep", "infinity"],
+                        "resources": self._resource_limits,
+                        "securityContext": {
+                            "runAsNonRoot": True,
+                            "allowPrivilegeEscalation": False,
+                            "readOnlyRootFilesystem": True,
+                        },
                     }
                 ],
                 "restartPolicy": "Never",

@@ -98,10 +98,14 @@ class AgenticRetriever(Retriever):
         all_results: dict[tuple[str, int], RetrievalResult] = {}
 
         for _round in range(self.max_rounds):
-            # Always rewrite from the original query so that each round
-            # independently expands/disambiguates rather than compounding
+            # Round 0: use the original query to avoid a redundant LLM call.
+            # Subsequent rounds rewrite from the original query so that each
+            # round independently expands/disambiguates rather than compounding
             # rewrites of rewrites.
-            current_query = await self.rewriter.rewrite(query)
+            if _round == 0:
+                current_query = query
+            else:
+                current_query = await self.rewriter.rewrite(query)
 
             # Retrieve using the base retriever
             round_results = await self.base_retriever.retrieve(current_query, top_k=top_k, **kwargs)

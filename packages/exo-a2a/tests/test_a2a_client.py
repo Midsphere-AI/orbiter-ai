@@ -215,11 +215,15 @@ class TestA2AClientCollect:
             {"task_id": "s-1", "text": "result", "last_chunk": True},
             {"task_id": "s-1", "status": {"state": "completed"}},
         ]
-        ndjson = "\n".join(json.dumps(e) for e in events)
+        lines = [json.dumps(e) for e in events]
+
+        async def _aiter_lines():
+            for line in lines:
+                yield line
 
         mock_resp = MagicMock()
-        mock_resp.text = ndjson
         mock_resp.raise_for_status = MagicMock()
+        mock_resp.aiter_lines = _aiter_lines
         client._http = AsyncMock()
         client._http.post = AsyncMock(return_value=mock_resp)
 
@@ -405,9 +409,15 @@ class TestMalformedNDJSON:
         card = _make_card(streaming=True)
         client = A2AClient(card)
 
+        raw_lines = ['{"ok": 1}', "not-valid-json", '{"ok": 3}']
+
+        async def _aiter_lines():
+            for line in raw_lines:
+                yield line
+
         mock_resp = MagicMock()
-        mock_resp.text = '{"ok": 1}\nnot-valid-json\n{"ok": 3}'
         mock_resp.raise_for_status = MagicMock()
+        mock_resp.aiter_lines = _aiter_lines
         client._http = AsyncMock()
         client._http.post = AsyncMock(return_value=mock_resp)
 
@@ -418,9 +428,12 @@ class TestMalformedNDJSON:
         card = _make_card(streaming=True)
         client = A2AClient(card)
 
+        async def _aiter_lines():
+            yield "not-json"
+
         mock_resp = MagicMock()
-        mock_resp.text = "not-json"
         mock_resp.raise_for_status = MagicMock()
+        mock_resp.aiter_lines = _aiter_lines
         client._http = AsyncMock()
         client._http.post = AsyncMock(return_value=mock_resp)
 
@@ -616,3 +629,94 @@ class TestEmptyCardUrl:
         client = A2AClient(card)
         with pytest.raises(A2AClientError, match="empty URL"):
             await client.send_task_collect("hello")
+
+
+# ===========================================================================
+# SSRF guard — card.url origin validation (Finding 1)
+# ===========================================================================
+
+
+class TestSSRFOriginValidation:
+    """_resolve_from_url rejects card.url that differs in origin from the discovery URL."""
+
+    def test_same_origin_passes(self) -> None:
+        assert A2AClient._same_origin(
+            "http://remote:9000/.well-known/agent-card",
+            "http://remote:9000/",
+        )
+
+    def test_different_host_fails(self) -> None:
+        assert not A2AClient._same_origin(
+            "http://remote:9000/.well-known/agent-card",
+            "http://internal:9000/",
+        )
+
+    def test_different_port_fails(self) -> None:
+        assert not A2AClient._same_origin(
+            "http://remote:9000/.well-known/agent-card",
+            "http://remote:8080/",
+        )
+
+    def test_different_scheme_fails(self) -> None:
+        assert not A2AClient._same_origin(
+            "https://remote:443/.well-known/agent-card",
+            "http://remote:443/",
+        )
+
+    def test_default_http_port_normalised(self) -> None:
+        """http on port 80 is the same origin as http with no explicit port."""
+        assert A2AClient._same_origin(
+            "http://remote:80/.well-known/agent-card",
+            "http://remote/",
+        )
+
+    async def test_resolve_from_url_rejects_cross_origin_card_url(self) -> None:
+        """_resolve_from_url raises A2AClientError when card.url differs in origin."""
+        client = A2AClient("http://trusted:9000/.well-known/agent-card")
+
+        # Agent card advertises a different host — SSRF attempt.
+        card_data = {
+            "name": "evil",
+            "url": "http://internal-service:80/",
+            "capabilities": {},
+        }
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock()
+        mock_resp.json.return_value = card_data
+        client._http = AsyncMock()
+        client._http.get = AsyncMock(return_value=mock_resp)
+
+        with pytest.raises(A2AClientError, match="SSRF"):
+            await client.resolve_agent_card()
+
+    async def test_resolve_from_url_accepts_same_origin_card_url(self) -> None:
+        """_resolve_from_url accepts card.url that matches the discovery origin."""
+        client = A2AClient("http://trusted:9000/.well-known/agent-card")
+
+        card_data = {
+            "name": "ok",
+            "url": "http://trusted:9000/",
+            "capabilities": {},
+        }
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock()
+        mock_resp.json.return_value = card_data
+        client._http = AsyncMock()
+        client._http.get = AsyncMock(return_value=mock_resp)
+
+        card = await client.resolve_agent_card()
+        assert card.name == "ok"
+
+    async def test_resolve_from_url_allows_empty_card_url(self) -> None:
+        """Empty card.url bypasses the SSRF check (caught later by send_task)."""
+        client = A2AClient("http://trusted:9000/.well-known/agent-card")
+
+        card_data = {"name": "no-url", "url": "", "capabilities": {}}
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock()
+        mock_resp.json.return_value = card_data
+        client._http = AsyncMock()
+        client._http.get = AsyncMock(return_value=mock_resp)
+
+        card = await client.resolve_agent_card()
+        assert card.url == ""

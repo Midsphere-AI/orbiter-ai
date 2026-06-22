@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from collections import deque
 from dataclasses import asdict, dataclass
 from typing import Any
 
@@ -60,7 +61,7 @@ class LLMCallOperator(Operator):
         self._system_prompt = system_prompt
         self._user_prompt = user_prompt
         self._max_traces = max_traces
-        self._traces: list[LLMCallTrace] = []
+        self._traces: deque[LLMCallTrace] = deque(maxlen=max_traces)
 
     @property
     def name(self) -> str:
@@ -68,7 +69,7 @@ class LLMCallOperator(Operator):
 
     @property
     def traces(self) -> list[LLMCallTrace]:
-        """Return recorded execution traces."""
+        """Return recorded execution traces (newest last)."""
         return list(self._traces)
 
     async def execute(self, **kwargs: Any) -> Any:
@@ -92,6 +93,7 @@ class LLMCallOperator(Operator):
             raise
         finally:
             duration_ms = (time.monotonic() - start) * 1000
+            # deque(maxlen=...) evicts the oldest entry automatically — O(1).
             self._traces.append(
                 LLMCallTrace(
                     operator_name=self._name,
@@ -103,8 +105,6 @@ class LLMCallOperator(Operator):
                     timestamp=time.time(),
                 )
             )
-            if len(self._traces) > self._max_traces:
-                self._traces = self._traces[-self._max_traces :]
 
     def get_tunables(self) -> list[TunableSpec]:
         return [

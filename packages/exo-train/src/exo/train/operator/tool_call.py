@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from collections import deque
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
@@ -56,7 +57,7 @@ class ToolCallOperator(Operator):
         self._tool_fn = tool_fn
         self._tool_description = tool_description
         self._max_traces = max_traces
-        self._traces: list[ToolCallTrace] = []
+        self._traces: deque[ToolCallTrace] = deque(maxlen=max_traces)
 
     @property
     def name(self) -> str:
@@ -64,7 +65,7 @@ class ToolCallOperator(Operator):
 
     @property
     def traces(self) -> list[ToolCallTrace]:
-        """Return recorded execution traces."""
+        """Return recorded execution traces (newest last)."""
         return list(self._traces)
 
     async def execute(self, **kwargs: Any) -> Any:
@@ -83,6 +84,7 @@ class ToolCallOperator(Operator):
             raise
         finally:
             duration_ms = (time.monotonic() - start) * 1000
+            # deque(maxlen=...) evicts the oldest entry automatically — O(1).
             self._traces.append(
                 ToolCallTrace(
                     operator_name=self._name,
@@ -94,8 +96,6 @@ class ToolCallOperator(Operator):
                     timestamp=time.time(),
                 )
             )
-            if len(self._traces) > self._max_traces:
-                self._traces = self._traces[-self._max_traces :]
 
     def get_tunables(self) -> list[TunableSpec]:
         return [

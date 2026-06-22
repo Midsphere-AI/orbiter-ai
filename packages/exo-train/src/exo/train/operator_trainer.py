@@ -46,22 +46,45 @@ class FileCheckpointStore:
 
     Args:
         directory: Path to the checkpoint directory. Created on first save.
+            The path is resolved to an absolute path at construction time.
+        base_dir: Optional containment root.  When provided, every write
+            path is asserted to be a descendant of *base_dir*; paths that
+            would escape (e.g. via ``../../``) raise :exc:`TrainerError`.
+            When *None* (default) no containment check is performed but the
+            directory is still resolved to an absolute path.
     """
 
-    __slots__ = ("_directory",)
+    __slots__ = ("_base_dir", "_directory")
 
-    def __init__(self, directory: str | Path) -> None:
-        self._directory = Path(directory)
+    def __init__(self, directory: str | Path, *, base_dir: str | Path | None = None) -> None:
+        self._directory = Path(directory).resolve()
+        self._base_dir = Path(base_dir).resolve() if base_dir is not None else None
+        if self._base_dir is not None:
+            self._assert_contained(self._directory)
+
+    def _assert_contained(self, path: Path) -> None:
+        """Raise TrainerError if *path* is not under self._base_dir."""
+        assert self._base_dir is not None
+        try:
+            path.relative_to(self._base_dir)
+        except ValueError:
+            msg = (
+                f"Checkpoint path {path!r} escapes the allowed base directory "
+                f"{self._base_dir!r}. Refusing to write."
+            )
+            raise TrainerError(msg) from None
 
     @property
     def directory(self) -> Path:
-        """Checkpoint directory path."""
+        """Checkpoint directory path (resolved absolute path)."""
         return self._directory
 
     def save(self, epoch: int, data: dict[str, Any]) -> None:
         """Save checkpoint data for the given epoch."""
         self._directory.mkdir(parents=True, exist_ok=True)
-        path = self._directory / f"checkpoint_{epoch}.json"
+        path = (self._directory / f"checkpoint_{epoch}.json").resolve()
+        if self._base_dir is not None:
+            self._assert_contained(path)
         path.write_text(json.dumps(data, default=str), encoding="utf-8")
 
     def load(self, epoch: int | None = None) -> dict[str, Any] | None:

@@ -49,9 +49,30 @@ class ShortTermMemory:
 
     # -- MemoryStore protocol --------------------------------------------------
 
+    # Number of non-system items to keep per configured round as a write-time
+    # safety cap.  Generous enough for multi-scope usage (multiple task /
+    # session IDs in the same store) and tool call / result pairs.
+    # Read-time windowing via ``_window()`` enforces the precise round limit;
+    # this cap just prevents unbounded growth over very long sessions.
+    _ITEMS_PER_ROUND_CAP = 20
+
     async def add(self, item: MemoryItem) -> None:
-        """Persist a memory item."""
+        """Persist a memory item.
+
+        When *max_rounds* is set, trim the oldest non-system items after
+        appending so the backing list stays bounded.  The cap uses a generous
+        per-round multiplier so that multi-scope scenarios (multiple task /
+        session IDs coexisting in the same store) are not affected — the
+        precise window is applied at read time by ``_window()``.
+        """
         self._items.append(item)
+        if self.max_rounds > 0:
+            cap = self.max_rounds * self._ITEMS_PER_ROUND_CAP
+            if len(self._items) > cap:
+                # Retain all system messages; drop oldest non-system items.
+                system = [m for m in self._items if m.memory_type == "system"]
+                non_system = [m for m in self._items if m.memory_type != "system"]
+                self._items = system + non_system[-cap:]
         logger.debug("added item type=%s id=%s scope=%s", item.memory_type, item.id, self.scope)
 
     async def get(self, item_id: str) -> MemoryItem | None:

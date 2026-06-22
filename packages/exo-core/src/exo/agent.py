@@ -46,7 +46,7 @@ from exo.observability.logging import get_logger  # pyright: ignore[reportMissin
 from exo.rail import Guard, GuardAbortError, GuardManager
 from exo.skills import DictToolResolver, SkillError, SkillRegistry, ToolResolver
 from exo.task_controller import TaskLoopEvent, TaskLoopEventType, TaskLoopQueue
-from exo.tool import FunctionTool, Tool, ToolError
+from exo.tool import FunctionTool, Tool
 from exo.tool_context import ToolContext
 from exo.tool_result import tool_error, tool_ok
 from exo.types import (
@@ -55,7 +55,6 @@ from exo.types import (
     ExoError,
     Message,
     MessageContent,
-    SystemMessage,
     ToolResult,
     UserMessage,
 )
@@ -202,18 +201,26 @@ def _make_default_long_term(db_path: str | None = None) -> Any:
             a fresh temp file path is generated (the file is created on
             first use, not here).
     """
+    import shutil
     import tempfile
+    import weakref
 
     from exo.memory.backends.sqlite import (  # pyright: ignore[reportMissingImports]
         SQLiteMemoryStore,
     )
 
+    tmp_dir: str | None = None
     if db_path is None:
         # Build a path inside a new temp directory; the file itself is not
         # created here — SQLiteMemoryStore opens the connection on first use.
         tmp_dir = tempfile.mkdtemp(prefix="exo_agent_")
         db_path = f"{tmp_dir}/memory.db"
-    return SQLiteMemoryStore(db_path)
+    store = SQLiteMemoryStore(db_path)
+    if tmp_dir is not None:
+        # Remove the auto-created temp dir when the store is garbage-collected
+        # so short-lived agents don't leak temp directories on disk.
+        weakref.finalize(store, shutil.rmtree, tmp_dir, ignore_errors=True)
+    return store
 
 
 def _make_default_memory(db_path: str | None = None) -> Any:
@@ -235,11 +242,11 @@ def _make_default_memory(db_path: str | None = None) -> Any:
 # Shared context helpers — moved to _internal/context_helpers.py so that
 # runner.py can import them without coupling to agent.py internals.
 from exo._internal.context_helpers import (
-    _ContextAction,
-    _ProviderSummarizer,
     _apply_context_windowing,
+    _ContextAction,  # noqa: F401 - re-exported for tests / external imports
     _get_context_window_tokens,
     _inject_long_term_knowledge,
+    _ProviderSummarizer,  # noqa: F401 - re-exported for backwards compatibility
     _update_system_token_info,
 )
 
@@ -686,6 +693,9 @@ class Agent:
         self._bg_handler: Any = None
         # Live registry of detached background tasks (owner for cancel/cleanup).
         self._bg_tasks: dict[str, asyncio.Task] = {}
+        # MCP connections opened via add_mcp_server() — owned here so aclose()
+        # can shut down their stdio subprocesses instead of leaking them.
+        self._mcp_connections: list[Any] = []
         # True while a run() is in flight — drives HOT (inject live) vs
         # WAKEUP (queue for next run) routing of background results.
         self._is_running: bool = False
@@ -1638,9 +1648,18 @@ class Agent:
 
         Background sub-agents are intentionally left running across
         ``run()`` calls (fire-and-forget).  Call this for deterministic
-        cleanup when you are done with the agent.
+        cleanup when you are done with the agent.  Also closes any MCP
+        server connections opened via :meth:`add_mcp_server`.
         """
         await self._cancel_background()
+
+        # Close MCP connections (and their stdio subprocesses) in LIFO order.
+        while self._mcp_connections:
+            conn = self._mcp_connections.pop()
+            try:
+                await conn.cleanup()
+            except Exception as exc:
+                _log.debug("Error closing MCP connection during aclose(): %s", exc)
 
     def _make_spawn_background_tool(self) -> Tool:
         """Create the ``spawn_background`` FunctionTool closure for this agent."""
@@ -2088,6 +2107,8 @@ class Agent:
         async with self._tools_lock:
             for tool in mcp_tools:
                 self._register_tool(tool)
+            # Retain the connection so aclose() can close its subprocess.
+            self._mcp_connections.append(conn)
 
         _log.info(
             "add_mcp_server: agent=%s server=%s tools_added=%d",
@@ -2719,8 +2740,13 @@ class Agent:
                     getattr(exc, "response", None), "status_code", None
                 )
                 if _status == 401 or "Authentication" in type(exc).__name__:
+                    # Use only the exception *type* in the surfaced message —
+                    # provider SDK error strings can embed request metadata or
+                    # key fragments. Full detail goes to the DEBUG log instead.
+                    _log.debug("Authentication error on '%s'", self.name, exc_info=True)
                     raise AgentError(
-                        f"Authentication failed for agent '{self.name}': {exc}\n"
+                        f"Authentication failed for agent '{self.name}' "
+                        f"({type(exc).__name__}).\n"
                         "Check your API key / environment variable."
                     ) from exc
 

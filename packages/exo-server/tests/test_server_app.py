@@ -210,7 +210,7 @@ class TestChatEndpoint:
                 resp = await client.post("/chat", json={"message": "hi"})
 
         assert resp.status_code == 500
-        assert "boom" in resp.json()["detail"]
+        assert resp.json()["detail"] == "internal error"
 
 
 # ---------------------------------------------------------------------------

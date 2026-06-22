@@ -184,13 +184,36 @@ class BackgroundTaskHandler:
 
     Args:
         state: Optional ``RunState`` for tracking background task nodes.
+        max_retained: Soft cap on the number of *terminal* (completed/failed)
+            tasks kept in ``_tasks``.  Running tasks are never evicted; once the
+            number of terminal tasks exceeds this bound, the oldest terminal
+            entries are dropped so long-lived handlers don't grow without limit.
     """
 
-    def __init__(self, *, state: RunState | None = None) -> None:
+    DEFAULT_MAX_RETAINED: int = 1_000
+
+    def __init__(
+        self, *, state: RunState | None = None, max_retained: int = DEFAULT_MAX_RETAINED
+    ) -> None:
         self._tasks: dict[str, BackgroundTask] = {}
         self._pending = PendingQueue()
         self._state = state
         self._merge_callbacks: list[Any] = []
+        self._max_retained = max_retained
+
+    def _evict_terminal(self) -> None:
+        """Drop the oldest terminal tasks when over the retention cap.
+
+        ``_pending`` and any caller holding the ``BackgroundTask`` keep their
+        own references, so removing an entry from ``_tasks`` only affects
+        lookup by id via :meth:`get` / :meth:`list_tasks`.
+        """
+        if self._max_retained <= 0:
+            return
+        terminal_ids = [tid for tid, t in self._tasks.items() if t.is_complete]
+        excess = len(terminal_ids) - self._max_retained
+        for tid in terminal_ids[:excess] if excess > 0 else ():
+            del self._tasks[tid]
 
     def submit(
         self,
@@ -270,6 +293,7 @@ class BackgroundTaskHandler:
             task.merge_mode = MergeMode.WAKEUP
             self._pending.push(task)
 
+        self._evict_terminal()
         return task.merge_mode
 
     def handle_error(self, task_id: str, error: str) -> None:
@@ -294,6 +318,8 @@ class BackgroundTaskHandler:
                 if node.agent_name == f"bg:{task_id}":
                     node.fail(error)
                     break
+
+        self._evict_terminal()
 
     async def drain_pending(self) -> AsyncIterator[BackgroundTask]:
         """Yield all pending background tasks (wake-up-merge pattern).

@@ -270,7 +270,7 @@ class OpenAIEmbeddings(Embeddings):
             raise EmbeddingError(
                 f"OpenAI embeddings API error: {status}",
                 operation="embed",
-                details={"status": status, "body": exc.response.text},
+                details={"status": status, "body": exc.response.text[:512]},
                 hint=_hint,
             ) from exc
         except httpx.HTTPError as exc:
@@ -416,7 +416,7 @@ class VertexEmbeddings(Embeddings):
             raise EmbeddingError(
                 f"Vertex AI embeddings API error: {status}",
                 operation="embed",
-                details={"status": status, "body": exc.response.text},
+                details={"status": status, "body": exc.response.text[:512]},
                 hint=_hint,
             ) from exc
         except httpx.HTTPError as exc:
@@ -563,7 +563,7 @@ class HTTPEmbeddings(Embeddings):
             raise EmbeddingError(
                 f"HTTP embeddings API error: {status}",
                 operation="embed",
-                details={"status": status, "body": exc.response.text},
+                details={"status": status, "body": exc.response.text[:512]},
                 hint=_hint,
             ) from exc
         except httpx.HTTPError as exc:

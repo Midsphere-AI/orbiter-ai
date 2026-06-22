@@ -124,6 +124,11 @@ class PatternBackend(GuardrailBackend):
                 matched_patterns.append(desc)
                 if _risk_rank(level) > _risk_rank(worst_level):
                     worst_level = level
+            # PERF: CRITICAL is the maximum possible risk level — once we
+            # have a CRITICAL match (and have recorded it above) no further
+            # pattern can raise the risk level, so we can stop scanning.
+            if worst_level == RiskLevel.CRITICAL:
+                break
 
         if worst_level == RiskLevel.SAFE:
             return RiskAssessment(has_risk=False, risk_level=RiskLevel.SAFE)

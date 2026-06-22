@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from typing import Any
 
 import asyncpg  # pyright: ignore[reportMissingImports]
@@ -87,7 +88,8 @@ class PostgresMemoryStore:
         async with self._init_lock:
             if self._pool is not None:
                 return  # another coroutine beat us
-            logger.debug("connecting to postgres dsn=%s", self.dsn)
+            _safe_dsn = re.sub(r":[^:@/]+@", ":***@", self.dsn)
+            logger.debug("connecting to postgres dsn=%s", _safe_dsn)
             self._pool = await asyncpg.create_pool(self.dsn)
             pool = self._pool
             assert pool is not None

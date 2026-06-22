@@ -123,7 +123,13 @@ class LLMGuardrailBackend(GuardrailBackend):
         if not text:
             return RiskAssessment(has_risk=False, risk_level=RiskLevel.SAFE)
 
-        prompt = self._prompt_template.format(user_message=text)
+        # Escape any literal braces in user-supplied text before substituting
+        # into the template.  Without this, attacker text containing ``{foo}``
+        # or stray ``{`` / ``}`` characters would cause str.format() to raise
+        # KeyError / IndexError — which, combined with fail_open=True, could
+        # silently bypass the guardrail.
+        safe_text = text.replace("{", "{{").replace("}", "}}")
+        prompt = self._prompt_template.format(user_message=safe_text)
 
         try:
             provider = self._get_provider()

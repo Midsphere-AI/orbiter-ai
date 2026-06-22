@@ -14,10 +14,12 @@ Vault file layout: ``<16-byte salt><Fernet ciphertext>``
 from __future__ import annotations
 
 import base64
+import contextlib
 import getpass
 import hashlib
 import json
 import os
+import tempfile
 from pathlib import Path
 
 from cryptography.fernet import Fernet, InvalidToken
@@ -146,28 +148,63 @@ class Vault:
         self._cache = data
         return self._cache
 
-    def _save(self, data: dict[str, str]) -> None:
+    def _save(self, data: dict[str, str], *, new_passphrase: bool = False) -> None:
         """Encrypt and write *data* to the vault file.
 
-        The salt is generated once and reused across calls so that PBKDF2 key
-        derivation is only performed the first time.  The write is atomic: data
-        is written to a ``.tmp`` sibling and then renamed into place so a
-        partial write can never corrupt the live vault file.
+        A fresh salt is generated on the very first write and whenever
+        ``new_passphrase=True`` is passed (e.g. after a passphrase rotation),
+        so that changing the passphrase always re-encrypts under a new salt.
+        On routine incremental writes the existing salt is reused to avoid a
+        redundant 480k-iter PBKDF2 re-derivation.
+
+        The write is atomic: data is written to a temp file (mode 0o600) in the
+        same directory and then renamed into place so a partial write can never
+        corrupt the live vault file.  The vault directory is created with mode
+        0o700 (owner-only) so no other user can list or read files inside it.
         """
-        # Reuse the salt that was set when the vault was first loaded/created so
-        # we avoid an expensive 480k-iter PBKDF2 re-derivation on every write.
-        if self._salt is None:
+        # Regenerate salt on first-ever write or explicit passphrase change.
+        if self._salt is None or new_passphrase:
             self._salt = os.urandom(_SALT_LEN)
         fernet = self._get_fernet(self._salt)
         plaintext = json.dumps(data, sort_keys=True).encode()
         ciphertext = fernet.encrypt(plaintext)
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = self._path.with_suffix(".tmp")
+
+        parent = self._path.parent
+        # Create vault directory with owner-only permissions (0o700).
+        parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        # Tighten permissions on the directory in case it already existed with
+        # wider permissions (e.g. user created it manually). Best-effort.
+        with contextlib.suppress(OSError):
+            os.chmod(parent, 0o700)
+
+        payload = self._salt + ciphertext
+        # Write atomically: mkstemp gives us an O_CREAT|O_EXCL fd with mode
+        # 0o600 (owner read/write only), which prevents other users from ever
+        # reading the plaintext during the write window.
+        tmp_name: str | None = None
         try:
-            tmp_path.write_bytes(self._salt + ciphertext)
-            tmp_path.replace(self._path)
+            fd, tmp_name = tempfile.mkstemp(dir=parent, prefix=".vault_")
+            try:
+                os.write(fd, payload)
+            finally:
+                os.close(fd)
+            # mkstemp already creates with 0o600 on POSIX, but be explicit.
+            os.chmod(tmp_name, 0o600)
+            os.replace(tmp_name, self._path)
+            tmp_name = None  # replaced successfully, no cleanup needed
         except OSError as exc:
             raise VaultError(f"Failed to write vault to {self._path}: {exc}") from exc
+        finally:
+            # If replace failed, remove the orphaned temp file.
+            if tmp_name is not None:
+                with contextlib.suppress(OSError):
+                    os.unlink(tmp_name)
+
+        # Tighten the final vault file permissions in case an old vault existed
+        # with wider permissions before this write. Best-effort.
+        with contextlib.suppress(OSError):
+            os.chmod(self._path, 0o600)
+
         # Only update the in-memory cache after the write succeeds so a failure
         # never leaves the cache diverged from disk.
         self._cache = data

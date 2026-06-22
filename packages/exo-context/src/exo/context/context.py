@@ -186,6 +186,14 @@ class Context:
         # Remove child from registry so double-merge is impossible.
         self._children.remove(child)
 
+        # Break the state parent-chain reference so the child's ContextState no
+        # longer retains the parent's state after merge, allowing it to be
+        # garbage-collected once the caller drops the child handle.
+        # Note: child._parent is intentionally kept (not nulled) so that the
+        # double-merge guard above can still identify this child via identity.
+        if child._state._parent is not None:
+            child._state._parent = None
+
         logger.debug(
             "merged child %r into parent %r: %d state keys, token delta applied",
             child.task_id,

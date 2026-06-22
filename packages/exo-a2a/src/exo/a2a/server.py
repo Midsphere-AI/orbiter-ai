@@ -45,11 +45,23 @@ class A2ATaskStore(Protocol):
 
 
 class InMemoryTaskStore:
-    """Simple in-memory task store for development and testing."""
+    """Simple in-memory task store for development and testing.
 
-    __slots__ = ("_tasks",)
+    Completed tasks are not evicted by default in production stores. This
+    implementation caps the number of in-flight entries via an LRU-style
+    eviction so the dict does not grow unboundedly under sustained load.
 
-    def __init__(self) -> None:
+    Args:
+        max_tasks: Maximum number of task entries to retain. When the limit is
+            reached the oldest entry (by insertion order) is evicted. Default
+            is 10 000, which is generous enough that normal usage is unaffected
+            while still bounding memory use.
+    """
+
+    __slots__ = ("_max_tasks", "_tasks")
+
+    def __init__(self, max_tasks: int = 10_000) -> None:
+        self._max_tasks = max_tasks
         self._tasks: dict[str, dict[str, Any]] = {}
 
     async def get(self, task_id: str) -> dict[str, Any] | None:
@@ -57,12 +69,16 @@ class InMemoryTaskStore:
 
     async def save(self, task_id: str, data: dict[str, Any]) -> None:
         self._tasks[task_id] = data
+        # Evict oldest entries when the cap is exceeded.
+        if len(self._tasks) > self._max_tasks:
+            oldest = next(iter(self._tasks))
+            del self._tasks[oldest]
 
     async def delete(self, task_id: str) -> None:
         self._tasks.pop(task_id, None)
 
     def __repr__(self) -> str:
-        return f"InMemoryTaskStore(tasks={len(self._tasks)})"
+        return f"InMemoryTaskStore(tasks={len(self._tasks)}, max={self._max_tasks})"
 
 
 # ---------------------------------------------------------------------------
@@ -277,12 +293,13 @@ class A2AServer:
                 )
                 reason = exc.message if isinstance(exc, ExoError) else str(exc)
                 failed_status = A2ATaskStatus(state=TaskState.FAILED, reason=reason)
+                # Store a sanitized reason only — raw exc detail stays in server logs
+                # (logged above with exc_info=True) and is not surfaced to callers.
                 await server._task_store.save(
                     task_id,
                     {
                         "task_id": task_id,
                         "status": failed_status.model_dump(mode="json"),
-                        "error": str(exc),
                     },
                 )
                 return JSONResponse(
@@ -415,12 +432,13 @@ class A2AServer:
                         )
                         reason = exc.message if isinstance(exc, ExoError) else str(exc)
                         failed_status = A2ATaskStatus(state=TaskState.FAILED, reason=reason)
+                        # Store sanitized reason only — raw exc detail is already
+                        # logged above with exc_info=True and must not reach callers.
                         await server._task_store.save(
                             task_id,
                             {
                                 "task_id": task_id,
                                 "status": failed_status.model_dump(mode="json"),
-                                "error": str(exc),
                             },
                         )
                         yield (

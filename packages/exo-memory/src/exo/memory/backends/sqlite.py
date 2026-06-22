@@ -70,7 +70,9 @@ class SQLiteMemoryStore:
     ``~/.exo/memory.db``).
     """
 
-    __slots__ = ("_db", "_init_lock", "_initialized", "db_path")
+    # ``__weakref__`` lets callers register a ``weakref.finalize`` cleanup
+    # (e.g. to remove an auto-created temp directory when the store is GC'd).
+    __slots__ = ("__weakref__", "_db", "_init_lock", "_initialized", "db_path")
 
     def __init__(self, db_path: str | None = None) -> None:
         self.db_path = db_path if db_path is not None else _default_db_path()
