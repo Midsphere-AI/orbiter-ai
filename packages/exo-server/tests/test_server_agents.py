@@ -312,13 +312,38 @@ class TestReadWorkspaceFile:
 # ---------------------------------------------------------------------------
 
 
+def _all_paths(app) -> list[str]:
+    """Collect route paths, recursing into included routers.
+
+    FastAPI >=0.130 / Starlette >=1.0 keep ``include_router`` routes nested
+    under an ``_IncludedRouter`` mount instead of flattening them into
+    ``app.routes``, so a flat walk no longer sees them.
+    """
+    paths: list[str] = []
+
+    def walk(routes) -> None:
+        for r in routes:
+            if getattr(r, "path", None) is not None:
+                paths.append(r.path)
+            # _IncludedRouter mounts expose nested routes via original_router;
+            # plain Mounts via .routes.
+            nested = getattr(r, "original_router", None)
+            if nested is not None:
+                walk(nested.routes)
+            elif hasattr(r, "routes"):
+                walk(r.routes)
+
+    walk(app.routes)
+    return paths
+
+
 class TestRouterRegistration:
     def test_agent_router_prefix(self) -> None:
         assert agent_router.prefix == "/agents"
 
     def test_app_has_agent_routes(self) -> None:
         app = create_app()
-        paths = [r.path for r in app.routes if hasattr(r, "path")]  # type: ignore[union-attr]
+        paths = _all_paths(app)
         assert "/agents" in paths
         assert "/agents/{agent_name}" in paths
         assert "/agents/{agent_name}/workspace" in paths
